@@ -1651,7 +1651,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-semibold text-xs">
-                        โหมด LocalStorage ออฟไลน์
+                        ⚠️ ยังไม่ได้เชื่อมต่อฐานข้อมูล
                       </span>
                     )}
                   </div>
@@ -1821,9 +1821,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 {/* Cloud Mode Toggle */}
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between">
                   <div>
-                    <div className="font-bold text-slate-900">เปิดใช้งานระบบฐานข้อมูล Cloud (Cloud Sync Mode)</div>
+                    <div className="font-bold text-slate-900">เปิดใช้งานระบบฐานข้อมูล Supabase Cloud PostgreSQL 100%</div>
                     <div className="text-[11px] text-slate-500">
-                      เมื่อเปิดใช้งาน ข้อมูลจะถูกจัดเก็บลง Supabase Cloud โดยคงสำรองที่ LocalStorage เสมอ
+                      ระบบทำงานบนฐานข้อมูล Supabase Cloud PostgreSQL 100% (ข้อมูลจะถูกจัดเก็บบนคลาวด์แบบ Realtime ถาวร)
                     </div>
                   </div>
                   <label className="relative inline-flex items-center cursor-pointer">

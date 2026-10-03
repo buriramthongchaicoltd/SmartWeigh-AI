@@ -74,7 +74,30 @@
 
 ---
 
-## [2026-10-02] ปรับปรุงระบบชนบิลโซน 1–4 ครบวงจร (ชนอัตโนมัติจากเลขอ้างอิงเท่านั้น + ชนด้วยมือ) และระบบติดธงตรวจสอบงานอัตโนมัติทั้งหมดในระบบ (`🚩 รอตรวจรายการอัตโนมัติ`)
+## [2026-10-03] ตัดโหมด LocalStorage ออก 100% — ปรับระบบให้ใช้งานฐานข้อมูลจริง Supabase Cloud PostgreSQL ครบวงจร
+
+- **วัตถุประสงค์งาน:**
+  - ตอบโจทย์คำสั่งของผู้ใช้งาน: *"ตัด โหมด LocalStorage ออกไปเลยให้ใช้งาน ระบบฐานข้อมุลจริง แบบ 100%"*
+- **การเปลี่ยนแปลงที่ทำแบบเจาะจง (Targeted Changes):**
+  1. **`server.ts`**:
+     - อัปเดต `/api/database/sync-all` (รองรับทั้ง GET และ POST): ดึงข้อมูลครบทุกตารางจาก Supabase PostgreSQL ประกอบด้วย `orders`, `purchase_orders`, `stores`, `projects`, `billing_notes`, `line_inbox`, `app_users`, และ `system_config`
+     - เพิ่ม Endpoint `/api/database/save-record`: รองรับการ Upsert ข้อมูลแบบเดี่ยวลงตารางเป้าหมายบน Supabase
+     - เพิ่ม Endpoint `/api/database/delete-record`: รองรับการลบข้อมูล (Delete row by ID) ออกจากตารางบน Supabase โดยตรง
+     - เพิ่ม Endpoint `/api/database/save-batch`: รองรับการ Upsert ข้อมูลแบบ Chunk ละ 50 รายการลง Supabase PostgreSQL
+     - ใน LINE Webhook (`/api/line/webhook`): บันทึกรายการบิลที่เข้ามาใหม่ (`inboxItem`) ลงในตาราง `line_inbox` ของ Supabase โดยตรงทันที
+  2. **`src/App.tsx`**:
+     - ตัดการโหลดข้อมูลเริ่มต้นจาก `localStorage`: เปลี่ยนมาเรียก `fetchDatabaseData` (`/api/database/sync-all`) จากเซิร์ฟเวอร์และ Supabase PostgreSQL ทันทีที่เปิดหน้าเว็บ
+     - มีระบบตรวจสอบ Auto-migration ย้ายข้อมูลเก่าที่ตกค้างใน `localStorage` ขึ้น Supabase Cloud อัตโนมัติเมื่อตรวจพบครั้งแรก แล้วล้างแคช `localStorage` ออก
+     - แทนที่ `safeSaveToLocalStorage` ด้วย Debounced Database Auto-Sync: เมื่อมีการสร้าง แก้ไข หรือเปลี่ยนแปลงข้อมูลในระบบ ระบบจะซิงก์ตรงเข้าสู่ Supabase PostgreSQL ในเบื้องหลัง
+     - ผูกคำสั่ง `deleteRecordFromDb` กับทุกฟังก์ชันลบข้อมูล (`handleDeleteOrder`, `handleDeletePO`, `handleDeleteStore`, `handleDeleteProject`, `handleDeleteBillingNote`, `onDeleteInboxItem`) เพื่อให้คำสั่งลบมีผลกับฐานข้อมูลจริงทันที
+     - เพิ่มแถบสถานะ Live Indicator ด้านบนของหน้าจอ:
+       - `🟢 ระบบทำงานบนฐานข้อมูลจริง 100%: Supabase Cloud PostgreSQL` พร้อมแสดงเวลาที่ซิงก์ล่าสุดและปุ่ม `ซิงก์ฐานข้อมูล` แบบแมนนวล
+       - แถบเตือนสีส้มกรณีที่ยังไม่ได้ระบุ Supabase URL & Key เพื่อแนะนำให้ผู้ใช้ไปตั้งค่า
+  3. **`src/components/SystemSettingsView.tsx`**:
+     - ปรับข้อความจาก "โหมด LocalStorage ออฟไลน์" เป็น "⚠️ ยังไม่ได้เชื่อมต่อฐานข้อมูล"
+     - ปรับข้อความสวิตช์ฐานข้อมูลเป็น "เปิดใช้งานระบบฐานข้อมูล Supabase Cloud PostgreSQL 100% (ข้อมูลจะถูกจัดเก็บบนคลาวด์แบบ Realtime ถาวร)"
+
+---
 
 - **วัตถุประสงค์งาน:**
   - ตอบโจทย์คำสั่งของผู้ใช้งาน:

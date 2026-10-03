@@ -54,7 +54,7 @@ import {
   ensureSystemMasterAdmin,
   computeSystemNotifications
 } from './utils/systemConfig';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, RefreshCw, AlertTriangle, Database } from 'lucide-react';
 
 const STORAGE_ORDERS_KEY = 'autostore_real_orders_v2';
 const STORAGE_STORES_KEY = 'autostore_real_stores_v2';
@@ -237,146 +237,120 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
 };
 
 export default function App() {
-  // Main Data States with clean persistence
-  const [orders, setOrders] = useState<OrderRecord[]>(() => {
-    try {
-      localStorage.removeItem('autostore_orders_v1');
-      localStorage.removeItem('logistics_table_39cols_data');
-      const saved = localStorage.getItem(STORAGE_ORDERS_KEY);
-      const parsed: OrderRecord[] = saved ? JSON.parse(saved) : [];
-      return reconcileAndHealOrders(parsed);
-    } catch {
-      return [];
-    }
-  });
+  // Main Data States (100% Real Database Mode - Loaded directly from Supabase Cloud PostgreSQL)
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [stores, setStores] = useState<StoreMerchant[]>([]);
+  const [pos, setPos] = useState<PurchaseOrder[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [lineInbox, setLineInbox] = useState<LineBillInboxItem[]>([]);
+  const [users, setUsers] = useState<AppUser[]>(DEFAULT_USERS);
+  const [rolePermissions, setRolePermissions] = useState<Record<UserRole, RolePermissions>>(DEFAULT_ROLE_PERMISSIONS);
+  const [billingNotes, setBillingNotes] = useState<BillingNoteRecord[]>([]);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>(DEFAULT_SYSTEM_SETTINGS);
+  const [currentUserId, setCurrentUserId] = useState<string>(SYSTEM_MASTER_ADMIN.id);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+  const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
 
-  const [stores, setStores] = useState<StoreMerchant[]>(() => {
-    try {
-      localStorage.removeItem('autostore_merchants_v1');
-      const saved = localStorage.getItem(STORAGE_STORES_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  // Database Connection & Synchronization Status (100% Real Database Mode)
+  const [isDbLoaded, setIsDbLoaded] = useState<boolean>(false);
+  const [isDbConnected, setIsDbConnected] = useState<boolean>(false);
+  const [dbSyncTimestamp, setDbSyncTimestamp] = useState<string | null>(null);
+  const [isSyncingDb, setIsSyncingDb] = useState<boolean>(false);
 
-  const [pos, setPos] = useState<PurchaseOrder[]>(() => {
+  // Central Database Fetcher: Loads from Supabase Cloud PostgreSQL
+  const fetchDatabaseData = React.useCallback(async () => {
+    setIsSyncingDb(true);
     try {
-      const saved = localStorage.getItem(STORAGE_POS_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [projects, setProjects] = useState<ProjectRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PROJECTS_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [lineInbox, setLineInbox] = useState<LineBillInboxItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_LINE_INBOX_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Users, Role Permissions & System Settings
-  const [users, setUsers] = useState<AppUser[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_USERS_KEY);
-      const parsed: AppUser[] = saved ? JSON.parse(saved) : [];
-      return ensureSystemMasterAdmin(parsed);
-    } catch {
-      return DEFAULT_USERS;
-    }
-  });
-
-  const [rolePermissions, setRolePermissions] = useState<Record<UserRole, RolePermissions>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_ROLES_KEY);
-      if (!saved) return DEFAULT_ROLE_PERMISSIONS;
-      const parsed = JSON.parse(saved);
-      return {
-        admin: {
-          ...DEFAULT_ROLE_PERMISSIONS.admin,
-          ...(parsed.admin || {}),
-          allowedTabs: Array.from(
-            new Set([...DEFAULT_ROLE_PERMISSIONS.admin.allowedTabs, ...(parsed.admin?.allowedTabs || [])])
-          )
-        },
-        manager: {
-          ...DEFAULT_ROLE_PERMISSIONS.manager,
-          ...(parsed.manager || {}),
-          allowedTabs: Array.from(
-            new Set([...DEFAULT_ROLE_PERMISSIONS.manager.allowedTabs, ...(parsed.manager?.allowedTabs || [])])
-          )
-        },
-        user: { ...DEFAULT_ROLE_PERMISSIONS.user, ...(parsed.user || {}) }
-      };
-    } catch {
-      return DEFAULT_ROLE_PERMISSIONS;
-    }
-  });
-
-  const [billingNotes, setBillingNotes] = useState<BillingNoteRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_BILLING_NOTES_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [systemSettings, setSystemSettings] = useState<SystemSettings>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_SETTINGS_KEY);
-      if (!saved) return DEFAULT_SYSTEM_SETTINGS;
-      return normalizeSystemSettings(JSON.parse(saved));
-    } catch {
-      return DEFAULT_SYSTEM_SETTINGS;
-    }
-  });
-
-  const [currentUserId, setCurrentUserId] = useState<string>(() => {
-    try {
-      const savedId = localStorage.getItem(STORAGE_CURRENT_USER_KEY);
-      if (!savedId || savedId === 'USR-ADMIN-01' || savedId === 'USR-MGR-01' || savedId === 'USR-STAFF-01') {
-        return SYSTEM_MASTER_ADMIN.id;
+      const res = await fetch('/api/database/sync-all', { method: 'POST' });
+      if (!res.ok) {
+        setIsDbConnected(false);
+        setIsDbLoaded(true);
+        return;
       }
-      return savedId;
-    } catch {
-      return SYSTEM_MASTER_ADMIN.id;
-    }
-  });
+      const json = await res.json();
+      if (json.success && json.data) {
+        setIsDbConnected(true);
+        setDbSyncTimestamp(new Date().toLocaleTimeString('th-TH'));
 
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(() => {
-    try {
-      const savedSettings = localStorage.getItem(STORAGE_SETTINGS_KEY);
-      if (savedSettings) {
-        const parsed = JSON.parse(savedSettings);
-        return Boolean(parsed.requireLoginOnStart);
+        const d = json.data;
+        const hasDbData =
+          (d.orders?.length || 0) > 0 ||
+          (d.pos?.length || 0) > 0 ||
+          (d.stores?.length || 0) > 0 ||
+          (d.projects?.length || 0) > 0 ||
+          (d.billingNotes?.length || 0) > 0;
+
+        if (hasDbData) {
+          if (Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
+          if (Array.isArray(d.pos)) setPos(d.pos);
+          if (Array.isArray(d.stores)) setStores(d.stores);
+          if (Array.isArray(d.projects)) setProjects(d.projects);
+          if (Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
+          if (Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
+          if (Array.isArray(d.users) && d.users.length > 0) setUsers(ensureSystemMasterAdmin(d.users));
+          if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
+
+          // Clear legacy local storage once DB is successfully loaded
+          try {
+            localStorage.removeItem(STORAGE_ORDERS_KEY);
+            localStorage.removeItem(STORAGE_STORES_KEY);
+            localStorage.removeItem(STORAGE_POS_KEY);
+            localStorage.removeItem(STORAGE_PROJECTS_KEY);
+            localStorage.removeItem(STORAGE_LINE_INBOX_KEY);
+            localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
+          } catch {}
+        } else {
+          // If DB is newly connected and completely empty, check if user has old localStorage data to migrate
+          try {
+            const rawOrders = localStorage.getItem(STORAGE_ORDERS_KEY);
+            const rawStores = localStorage.getItem(STORAGE_STORES_KEY);
+            const rawPos = localStorage.getItem(STORAGE_POS_KEY);
+            const rawProjects = localStorage.getItem(STORAGE_PROJECTS_KEY);
+            const localOrders = rawOrders ? JSON.parse(rawOrders) : [];
+            const localStores = rawStores ? JSON.parse(rawStores) : [];
+            const localPos = rawPos ? JSON.parse(rawPos) : [];
+            const localProjects = rawProjects ? JSON.parse(rawProjects) : [];
+
+            if (localOrders.length > 0 || localStores.length > 0 || localPos.length > 0) {
+              await fetch('/api/database/migrate-local-to-cloud', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  orders: localOrders,
+                  stores: localStores,
+                  pos: localPos,
+                  projects: localProjects,
+                  billingNotes: []
+                })
+              });
+              setOrders(reconcileAndHealOrders(localOrders));
+              setStores(localStores);
+              setPos(localPos);
+              setProjects(localProjects);
+              localStorage.removeItem(STORAGE_ORDERS_KEY);
+              localStorage.removeItem(STORAGE_STORES_KEY);
+              localStorage.removeItem(STORAGE_POS_KEY);
+              localStorage.removeItem(STORAGE_PROJECTS_KEY);
+            }
+          } catch (e) {
+            console.warn('Auto-migration check error:', e);
+          }
+        }
+      } else {
+        setIsDbConnected(false);
       }
-      return false;
-    } catch {
-      return false;
+    } catch (err) {
+      console.warn('Failed to sync from database:', err);
+      setIsDbConnected(false);
+    } finally {
+      setIsDbLoaded(true);
+      setIsSyncingDb(false);
     }
-  });
+  }, []);
 
-  const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_DISMISSED_NOTIFS_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  useEffect(() => {
+    fetchDatabaseData();
+  }, [fetchDatabaseData]);
 
   // Active User & Current Role Permissions
   const currentUser = useMemo(() => {
@@ -436,38 +410,82 @@ export default function App() {
   // Toast Notification
   const [toast, setToast] = useState<{ message: string; type?: 'success' | 'info' } | null>(null);
 
-  // Sync to localStorage (with automatic 5MB quota protection so refreshing never loses bill records)
-  useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_ORDERS_KEY, orders);
-  }, [orders]);
+  // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
+  const saveDbTimerRef = React.useRef<Record<string, any>>({});
+
+  const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
+    if (saveDbTimerRef.current[table]) {
+      clearTimeout(saveDbTimerRef.current[table]);
+    }
+    saveDbTimerRef.current[table] = setTimeout(async () => {
+      try {
+        await fetch('/api/database/save-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table, records })
+        });
+      } catch (err) {
+        console.warn(`[DB Sync] Failed to sync ${table} to Supabase:`, err);
+      }
+    }, 1200);
+  }, []);
+
+  const deleteRecordFromDb = React.useCallback(async (table: string, id: string) => {
+    try {
+      await fetch('/api/database/delete-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table, id })
+      });
+    } catch (err) {
+      console.warn(`[DB Delete] Failed to delete ${id} from ${table}:`, err);
+    }
+  }, []);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_STORES_KEY, stores);
-  }, [stores]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('orders', orders);
+  }, [orders, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_POS_KEY, pos);
-  }, [pos]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('stores', stores);
+  }, [stores, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_PROJECTS_KEY, projects);
-  }, [projects]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('purchase_orders', pos);
+  }, [pos, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_LINE_INBOX_KEY, lineInbox);
-  }, [lineInbox]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('projects', projects);
+  }, [projects, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_USERS_KEY, users);
-  }, [users]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('billing_notes', billingNotes);
+  }, [billingNotes, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_ROLES_KEY, rolePermissions);
-  }, [rolePermissions]);
+    if (!isDbLoaded) return;
+    debouncedSyncToDb('line_inbox', lineInbox);
+  }, [lineInbox, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_SETTINGS_KEY, systemSettings);
-  }, [systemSettings]);
+    if (!isDbLoaded) return;
+    fetch('/api/database/save-record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        table: 'system_config',
+        record: {
+          config_key: 'system_settings',
+          config_value: systemSettings
+        }
+      })
+    }).catch(err => console.warn('[DB Sync] Failed to save system settings:', err));
+  }, [systemSettings, isDbLoaded]);
 
   useEffect(() => {
     safeSaveToLocalStorage(STORAGE_CURRENT_USER_KEY, currentUserId);
@@ -476,10 +494,6 @@ export default function App() {
   useEffect(() => {
     safeSaveToLocalStorage(STORAGE_DISMISSED_NOTIFS_KEY, dismissedNotifIds);
   }, [dismissedNotifIds]);
-
-  useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_BILLING_NOTES_KEY, billingNotes);
-  }, [billingNotes]);
 
   // Sync incoming bills from real LINE OA Webhook queue into browser localStorage
   const syncWebhookQueueToLocal = React.useCallback(async () => {
@@ -918,6 +932,7 @@ export default function App() {
     const orderIdsSet = new Set(targetNote.orderIds);
 
     setBillingNotes(prev => prev.filter(b => b.id !== billingNoteId));
+    deleteRecordFromDb('billing_notes', billingNoteId);
     setOrders(prevOrders => {
       const nextOrders = prevOrders.map(ord => {
         if (!orderIdsSet.has(ord.id)) return ord;
@@ -1492,6 +1507,7 @@ export default function App() {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการบิล`, 'info');
       return;
     }
+    deleteRecordFromDb('orders', id);
     setOrders(prev => {
       const target = prev.find(o => o.id === id);
       let remaining = prev.filter(o => o.id !== id);
@@ -1750,6 +1766,7 @@ export default function App() {
       return;
     }
     const targetPO = pos.find(p => p.id === id);
+    deleteRecordFromDb('purchase_orders', id);
     setPos(prev => prev.filter(p => p.id !== id));
     if (targetPO?.poNumber) {
       setOrders(prev =>
@@ -2018,6 +2035,7 @@ export default function App() {
       return;
     }
     const targetKey = storeToDelete.name.trim().toLowerCase();
+    deleteRecordFromDb('stores', storeToDelete.id);
     setStores(prev => prev.filter(s => s.id !== storeToDelete.id && s.name.trim().toLowerCase() !== targetKey));
     setOrders(prev => prev.map(o => o.storeId === storeToDelete.id ? { ...o, storeId: '' } : o));
     setPos(prev => prev.map(p => p.storeId === storeToDelete.id ? { ...p, storeId: '' } : p));
@@ -2184,6 +2202,7 @@ export default function App() {
       return;
     }
     const targetKey = (projectName || '').trim().toLowerCase();
+    deleteRecordFromDb('projects', id);
     setProjects(prev => prev.filter(p => p.id !== id && (!targetKey || p.name.trim().toLowerCase() !== targetKey)));
     showToast(`ลบโครงการ "${projectName || ''}" ออกจากทะเบียนเรียบร้อยแล้ว`);
   };
@@ -2372,6 +2391,55 @@ export default function App() {
 
         {/* Main Container */}
         <main className="flex-1 max-w-[1920px] w-full mx-auto p-3 md:p-4 space-y-4 overflow-x-hidden">
+          {/* 100% Real Database Mode Live Status Indicator */}
+          {isDbConnected ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-white border border-emerald-200/90 px-3.5 py-2 rounded-xl text-xs shadow-2xs">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-xs"></span>
+                <span className="font-bold text-slate-800">ระบบทำงานบนฐานข้อมูลจริง 100%:</span>
+                <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/60">
+                  Supabase Cloud PostgreSQL
+                </span>
+                {dbSyncTimestamp && (
+                  <span className="text-slate-500 hidden sm:inline">
+                    (ซิงก์ล่าสุด {dbSyncTimestamp})
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={fetchDatabaseData}
+                disabled={isSyncingDb}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition cursor-pointer disabled:opacity-50"
+                title="ดึงข้อมูลล่าสุดจากฐานข้อมูล Supabase"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingDb ? 'animate-spin' : ''}`} />
+                <span>{isSyncingDb ? 'กำลังซิงก์...' : 'ซิงก์ฐานข้อมูล'}</span>
+              </button>
+            </div>
+          ) : isDbLoaded ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200 px-3.5 py-2.5 rounded-xl text-xs text-amber-900 shadow-2xs">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <div>
+                  <span className="font-bold">ยังไม่ได้เชื่อมต่อฐานข้อมูล Supabase Cloud: </span>
+                  <span>กรุณาระบุ URL & Key ในหน้าตั้งค่าระบบ เพื่อเปิดใช้งานฐานข้อมูลจริงแบบ 100%</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('settings')}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold transition cursor-pointer shrink-0"
+              >
+                ไปตั้งค่าฐานข้อมูล
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 bg-white border border-slate-200 px-3.5 py-2 rounded-xl text-xs text-slate-600 shadow-2xs">
+              <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+              <span>กำลังเชื่อมต่อและโหลดข้อมูลจากฐานข้อมูล Supabase Cloud PostgreSQL...</span>
+            </div>
+          )}
           {/* KPI Statistics Bar shown ONLY on DO (39-Col) & Analytics views */}
           {(activeTab === 'orders' || activeTab === 'analytics') && (
             <StatSummaryCards
@@ -2401,6 +2469,7 @@ export default function App() {
                   return;
                 }
                 setLineInbox(prev => prev.filter(i => i.id !== id));
+                deleteRecordFromDb('line_inbox', id);
                 showToast('ลบรายการออกจากกล่องพักบิล LINE แล้ว');
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}

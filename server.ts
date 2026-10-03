@@ -18,7 +18,9 @@ import {
   mapProjectToSupabase,
   mapSupabaseToProject,
   mapBillingNoteToSupabase,
-  mapSupabaseToBillingNote
+  mapSupabaseToBillingNote,
+  mapLineInboxToSupabase,
+  mapSupabaseToLineInbox
 } from './src/utils/supabaseClient';
 
 dotenv.config();
@@ -1724,6 +1726,16 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         inboxItem.botReplyText = fallbackReply;
         inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, fallbackReply);
       }
+
+      // Persist directly to Supabase line_inbox table (100% Real Database)
+      try {
+        const client = getSupabaseClient();
+        if (client) {
+          await client.from('line_inbox').upsert(mapLineInboxToSupabase(inboxItem), { onConflict: 'id' });
+        }
+      } catch (dbErr) {
+        console.warn('[LINE Webhook] Failed to auto-save inboxItem to Supabase line_inbox table:', dbErr);
+      }
     }
   } catch (err) {
     console.error('LINE Webhook handler error:', err);
@@ -2331,8 +2343,8 @@ app.post('/api/database/migrate-local-to-cloud', async (req: Request, res: Respo
   }
 });
 
-// 6. Sync All Data from Supabase Cloud to Client
-app.post('/api/database/sync-all', async (req: Request, res: Response) => {
+// 6. Sync All Data from Supabase Cloud to Client (Supports both GET & POST)
+app.all('/api/database/sync-all', async (req: Request, res: Response) => {
   try {
     const client = getSupabaseClient();
     if (!client) {
@@ -2342,12 +2354,15 @@ app.post('/api/database/sync-all', async (req: Request, res: Response) => {
       });
     }
 
-    const [ordersRes, posRes, storesRes, projectsRes, billingNotesRes] = await Promise.all([
+    const [ordersRes, posRes, storesRes, projectsRes, billingNotesRes, lineInboxRes, usersRes, configRes] = await Promise.all([
       client.from('orders').select('*').order('created_at', { ascending: false }).limit(2000),
       client.from('purchase_orders').select('*').order('created_at', { ascending: false }),
       client.from('stores').select('*').order('name', { ascending: true }),
       client.from('projects').select('*').order('name', { ascending: true }),
-      client.from('billing_notes').select('*').order('created_at', { ascending: false })
+      client.from('billing_notes').select('*').order('created_at', { ascending: false }),
+      client.from('line_inbox').select('*').order('received_at', { ascending: false }).limit(500),
+      client.from('app_users').select('*').order('created_at', { ascending: true }),
+      client.from('system_config').select('*')
     ]);
 
     const mappedOrders = (ordersRes.data || []).map(mapSupabaseToOrder);
@@ -2355,6 +2370,15 @@ app.post('/api/database/sync-all', async (req: Request, res: Response) => {
     const mappedStores = (storesRes.data || []).map(mapSupabaseToStore);
     const mappedProjects = (projectsRes.data || []).map(mapSupabaseToProject);
     const mappedBillingNotes = (billingNotesRes.data || []).map(mapSupabaseToBillingNote);
+    const mappedLineInbox = (lineInboxRes.data || []).map(mapSupabaseToLineInbox);
+
+    let systemSettings = null;
+    if (configRes.data && configRes.data.length > 0) {
+      const cfgRow = configRes.data.find((c: any) => c.config_key === 'system_settings');
+      if (cfgRow?.config_value) {
+        systemSettings = cfgRow.config_value;
+      }
+    }
 
     return res.json({
       success: true,
@@ -2363,20 +2387,137 @@ app.post('/api/database/sync-all', async (req: Request, res: Response) => {
         pos: mappedPOs,
         stores: mappedStores,
         projects: mappedProjects,
-        billingNotes: mappedBillingNotes
+        billingNotes: mappedBillingNotes,
+        lineInbox: mappedLineInbox,
+        users: usersRes.data || [],
+        systemSettings
       },
       counts: {
         orders: mappedOrders.length,
         pos: mappedPOs.length,
         stores: mappedStores.length,
         projects: mappedProjects.length,
-        billingNotes: mappedBillingNotes.length
+        billingNotes: mappedBillingNotes.length,
+        lineInbox: mappedLineInbox.length,
+        users: (usersRes.data || []).length
       },
       syncedAt: new Date().toISOString()
     });
   } catch (err: any) {
     console.error('Sync error:', err);
     return res.status(500).json({ success: false, error: err?.message || 'เกิดข้อผิดพลาดในการซิงค์ข้อมูล' });
+  }
+});
+
+// 7. Save Single Record Directly to Supabase (100% Real Database Persistence)
+app.post('/api/database/save-record', async (req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'Database not connected' });
+    }
+
+    const { table, record } = req.body;
+    if (!table || !record) {
+      return res.status(400).json({ success: false, error: 'Missing table or record' });
+    }
+
+    let targetTable = table;
+    let dbRow: any = record;
+
+    if (table === 'orders') dbRow = mapOrderToSupabase(record);
+    else if (table === 'purchase_orders' || table === 'pos') {
+      targetTable = 'purchase_orders';
+      dbRow = mapPOToSupabase(record);
+    } else if (table === 'stores') dbRow = mapStoreToSupabase(record);
+    else if (table === 'projects') dbRow = mapProjectToSupabase(record);
+    else if (table === 'line_inbox') dbRow = mapLineInboxToSupabase(record);
+    else if (table === 'billing_notes') dbRow = mapBillingNoteToSupabase(record);
+    else if (table === 'app_users') dbRow = record;
+    else if (table === 'system_config') {
+      dbRow = {
+        config_key: record.config_key || 'system_settings',
+        config_value: record.config_value || record,
+        updated_at: new Date().toISOString()
+      };
+    }
+
+    const { error } = await client.from(targetTable).upsert(dbRow, { onConflict: targetTable === 'system_config' ? 'config_key' : 'id' });
+    if (error) {
+      console.error(`DB Save Error on ${targetTable}:`, error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    return res.json({ success: true, message: `Record saved to ${targetTable}` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 8. Delete Single Record Directly from Supabase
+app.post('/api/database/delete-record', async (req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'Database not connected' });
+    }
+
+    const { table, id } = req.body;
+    if (!table || !id) {
+      return res.status(400).json({ success: false, error: 'Missing table or id' });
+    }
+
+    let targetTable = table;
+    if (table === 'pos') targetTable = 'purchase_orders';
+
+    const { error } = await client.from(targetTable).delete().eq('id', id);
+    if (error) {
+      console.error(`DB Delete Error on ${targetTable}:`, error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+
+    return res.json({ success: true, message: `Record deleted from ${targetTable}` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 9. Batch Upsert Records to Supabase
+app.post('/api/database/save-batch', async (req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'Database not connected' });
+    }
+
+    const { table, records } = req.body;
+    if (!table || !Array.isArray(records)) {
+      return res.status(400).json({ success: false, error: 'Missing table or records array' });
+    }
+
+    let targetTable = table;
+    let mapper: (r: any) => any = (r) => r;
+
+    if (table === 'orders') mapper = mapOrderToSupabase;
+    else if (table === 'purchase_orders' || table === 'pos') {
+      targetTable = 'purchase_orders';
+      mapper = mapPOToSupabase;
+    } else if (table === 'stores') mapper = mapStoreToSupabase;
+    else if (table === 'projects') mapper = mapProjectToSupabase;
+    else if (table === 'line_inbox') mapper = mapLineInboxToSupabase;
+    else if (table === 'billing_notes') mapper = mapBillingNoteToSupabase;
+
+    const rows = records.map(mapper);
+    const chunkSize = 50;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      const { error } = await client.from(targetTable).upsert(chunk, { onConflict: 'id' });
+      if (error) throw error;
+    }
+
+    return res.json({ success: true, count: rows.length });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
