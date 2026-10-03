@@ -1928,39 +1928,40 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
 
             <form onSubmit={handleSaveDriveConfig} className="grid grid-cols-1 lg:grid-cols-12 gap-4 text-xs">
               <div className="lg:col-span-7 space-y-3.5">
-                {/* Connection Mode Switcher */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1.5">
-                    รูปแบบการเชื่อมต่อ Google Drive
-                  </label>
-                  <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
+
+                {/* ─── GAS URL — แสดงอยู่เสมอ ─── */}
+                <div className="p-3.5 rounded-xl bg-emerald-50 border-2 border-emerald-400 space-y-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Sparkles className="w-4 h-4 text-emerald-600" />
+                    <span className="font-bold text-emerald-900 text-xs">Google Apps Script Web App URL</span>
+                    <span className="text-rose-500 font-bold">*</span>
+                  </div>
+                  <input
+                    type="url"
+                    value={driveConfig.gasWebAppUrl ?? ''}
+                    onChange={e => setDriveConfig(prev => ({ ...prev, gasWebAppUrl: e.target.value, connectionMode: 'gas' }))}
+                    placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
+                    className="w-full px-3 py-2 rounded-xl border border-emerald-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-600 bg-white"
+                  />
+                  <p className="text-[11px] text-emerald-800">
+                    วาง URL ที่ได้จากการ Deploy ใน Google Apps Script ลงที่นี่ได้เลย (ลงท้ายด้วย <code>/exec</code>)
+                  </p>
+                  <div className="flex items-center justify-between pt-1">
                     <button
                       type="button"
-                      onClick={() => setDriveConfig(prev => ({ ...prev, connectionMode: 'gas' }))}
-                      className={`py-2 px-3 rounded-lg font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 ${
-                        driveConfig.connectionMode === 'gas'
-                          ? 'bg-blue-600 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900 bg-transparent'
-                      }`}
+                      onClick={() => {
+                        navigator.clipboard.writeText(GAS_SCRIPT_TEMPLATE);
+                        showToast('คัดลอกโค้ด Google Apps Script (Code.gs) เรียบร้อยแล้ว!');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shadow-2xs"
                     >
-                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                      <span>⚡ Google Apps Script (แนะนำ — ง่ายสุด)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDriveConfig(prev => ({ ...prev, connectionMode: 'service_account' }))}
-                      className={`py-2 px-3 rounded-lg font-bold text-xs transition cursor-pointer flex items-center justify-center gap-1.5 ${
-                        driveConfig.connectionMode === 'service_account'
-                          ? 'bg-blue-600 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900 bg-transparent'
-                      }`}
-                    >
-                      <Key className="w-3.5 h-3.5" />
-                      <span>🔑 Google Service Account</span>
+                      <Copy className="w-3 h-3" />
+                      <span>คัดลอกโค้ด Code.gs สำหรับ script.google.com</span>
                     </button>
                   </div>
                 </div>
 
+                {/* ─── Root Folder ID ─── */}
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
                     Google Drive Root Folder ID <span className="text-rose-500">*</span>
@@ -1977,85 +1978,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   </p>
                 </div>
 
-                {driveConfig.connectionMode === 'gas' ? (
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        Google Apps Script Web App URL <span className="text-rose-500">*</span>
-                      </label>
-                      <input
-                        type="url"
-                        value={driveConfig.gasWebAppUrl}
-                        onChange={e => setDriveConfig(prev => ({ ...prev, gasWebAppUrl: e.target.value }))}
-                        placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-blue-500 bg-white"
-                      />
-                      <p className="text-[11px] text-slate-500 mt-1">
-                        URL เว็บแอปที่ได้จากการ Deploy ใน Google Apps Script (ลงท้ายด้วย <code>/exec</code>)
-                      </p>
-                    </div>
-
-                    {/* GAS Quick Setup Card with 1-click Copy */}
-                    <div className="p-3.5 rounded-xl bg-blue-50/70 border border-blue-200/80 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-blue-900 text-xs flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4 text-blue-600" />
-                          วิธีติดตั้ง Google Apps Script (ทำครั้งเดียว 1 นาที)
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(GAS_SCRIPT_TEMPLATE);
-                            showToast('คัดลอกโค้ด Google Apps Script (Code.gs) เรียบร้อยแล้ว!');
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] flex items-center gap-1 transition cursor-pointer shadow-2xs"
-                        >
-                          <Copy className="w-3 h-3" />
-                          <span>คัดลอกโค้ด Code.gs</span>
-                        </button>
-                      </div>
-                      <ol className="text-[11px] text-blue-950 space-y-1 list-decimal list-inside leading-relaxed">
-                        <li>เปิด <strong>script.google.com</strong> แล้วกด <strong>+ โครงการใหม่</strong></li>
-                        <li>กดปุ่ม <strong>"คัดลอกโค้ด Code.gs"</strong> ด้านบน แล้วนำไปวางทับในหน้าต่างโค้ดทั้งหมด</li>
-                        <li>กด <strong>การทำให้ใช้งานได้ (Deploy)</strong> &gt; <strong>การทำให้ใช้งานได้รายการใหม่</strong> &gt; เลือก <strong>เว็บแอป (Web app)</strong></li>
-                        <li>ตั้งค่า Execute as: <strong>ฉัน (Me)</strong> และ Who has access: <strong>ทุกคน (Anyone)</strong></li>
-                        <li>กด Deploy แล้วคัดลอก <strong>URL เว็บแอป (/exec)</strong> มาวางในช่องด้านบนได้ทันที!</li>
-                      </ol>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        Google Service Account Email
-                      </label>
-                      <input
-                        type="email"
-                        value={driveConfig.serviceAccountEmail}
-                        onChange={e => setDriveConfig(prev => ({ ...prev, serviceAccountEmail: e.target.value }))}
-                        placeholder="service-account@project.iam.gserviceaccount.com"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-blue-500 bg-white"
-                      />
-                      <p className="text-[11px] text-slate-500 mt-1">
-                        อีเมลของ Service Account (ต้องแชร์สิทธิ์ <strong>Editor</strong> ในโฟลเดอร์หลักให้เมลนี้ด้วย)
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="block font-bold text-slate-700 mb-1">
-                        Service Account Private Key (PEM format หรือวางทั้งไฟล์ JSON ด้านล่าง)
-                      </label>
-                      <textarea
-                        rows={3}
-                        value={driveConfig.serviceAccountPrivateKey}
-                        onChange={e => setDriveConfig(prev => ({ ...prev, serviceAccountPrivateKey: e.target.value }))}
-                        placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----"
-                        className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-[11px] text-slate-900 focus:outline-none focus:border-blue-500 bg-white"
-                      />
-                    </div>
-                  </>
-                )}
-
+                {/* ─── Save & Enable ─── */}
                 <div className="flex items-center justify-between pt-2">
                   <label className="flex items-center gap-2 font-bold text-slate-700 cursor-pointer">
                     <input
