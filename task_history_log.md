@@ -4,6 +4,26 @@
 
 ---
 
+## [2026-10-03] Full Historical Bill Recovery: LINE API Image Download + Gemini Re-Scan + Drive ZONE_00 Upload
+
+### ปัญหาที่ได้รับรายงาน
+"จะมาบอกว่า ระบทำงานถุกต้องได้ไง ภาพมันยังไม่ได้มีใน Google Drive เลย มันควร กลับไปดึง รูปมาอ่านใหม่ และ เก็บเข้า Google Drive และส่ง URL ของรูป ไปเก็บ ใน Supabase ให้ถุกต้อง ทั้งหมดที่ดึงมาก่อนหน้านี้"
+
+### สาเหตุที่ตรวจพบ (Root Cause)
+1. บิลเก่า 69 ใบเดิมที่เคยดึงมาจาก LINE ก่อนหน้านี้ ในตาราง `line_inbox` ไม่มีรูปภาพถูกส่งขึ้น Google Drive จริง (มีเพียงค่าว่างหรือ `drive_file_id` ไม่ถูกต้อง)
+2. เมื่อกดปุ่ม "ซิงก์รูปเข้า Google Drive" เดิม คำสั่ง SQL มีเงื่อนไข `.not('image_url', 'is', null)` ซึ่งหาก `image_url` ถูกเคลียร์ออกไปแล้ว ทำให้ไม่พบแถวที่ตรงเงื่อนไขและรายงานว่า "ไม่มีรายการค้างอยู่" ทั้งที่รูปยังไม่ได้ขึ้น Drive จริง
+
+### การแก้ไข
+1. **อัปเกรด `POST /api/drive/sync-inbox-images` ใน `server.ts`:**
+   - เพิ่มระบบดาวน์โหลดภาพย้อนหลังจาก LINE Messaging API โดยใช้ `line_message_id` สำหรับทุกบิลที่ไม่มีไฟล์รูปใน Supabase
+   - เพิ่มระบบสแกนเอกสารใหม่ด้วย Gemini 3.8 Flash Vision อัตโนมัติ เพื่อดึงข้อมูลเลขที่บิล, ชื่อร้านค้า, ประเภทเอกสาร และน้ำหนัก
+   - อัปโหลดไฟล์ภาพบิลเข้าสู่ **Google Drive โฟลเดอร์ `ZONE_00`** อย่างถูกต้อง พร้อมตั้งชื่อตามมาตรฐาน `LINE_YYYY-MM-DD_DocNo.jpg`
+   - นำ `drive_file_id` และ `drive_web_view_link` (URL รูปบน Google Drive) อัปเดตกลับเข้าสู่ Supabase `line_inbox` พร้อมล้าง base64 ออกจากฐานข้อมูลตามสถาปัตยกรรม Zero-Junk
+2. **ปรับปรุง UI `LineInboxView.tsx`:**
+   - เพิ่มปุ่ม **"🔄 ดึงรูป LINE & สแกนใหม่ & ขึ้น Drive ทั้งหมด"** (Force re-scan and full Drive sync) บนแถบเครื่องมือ
+
+---
+
 ## [2026-10-03] Persistent Settings across Cloud Deploys & Masked Secret Reassurance
 
 ### ปัญหาที่ได้รับรายงาน

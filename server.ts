@@ -3682,9 +3682,9 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   }
 });
 
-// 7. Sync Inbox Images to Google Drive ZONE_00 (POST /api/drive/sync-inbox-images)
-// Uploads ALL line_inbox bill images that are NOT yet in Google Drive
-app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) => {
+// 7. Sync & Rescan Inbox Images to Google Drive ZONE_00 (POST /api/drive/sync-inbox-images)
+// Downloads images from Supabase or LINE API, re-scans with Gemini AI, uploads to Google Drive, and stores links in Supabase
+app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => {
   try {
     const driveCfg = getStoredDriveConfig();
     if (!driveCfg.isEnabled || !driveCfg.rootFolderId) {
@@ -3696,25 +3696,33 @@ app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
     }
 
-    // Fetch inbox items that have image_url but no drive_file_id yet
-    const { data: rows, error } = await client
+    const forceAll = Boolean(req.body?.force);
+    const rescanAi = Boolean(req.body?.rescanAi);
+
+    // Fetch inbox items
+    let query = client
       .from('line_inbox')
-      .select('id, image_url, detected_doc_type, doc_number, store_name, received_at, drive_file_id')
-      .is('drive_file_id', null)
-      .not('image_url', 'is', null)
+      .select('id, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
       .order('received_at', { ascending: false })
-      .limit(50);
+      .limit(100);
+
+    if (!forceAll) {
+      query = query.or('drive_file_id.is.null,drive_file_id.eq.');
+    }
+
+    const { data: rows, error } = await query;
 
     if (error) {
       return res.status(500).json({ success: false, error: `ดึงข้อมูลจาก Supabase ไม่ได้: ${error.message}` });
     }
 
-    const pending = (rows || []).filter(r => r.image_url && r.image_url.length > 10);
+    const pending = rows || [];
     if (pending.length === 0) {
       return res.json({ success: true, uploadedCount: 0, message: 'รูปบิลทั้งหมดเชื่อมต่อกับ Google Drive แล้ว ไม่มีรายการค้างอยู่' });
     }
 
     let uploadedCount = 0;
+    let aiRescanCount = 0;
     const errors: string[] = [];
 
     // Ensure ZONE_00 folder exists
@@ -3730,11 +3738,76 @@ app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) =>
 
     for (const row of pending) {
       try {
-        const safeDocNo = (row.doc_number || row.id).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+        let base64Image = row.image_url;
+        let mimeType = 'image/jpeg';
+
+        // If no image_url in Supabase, fetch original image directly from LINE Messaging API via line_message_id
+        if ((!base64Image || base64Image.length < 50) && row.line_message_id && lineBotConfig.channelAccessToken) {
+          try {
+            const imgResp = await fetch(`https://api-data.line.me/v2/bot/message/${row.line_message_id}/content`, {
+              headers: { Authorization: `Bearer ${lineBotConfig.channelAccessToken}` }
+            });
+            if (imgResp.ok) {
+              mimeType = imgResp.headers.get('content-type') || 'image/jpeg';
+              const arrayBuf = await imgResp.arrayBuffer();
+              const b64 = Buffer.from(arrayBuf).toString('base64');
+              base64Image = `data:${mimeType};base64,${b64}`;
+              console.log(`[Drive Sync] Downloaded image for message ${row.line_message_id} from LINE API ✅`);
+            } else {
+              console.warn(`[Drive Sync] LINE API returned ${imgResp.status} for message ${row.line_message_id}`);
+            }
+          } catch (dlErr: any) {
+            console.warn(`[Drive Sync] Failed to download from LINE for message ${row.line_message_id}:`, dlErr?.message);
+          }
+        }
+
+        if (!base64Image || base64Image.length < 50) {
+          errors.push(`บิล ${row.id}: ไม่มีไฟล์ภาพและโหลดจาก LINE ไม่สำเร็จ`);
+          continue;
+        }
+
+        // Optional AI Re-scan with Gemini
+        let updatedExtractedData = row.extracted_data || {};
+        let updatedDocNo = row.doc_number;
+        let updatedDocType = row.detected_doc_type || 'delivery_order';
+        let updatedStore = row.store_name;
+
+        if (rescanAi || !updatedDocNo) {
+          try {
+            const aiResult = await analyzeLineBillWithGemini(
+              base64Image,
+              mimeType,
+              row.line_sender_name || '',
+              row.line_group_name || ''
+            );
+            if (aiResult && aiResult.isBillDocument) {
+              updatedDocType = aiResult.detectedDocType;
+              updatedExtractedData = {
+                ...updatedExtractedData,
+                ...aiResult.extractedData,
+                lineInboxId: row.id,
+                lineSenderName: row.line_sender_name,
+                lineGroupName: row.line_group_name,
+                lineReceivedAt: row.received_at
+              };
+              const rawDocNo =
+                updatedExtractedData.col17 ||
+                updatedExtractedData.col6 ||
+                updatedExtractedData.col4 ||
+                '';
+              if (rawDocNo) updatedDocNo = rawDocNo;
+              if (aiResult.storeSuggestion?.name) updatedStore = aiResult.storeSuggestion.name;
+              aiRescanCount++;
+            }
+          } catch (aiErr: any) {
+            console.warn(`[Drive Sync] AI re-scan warning for ${row.id}:`, aiErr?.message);
+          }
+        }
+
+        // Upload to Google Drive ZONE_00
+        const safeDocNo = (updatedDocNo || row.id).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
         const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
         const fileName = `LINE_${dateStr}_${safeDocNo}.jpg`;
-        const base64Image = row.image_url;
-        const mimeType = base64Image.startsWith('data:') ? base64Image.split(';')[0].split(':')[1] : 'image/jpeg';
 
         let driveResult: any = null;
 
@@ -3758,32 +3831,42 @@ app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) =>
 
         if (driveResult && (driveResult.fileId || driveResult.success)) {
           const fileId = driveResult.fileId;
-          // Update Drive info AND clear image_url (delete base64 from Supabase - it belongs in Drive only!)
+          const webViewLink = driveResult.webViewLink || (fileId ? `https://drive.google.com/file/d/${fileId}/view` : null);
+
+          // Update Supabase with Drive info and clear base64 from image_url
           await client.from('line_inbox').update({
             drive_file_id: fileId || null,
             drive_file_location: 'zone_00',
-            drive_web_view_link: driveResult.webViewLink || null,
-            image_url: null  // Free up Supabase storage — image is now safely in Google Drive
+            drive_web_view_link: webViewLink,
+            doc_number: updatedDocNo || null,
+            detected_doc_type: updatedDocType,
+            store_name: updatedStore || null,
+            extracted_data: updatedExtractedData,
+            image_url: null // Never store base64 in Supabase! Keep it in Google Drive only.
           }).eq('id', row.id);
+
           uploadedCount++;
-          console.log(`[Drive Sync Inbox] Uploaded & cleared base64 from Supabase: ${fileName} (${fileId})`);
+          console.log(`[Drive Sync] Saved to Drive & updated Supabase: ${fileName} (${fileId})`);
+        } else {
+          errors.push(`บิล ${row.id}: อัปโหลดขึ้น Drive ไม่สำเร็จ (${driveResult?.error || 'ไม่มีผลลัพธ์'})`);
         }
-      } catch (uploadErr: any) {
-        errors.push(`${row.id}: ${uploadErr?.message || 'upload error'}`);
-        console.warn('[Drive Sync Inbox] Upload error for row', row.id, uploadErr?.message);
+      } catch (itemErr: any) {
+        errors.push(`บิล ${row.id}: ${itemErr?.message || 'เกิดข้อผิดพลาด'}`);
+        console.warn(`[Drive Sync] Item error ${row.id}:`, itemErr?.message);
       }
     }
 
     return res.json({
       success: true,
       uploadedCount,
-      pendingCount: pending.length,
-      errorCount: errors.length,
-      message: `อัปโหลดรูปบิลขึ้น Google Drive ZONE_00 สำเร็จ ${uploadedCount}/${pending.length} รายการ${errors.length > 0 ? ` (เกิดข้อผิดพลาด ${errors.length} รายการ)` : ''}`
+      aiRescanCount,
+      totalPending: pending.length,
+      errors: errors.slice(0, 5),
+      message: `ดึงรูปและอัปโหลดขึ้น Google Drive สำเร็จ ${uploadedCount}/${pending.length} ใบ (อ่านข้อมูลใหม่ด้วย AI ${aiRescanCount} ใบ)${errors.length > 0 ? ` [พบปัญหา ${errors.length} รายการ]` : ''}`
     });
   } catch (err: any) {
-    console.error('Drive Sync Inbox Images Error:', err);
-    res.status(500).json({ success: false, error: err?.message || 'การซิงก์รูปบิลขึ้น Drive ล้มเหลว' });
+    console.error('Drive Sync Error:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'การดึงรูปและซิงก์ Drive ขัดข้อง' });
   }
 });
 

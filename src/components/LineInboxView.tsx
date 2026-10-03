@@ -125,10 +125,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
   };
 
-  const handleSyncImagesToDrive = async () => {
+  const handleSyncImagesToDrive = async (force: boolean = false) => {
     setIsSyncingDrive(true);
     try {
-      const res = await fetch('/api/drive/sync-inbox-images', { method: 'POST' });
+      const res = await fetch('/api/drive/sync-inbox-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force, rescanAi: true })
+      });
       const data = await res.json();
       if (data.success) {
         showToast(data.message || `ซิงก์รูปภาพขึ้น Google Drive สำเร็จ ${data.uploadedCount} รายการ!`);
@@ -390,13 +394,24 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
             <button
               type="button"
-              onClick={handleSyncImagesToDrive}
+              onClick={() => handleSyncImagesToDrive(false)}
               disabled={isSyncingDrive}
               className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-              title="ส่งภาพบิลทั้งหมดที่ยังไม่ได้ขึ้น Drive ไปยัง Google Drive โฟลเดอร์ ZONE_00"
+              title="ส่งภาพบิลที่ยังไม่ได้ขึ้น Drive ไปยัง Google Drive โฟลเดอร์ ZONE_00"
             >
               <Cloud className={`w-3.5 h-3.5 text-emerald-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-              <span>{isSyncingDrive ? 'กำลังส่งภาพขึ้น Drive...' : '📁 ซิงก์รูปเข้า Google Drive'}</span>
+              <span>{isSyncingDrive ? 'กำลังส่งภาพ...' : '📁 ซิงก์รูปเข้า Google Drive'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSyncImagesToDrive(true)}
+              disabled={isSyncingDrive}
+              className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              title="ดึงภาพทั้งหมดจาก LINE มาสแกน AI ใหม่และอัปโหลดขึ้น Google Drive ZONE_00 พร้อมผูก URL ลง Supabase ทั้งหมด"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
+              <span>{isSyncingDrive ? 'กำลังดึงรูป & สแกนใหม่...' : '🔄 ดึงรูป LINE & สแกนใหม่ & ขึ้น Drive ทั้งหมด'}</span>
             </button>
 
             <button
