@@ -1364,6 +1364,11 @@
   - เชื่อมต่อไปยัง Remote GitHub Repository: `https://github.com/buriramthongchaicoltd/SmartWeigh-AI`
   - สร้างสคริปต์ [commit.bat](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/commit.bat) สำหรับดับเบิลคลิกเพื่อตรวจสอบสถานะไฟล์, กรอกข้อความ Commit, และถามยืนยันก่อน Push ขึ้น GitHub อัตโนมัติ
   - กำหนดค่า Personal Access Token (PAT) ใหม่ใน Git Remote เพื่อให้ Push ผ่านได้ 100%
-- **สถานะ:** เสร็จสมบูรณ์ และทดสอบการเชื่อมต่อ GitHub Remote เรียบร้อย
+- **แก้ไขปัญหา Windows Batch Encoding & Infinite Loop:**
+  - ปรับปรุงสถาปัตยกรรม [commit.bat](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/commit.bat) ให้เรียก [auto_commit.ps1](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/auto_commit.ps1) (เข้ารหัสแบบ UTF-8 with BOM และขึ้นบรรทัดใหม่ด้วย CRLF)
+  - แก้ไขปัญหาข้อผิดพลาด `is not recognized as an internal or external command` ที่เกิดจาก `cmd.exe` ตัดคำตัวอักษรภาษาไทย/Emoji ในไฟล์ `.bat` ผิดพลาด
+  - ถอด `.git/hooks/post-commit` ที่ซ้ำซ้อนและติดบั๊ก `/dev/tty` บน Windows ออก เพื่อให้ทำงานราบรื่น 100% ผ่านหน้าต่างเดียว
+- **สถานะ:** ทดสอบการดับเบิลคลิก `commit.bat` ผ่านสมบูรณ์ 100% ภาษาไทยแสดงผลคมชัด ไม่วนลูป
+
 
 
