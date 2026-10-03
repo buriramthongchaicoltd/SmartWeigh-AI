@@ -2972,6 +2972,7 @@ const DRIVE_CONFIG_FILE_PATH = path.resolve(__dirname, '.google_drive_config.jso
 
 interface ServerDriveConfig {
   rootFolderId: string;
+  rootFolderName?: string;
   connectionMode?: 'gas' | 'service_account';
   gasWebAppUrl?: string;
   serviceAccountEmail?: string;
@@ -3016,6 +3017,7 @@ function getStoredDriveConfig(): ServerDriveConfig {
 
   return {
     rootFolderId: (fileConfig.rootFolderId || process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || '').trim(),
+    rootFolderName: fileConfig.rootFolderName || '',
     connectionMode: connMode,
     gasWebAppUrl: gasUrl,
     serviceAccountEmail: saEmail.trim(),

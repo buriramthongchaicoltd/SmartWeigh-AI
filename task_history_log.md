@@ -20,8 +20,9 @@
    - เพิ่ม `POST /api/startup/retest` (กู้คืน Config จาก Supabase แล้วรัน `runStartupSelfTest` คืนค่าผลสดทันที)
    - ปรับ `GET /api/drive/config` ให้ส่ง `isConnected`, `lastTestedStatus`, `lastTestedMessage`, และ `rootFolderName` กลับไปที่ UI
    - ปรับปรุง `runStartupSelfTest()` ในส่วน Drive ให้ตรวจจับกรณีระบุ GAS URL แต่ยังไม่ได้ระบุ `rootFolderId` พร้อมบันทึก `rootFolderName` ลง Config ถาวร
+   - เพิ่ม `rootFolderName?: string` ลงใน Interface `ServerDriveConfig` เพื่อแก้ไข TypeScript Error `Property 'rootFolderName' does not exist`
 2. **`src/components/SystemSettingsView.tsx`**:
-   - ปรับ `loadDriveConfig` และ `fetchStartupStatus` ให้ Sync ค่าสถานะ `isConnected` และข้อความแจ้งเตือน Error ทันทีที่เปิดหน้า
+   - ปรับ `loadDriveConfig` และ `fetchStartupStatus` ให้ Sync ค่าสถานะ `isConnected` และข้อความแจ้งเตือน Error ทันทีที่เปิดหน้า พร้อมจัด Scope callback ของ `setDriveStatus` ให้ถูกต้อง 100%
    - ปรับ `handleSaveDriveConfig` ให้สั่งรัน Auto-test ทันทีหลังกดบันทึกข้อมูล
    - ปรับ Badge และ Message Box ในหัวข้อ 4 (Google Drive) และ Card สรุปด้านบน ให้แสดงผล:
      - 🟢 **เชื่อมต่อสำเร็จ:** แสดงชื่อ Root Folder ทันที

@@ -440,25 +440,27 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const res = await fetch('/api/drive/config');
       const data = await res.json();
       if (data.success && data.config) {
-        const isConn = typeof data.config.isConnected === 'boolean'
-          ? data.config.isConnected
-          : (data.config.isConfigured ? (prev?.isConnected ?? undefined) : false);
+        setDriveStatus(prev => {
+          const isConn = typeof data.config.isConnected === 'boolean'
+            ? data.config.isConnected
+            : (data.config.isConfigured ? (prev?.isConnected ?? undefined) : false);
 
-        setDriveStatus(prev => ({
-          ...prev,
-          isConfigured: data.config.isConfigured,
-          isEnabled: data.config.isEnabled,
-          connectionMode: data.config.connectionMode,
-          hasGas: data.config.hasGas,
-          gasWebAppUrl: data.config.gasWebAppUrl,
-          rootFolderId: data.config.rootFolderId,
-          rootFolderName: data.config.rootFolderName || prev?.rootFolderName,
-          hasServiceAccount: data.config.hasServiceAccount,
-          serviceAccountEmail: data.config.serviceAccountEmail,
-          lastTestedAt: data.config.lastTestedAt,
-          isConnected: isConn,
-          message: data.config.lastTestedMessage || prev?.message
-        }));
+          return {
+            ...prev,
+            isConfigured: data.config.isConfigured,
+            isEnabled: data.config.isEnabled,
+            connectionMode: data.config.connectionMode,
+            hasGas: data.config.hasGas,
+            gasWebAppUrl: data.config.gasWebAppUrl,
+            rootFolderId: data.config.rootFolderId,
+            rootFolderName: data.config.rootFolderName || prev?.rootFolderName,
+            hasServiceAccount: data.config.hasServiceAccount,
+            serviceAccountEmail: data.config.serviceAccountEmail,
+            lastTestedAt: data.config.lastTestedAt,
+            isConnected: isConn,
+            message: data.config.lastTestedMessage || prev?.message
+          };
+        });
         setDriveConfig(prev => ({
           ...prev,
           rootFolderId: data.config.rootFolderId || '',
