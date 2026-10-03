@@ -4,6 +4,32 @@
 
 ---
 
+## [2026-10-03] พัฒนาระบบ Auto-Test & Real-Time Error Reporting สำหรับ Google Drive API (ไม่ต้องกดทดสอบเอง)
+
+### ปัญหาที่ได้รับแจ้ง
+- ผู้ใช้ตั้งค่า Google Drive แล้ว แต่หน้าจอขึ้น "ตั้งค่าแล้ว (รอทดสอบ)" ทำให้สงสัยว่าต้องมากดปุ่มทดสอบเองทุกครั้งหรือไม่
+- ต้องการให้ระบบทดสอบการเชื่อมต่อ Google Drive อัตโนมัติทันที และหากผิดพลาดให้รายงานข้อผิดพลาดขึ้นมาทันทีเพื่อจะได้แก้ไขได้ถูกต้อง
+
+### สาเหตุของปัญหา (Root Cause)
+1. **Endpoint `POST /api/startup/retest` ขาดหายใน Backend:** ใน `SystemSettingsView.tsx` มีโค้ดเรียก `POST /api/startup/retest` เพื่อ Silent Test ในเบื้องหลังเมื่อเปิดหน้าจอ แต่ใน `server.ts` ยังไม่ได้สร้าง endpoint นี้ (ส่งกลับ 404) ทำให้ระบบ Auto-test ไม่ทำงาน
+2. **State ไม่ Sync จาก Background Self-Test:** เมื่อเปิดหน้าจอ `fetchStartupStatus` และ `loadDriveConfig` ไม่ได้อัปเดต `driveStatus.isConnected` และข้อความ Error ลงใน State ของการตั้งค่า ทำให้ UI ค้างอยู่ที่สถานะ "รอทดสอบ"
+3. **ไม่ได้ Trigger Test ทันทีหลังกดบันทึก:** ใน `handleSaveDriveConfig` เมื่อบันทึกเสร็จ ไม่ได้สั่งรัน `handleTestDriveConnection` อัตโนมัติ ทำให้ผู้ใช้ต้องไปกดปุ่มทดสอบเองอีกรอบ
+
+### การแก้ไขแบบเจาะจง (Targeted Changes)
+1. **`server.ts`**:
+   - เพิ่ม `POST /api/startup/retest` (กู้คืน Config จาก Supabase แล้วรัน `runStartupSelfTest` คืนค่าผลสดทันที)
+   - ปรับ `GET /api/drive/config` ให้ส่ง `isConnected`, `lastTestedStatus`, `lastTestedMessage`, และ `rootFolderName` กลับไปที่ UI
+   - ปรับปรุง `runStartupSelfTest()` ในส่วน Drive ให้ตรวจจับกรณีระบุ GAS URL แต่ยังไม่ได้ระบุ `rootFolderId` พร้อมบันทึก `rootFolderName` ลง Config ถาวร
+2. **`src/components/SystemSettingsView.tsx`**:
+   - ปรับ `loadDriveConfig` และ `fetchStartupStatus` ให้ Sync ค่าสถานะ `isConnected` และข้อความแจ้งเตือน Error ทันทีที่เปิดหน้า
+   - ปรับ `handleSaveDriveConfig` ให้สั่งรัน Auto-test ทันทีหลังกดบันทึกข้อมูล
+   - ปรับ Badge และ Message Box ในหัวข้อ 4 (Google Drive) และ Card สรุปด้านบน ให้แสดงผล:
+     - 🟢 **เชื่อมต่อสำเร็จ:** แสดงชื่อ Root Folder ทันที
+     - 🔴 **เชื่อมต่อไม่สำเร็จ:** แสดงกล่องข้อความสีแดงระบุสาเหตุข้อผิดพลาด (เช่น URL ผิด หรือยังไม่ได้ใส่ Folder ID)
+     - 🟡 **กำลังตรวจสอบอัตโนมัติ:** เมื่อระบบกำลังทดสอบในเบื้องหลัง
+
+---
+
 ## [2026-10-03] แก้ Config Endpoints ดึงจาก Supabase ก่อน Return + ย้าย DB Status ไปเป็น Icon บน Header
 
 ### ปัญหาที่ได้รับรายงาน

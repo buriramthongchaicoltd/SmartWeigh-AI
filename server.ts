@@ -3395,11 +3395,15 @@ app.get('/api/drive/config', async (req: Request, res: Response) => {
     success: true,
     config: {
       isConfigured,
+      isConnected: startupStatus.drive === 'ok',
+      lastTestedStatus: startupStatus.drive,
+      lastTestedMessage: startupStatus.driveMessage,
       isEnabled: cfg.isEnabled,
       connectionMode: cfg.connectionMode || (cfg.gasWebAppUrl ? 'gas' : 'service_account'),
       gasWebAppUrl: cfg.gasWebAppUrl || null,
       hasGas: Boolean(cfg.gasWebAppUrl),
       rootFolderId: cfg.rootFolderId,
+      rootFolderName: cfg.rootFolderName || null,
       hasServiceAccount: Boolean(cfg.serviceAccountEmail && cfg.serviceAccountPrivateKey),
       serviceAccountEmail: cfg.serviceAccountEmail || null,
       hasOAuth: Boolean(cfg.clientId && cfg.refreshToken),
@@ -4090,7 +4094,11 @@ async function runStartupSelfTest() {
     driveCfg.rootFolderId && (driveCfg.gasWebAppUrl || driveCfg.serviceAccountEmail || driveCfg.refreshToken)
   );
 
-  if (driveConfigured) {
+  if (!driveCfg.rootFolderId && (driveCfg.gasWebAppUrl || driveCfg.serviceAccountEmail)) {
+    startupStatus.drive = 'error';
+    startupStatus.driveMessage = 'ยังไม่ได้ระบุ Google Drive Root Folder ID';
+    console.warn('[Startup] ⚠️  Google Drive: ยังไม่ได้ระบุ Root Folder ID');
+  } else if (driveConfigured) {
     try {
       if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
         const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
@@ -4101,7 +4109,10 @@ async function runStartupSelfTest() {
           startupStatus.drive = 'ok';
           startupStatus.driveMessage = `เชื่อมต่อ Google Drive (GAS) สำเร็จ${result.rootFolderName ? ` — ${result.rootFolderName}` : ''} ✅`;
           console.log('[Startup] ✅ Google Drive (GAS):', result.rootFolderName);
-          saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
+          saveStoredDriveConfig({
+            lastTestedAt: new Date().toISOString(),
+            rootFolderName: result.rootFolderName || undefined
+          });
         } else {
           startupStatus.drive = 'error';
           startupStatus.driveMessage = result?.error || 'เชื่อมต่อ Drive ไม่สำเร็จ';
@@ -4159,6 +4170,20 @@ app.get('/api/startup/status', (_req: Request, res: Response) => {
     success: true,
     ...startupStatus
   });
+});
+
+// POST /api/startup/retest — Re-run startup self-test on demand & return fresh status
+app.post('/api/startup/retest', async (_req: Request, res: Response) => {
+  try {
+    await restoreConfigsFromSupabase();
+    await runStartupSelfTest();
+    res.json({
+      success: true,
+      ...startupStatus
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Retest failed' });
+  }
 });
 
 // Vite mounting & static serving

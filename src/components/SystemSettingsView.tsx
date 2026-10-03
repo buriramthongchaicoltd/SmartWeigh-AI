@@ -440,7 +440,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const res = await fetch('/api/drive/config');
       const data = await res.json();
       if (data.success && data.config) {
-        // Merge so isConnected/rootFolderName from prior test-run are preserved
+        const isConn = typeof data.config.isConnected === 'boolean'
+          ? data.config.isConnected
+          : (data.config.isConfigured ? (prev?.isConnected ?? undefined) : false);
+
         setDriveStatus(prev => ({
           ...prev,
           isConfigured: data.config.isConfigured,
@@ -449,11 +452,12 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           hasGas: data.config.hasGas,
           gasWebAppUrl: data.config.gasWebAppUrl,
           rootFolderId: data.config.rootFolderId,
-          rootFolderName: data.config.rootFolderName,
+          rootFolderName: data.config.rootFolderName || prev?.rootFolderName,
           hasServiceAccount: data.config.hasServiceAccount,
           serviceAccountEmail: data.config.serviceAccountEmail,
           lastTestedAt: data.config.lastTestedAt,
-          isConnected: data.config.isConfigured ? (prev?.isConnected ?? undefined) : false
+          isConnected: isConn,
+          message: data.config.lastTestedMessage || prev?.message
         }));
         setDriveConfig(prev => ({
           ...prev,
@@ -482,8 +486,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        showToast(data.message || 'บันทึกการตั้งค่า Google Drive สำเร็จ');
-        loadDriveConfig();
+        showToast(data.message || 'บันทึกการตั้งค่า Google Drive สำเร็จ กำลังทดสอบการเชื่อมต่ออัตโนมัติ...');
+        await loadDriveConfig();
+        await handleTestDriveConnection();
       } else {
         showToast(data.error || 'บันทึกการตั้งค่า Google Drive ไม่สำเร็จ', 'info');
       }
@@ -623,6 +628,21 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const data = await res.json();
       if (data.success) {
         setStartupStatus(data);
+        if (data.drive === 'ok') {
+          setDriveStatus(prev => ({
+            ...prev,
+            isConfigured: true,
+            isConnected: true,
+            message: data.driveMessage || '✅ เชื่อมต่อ Google Drive สำเร็จ'
+          }));
+        } else if (data.drive === 'error') {
+          setDriveStatus(prev => ({
+            ...prev,
+            isConfigured: true,
+            isConnected: false,
+            message: data.driveMessage || 'เชื่อมต่อ Drive ไม่สำเร็จ'
+          }));
+        }
       }
     } catch {
       // silent
@@ -1234,8 +1254,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </span>
               {(driveStatus?.isConnected || startupStatus?.drive === 'ok') ? (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : startupStatus?.drive === 'error' ? (
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
               ) : driveStatus?.isConfigured ? (
-                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
               ) : (
                 <span className="w-2 h-2 rounded-full bg-slate-500"></span>
               )}
@@ -1245,8 +1267,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <span className="text-emerald-300">
                   ✅ เชื่อมต่อสำเร็จ {driveStatus?.rootFolderName ? `— ${driveStatus.rootFolderName}` : '(5 Zones)'}
                 </span>
+              ) : startupStatus?.drive === 'error' ? (
+                <span className="text-rose-300">❌ เชื่อมต่อไม่สำเร็จ (คลิกเพื่อแก้ไข)</span>
               ) : driveStatus?.isConfigured ? (
-                <span className="text-amber-300">⚠️ ตั้งค่าแล้ว (คลิกเพื่อทดสอบ)</span>
+                <span className="text-amber-300">⏳ กำลังตรวจสอบอัตโนมัติ...</span>
               ) : (
                 <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
               )}
@@ -2755,15 +2779,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <h3 className="text-base font-bold text-slate-900">
                       4. ระบบจัดเก็บไฟล์ Google Drive API (Zero-Junk & Verified-Only Move)
                     </h3>
-                    {driveStatus?.isConnected ? (
+                    {(driveStatus?.isConnected || startupStatus?.drive === 'ok') ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                        เชื่อมต่อสำเร็จ ({driveStatus.rootFolderName || 'พร้อมใช้งาน'})
+                        เชื่อมต่อสำเร็จ ({driveStatus?.rootFolderName || 'พร้อมใช้งาน'})
+                      </span>
+                    ) : startupStatus?.drive === 'error' || (driveStatus?.message && !driveStatus?.isConnected) ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-xs flex items-center gap-1">
+                        <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+                        ⚠️ ตรวจพบข้อผิดพลาด
                       </span>
                     ) : driveStatus?.isConfigured ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold text-xs flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                        ตั้งค่าแล้ว (รอทดสอบ)
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+                        กำลังตรวจสอบอัตโนมัติ...
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-semibold text-xs">
@@ -2790,20 +2819,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </div>
             </div>
 
-            {driveStatus?.message && (
+            {(driveStatus?.message || startupStatus?.driveMessage) && (
               <div
                 className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
-                  driveStatus.isConnected
+                  (driveStatus?.isConnected || startupStatus?.drive === 'ok')
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-900 font-medium'
-                    : 'bg-amber-50 border-amber-200 text-amber-900 font-medium'
+                    : 'bg-rose-50 border-rose-200 text-rose-900 font-medium'
                 }`}
               >
-                {driveStatus.isConnected ? (
+                {(driveStatus?.isConnected || startupStatus?.drive === 'ok') ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                 ) : (
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
                 )}
-                <span>{driveStatus.message}</span>
+                <span>{driveStatus?.message || startupStatus?.driveMessage}</span>
               </div>
             )}
 

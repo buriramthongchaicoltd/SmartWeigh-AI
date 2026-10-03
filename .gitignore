@@ -49,3 +49,4 @@ logs/
 .freebuff/
 .cache/
 *.tmp
+.commitmsg
