@@ -1041,17 +1041,32 @@ interface ServerLineBotConfig {
   allowedGroupNames: string[];
 }
 
-let lineBotConfig: ServerLineBotConfig = {
-  enabled: true,
-  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
-  channelSecret: process.env.LINE_CHANNEL_SECRET || '',
-  autoQuoteReply: true,
-  replyOnDuplicate: true,
-  replyOnUnclearImage: true,
-  filterNonBillImages: true,
-  strictZeroPushQuota: true, // Strictly use replyToken + quoteToken only (0 monthly quota used)
-  allowedGroupNames: []
-};
+const LINE_CONFIG_FILE_PATH = path.resolve(__dirname, '.line_config.json');
+
+function getStoredLineConfig(): ServerLineBotConfig {
+  let fileConfig: Partial<ServerLineBotConfig> = {};
+  try {
+    if (fs.existsSync(LINE_CONFIG_FILE_PATH)) {
+      const content = fs.readFileSync(LINE_CONFIG_FILE_PATH, 'utf-8');
+      fileConfig = JSON.parse(content);
+    }
+  } catch (err) {
+    console.warn('[LINE Config] Failed to read .line_config.json', err);
+  }
+  return {
+    enabled: fileConfig.enabled !== undefined ? fileConfig.enabled : true,
+    channelAccessToken: (fileConfig.channelAccessToken || process.env.LINE_CHANNEL_ACCESS_TOKEN || '').trim(),
+    channelSecret: (fileConfig.channelSecret || process.env.LINE_CHANNEL_SECRET || '').trim(),
+    autoQuoteReply: fileConfig.autoQuoteReply !== undefined ? fileConfig.autoQuoteReply : true,
+    replyOnDuplicate: fileConfig.replyOnDuplicate !== undefined ? fileConfig.replyOnDuplicate : true,
+    replyOnUnclearImage: fileConfig.replyOnUnclearImage !== undefined ? fileConfig.replyOnUnclearImage : true,
+    filterNonBillImages: fileConfig.filterNonBillImages !== undefined ? fileConfig.filterNonBillImages : true,
+    strictZeroPushQuota: true,
+    allowedGroupNames: Array.isArray(fileConfig.allowedGroupNames) ? fileConfig.allowedGroupNames : []
+  };
+}
+
+let lineBotConfig: ServerLineBotConfig = getStoredLineConfig();
 
 // In-memory queue for bills arriving via real LINE Webhook before browser syncs them to localStorage
 const lineWebhookInboxQueue: any[] = [];
@@ -1516,6 +1531,11 @@ app.post('/api/line/config', (req: Request, res: Response) => {
     strictZeroPushQuota: true, // Always enforce 0 push quota
     allowedGroupNames: Array.isArray(body.allowedGroupNames) ? body.allowedGroupNames : lineBotConfig.allowedGroupNames
   };
+  try {
+    fs.writeFileSync(LINE_CONFIG_FILE_PATH, JSON.stringify(lineBotConfig, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[LINE Config] Failed to save .line_config.json', err);
+  }
   return res.json({ success: true, config: lineBotConfig });
 });
 

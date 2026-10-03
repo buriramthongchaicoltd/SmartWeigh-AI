@@ -74,6 +74,38 @@
 
 ---
 
+## [2026-10-03] รวมศูนย์การตั้งค่าระบบทั้งหมดไว้ที่ "แท็บ 3. ฐานข้อมูล & เชื่อมต่อระบบภายนอก (Database & APIs)"
+
+- **วัตถุประสงค์งาน:**
+  - ตอบโจทย์คำสั่งของผู้ใช้งาน: *"เดียวกลับมมาดูการตั้งค่าั้งหมดก่อน ต้องการให้มันมารวมอยู่ที่ 3. ฐานข้อมูล Supabase Cloud PostgreSQL ได้มัย มันอยู่หล่ายที่มากตอนนี้"*
+- **การเปลี่ยนแปลงที่ทำแบบเจาะจง (Targeted Changes):**
+  1. **`src/components/SystemSettingsView.tsx`**:
+     - เปลี่ยนชื่อและจัดโครงสร้างแท็บที่ 3 ให้เป็นศูนย์กลางการเชื่อมต่อภายนอกและฐานข้อมูลทั้งหมด: **`3. ฐานข้อมูล & เชื่อมต่อระบบภายนอก (Database & APIs)`**
+     - จัดกลุ่มการตั้งค่าออกเป็น 4 ส่วนอย่างชัดเจนและสวยงามในแท็บเดียว:
+       - **ส่วนที่ 1: ระบบฐานข้อมูล Supabase Cloud PostgreSQL (Core Database 100%)**
+         - ตั้งค่า Supabase Project URL, Public Anon Key, Service Role Secret Key, PostgreSQL Connection String Direct URI
+         - สถานะการเชื่อมต่อ (Connected/Disconnected), Latency, ตรวจสอบสถานะทั้ง 7 ตารางหลัก
+         - ปุ่มสร้างตารางอัตโนมัติ (DDL), ดูสคริปต์ SQL, ปุ่มย้ายข้อมูลขึ้น Cloud (Migration)
+       - **ส่วนที่ 2: Google Gemini AI API Key (ระบบอ่านบิล & OCR แยกรายการอัตโนมัติ)**
+         - ย้ายและรวมศูนย์ออกจากแท็บ 1 ไม่ให้กระจัดกระจาย
+         - แสดงสถานะ Key กำลังใช้งาน (Masked Key) พร้อมระบุแหล่งที่มา (UI / Env)
+         - ช่องป้อน Key ใหม่พร้อมปุ่มเปิด/ปิดดูรหัส (Eye Toggle) และปุ่มบันทึกการแก้ไข
+       - **ส่วนที่ 3: ระบบเชื่อมต่อ LINE Official Account (Messaging API Bot)**
+         - แสดง Webhook URL แบบเต็มพร้อมปุ่มคัดลอก (Copy to Clipboard)
+         - ตั้งค่า Channel Access Token และ Channel Secret พร้อม Badge แจ้งสถานะเดิม
+         - ตั้งค่าตัวเลือกการตอบกลับแบบ Quote Reply ฟรี 0 โควตา, กรองรูปที่ไม่ใช่บิล, แจ้งเตือนบิลซ้ำ
+       - **ส่วนที่ 4: ระบบจัดเก็บไฟล์ Google Drive API (Zero-Junk & Verified-Only Move)**
+         - ตั้งค่า Folder ID, Google Apps Script Web App URL หรือ Google Cloud Service Account JSON
+         - ปุ่มทดสอบการเชื่อมต่อ Google Drive และปุ่มบันทึก
+     - ปลดกล่องตั้งค่า Gemini API Key ที่ซ้ำซ้อนออกจากแท็บที่ 1
+  2. **`server.ts`**:
+     - เพิ่มฟังก์ชัน `getStoredLineConfig()` และไฟล์จัดเก็บ `.line_config.json` สำหรับเก็บค่า LINE Channel Access Token และ Secret ข้าม Server Restart อย่างถาวร
+     - ปรับปรุง Endpoint `/api/line/config` ให้บันทึกการเปลี่ยนแปลงลงไฟล์ `.line_config.json` ทันทีที่ผู้ใช้กดบันทึกจากหน้าเว็บ
+  3. **การทดสอบ:**
+     - รัน `npm run build` ผ่านสมบูรณ์ (0 error) ตรวจสอบการแสดงผลและ Logic ครบถ้วน
+
+---
+
 ## [2026-10-03] ตัดโหมด LocalStorage ออก 100% — ปรับระบบให้ใช้งานฐานข้อมูลจริง Supabase Cloud PostgreSQL ครบวงจร
 
 - **วัตถุประสงค์งาน:**
