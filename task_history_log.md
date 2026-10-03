@@ -4,6 +4,31 @@
 
 ---
 
+## [2026-10-03] ปรับระบบ LINE เป็น Collect-First Mode — เก็บบิลก่อน, เช็คซ้ำตอนตรวจรับ
+
+### วัตถุประสงค์งาน
+- ผู้ใช้ต้องการให้ระบบ LINE เน้น **เก็บรูปบิลก่อนเสมอ** ไม่ว่าจะอ่านข้อมูลจากภาพได้มากหรือน้อย
+- ยกเลิกกฎเดิมที่ "ถ้าอ่านเลขบิลไม่ได้ → @mention ขอถ่ายใหม่ → ไม่บันทึกเข้าระบบ"
+- ย้ายการเช็คบิลซ้ำจาก LINE Webhook → ไปเช็คตอนกด "บันทึกตรวจรับ" (Verify) แทน
+
+### การเปลี่ยนแปลงที่ทำแบบเจาะจง (Targeted Changes)
+1. **[server.ts] บรรทัด ~1852–1903** — ปรับ LINE Webhook Step 4:
+   - **ยกเลิก:** กฎที่ลบบิลออกจากคิวและไม่บันทึกเมื่ออ่านเลขที่ไม่ได้
+   - **เพิ่ม (ใหม่):** เก็บบิลไว้เสมอ — ถ้าอ่านเลขที่ไม่ได้ → `status: 'scan_failed'` (คีย์มือ/สแกนซ้ำภายหลัง)
+   - **ยกเลิก:** Duplicate check ใน queue ขณะรับ webhook
+   - **คง:** ส่ง Quote Reply แจ้งรับบิลสำเร็จ (หรือแจ้งข้อมูลยังไม่ชัด)
+
+2. **[server.ts] เพิ่ม endpoint ใหม่ `POST /api/line/check-duplicate`:**
+   - ตรวจสอบเลขบิลซ้ำกับตาราง `orders` (col6, col17) และ `line_inbox` (status=verified) ใน Supabase
+   - ส่งคืน `{ isDuplicate: boolean, matches: [...] }` สำหรับให้ Frontend แสดง warning ก่อน Verify
+   - VerifyModal มีระบบ `checkDuplicateOrder()` + `existingOrders` prop ทำงานเป็น Safety Net อยู่แล้ว
+
+### สถานะ
+- ✅ TypeScript type-check ผ่านสมบูรณ์ (0 errors)
+- ✅ Push ขึ้น GitHub → Auto-deploy Render.com
+
+---
+
 ## [2026-10-03] แก้ไขข้อผิดพลาด 502 Bad Gateway ในการซิงก์รูปภาพกล่องพัก LINE ขึ้น Google Drive (`/api/drive/sync-inbox-images`)
 
 ### ปัญหาที่ได้รับแจ้ง

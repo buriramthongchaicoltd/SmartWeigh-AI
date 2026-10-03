@@ -1714,6 +1714,60 @@ app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
   return res.json({ success: true, remaining: lineWebhookInboxQueue.length });
 });
 
+// 2.5 Check Duplicate Bill Number at Verify Time (POST /api/line/check-duplicate)
+// เรียกจาก Frontend ก่อนกด "บันทึกตรวจรับ" เพื่อป้องกันบิลซ้ำใน orders / line_inbox
+app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
+  try {
+    const { billNo, storeName, excludeInboxId } = req.body || {};
+    if (!billNo) {
+      return res.json({ isDuplicate: false, matches: [] });
+    }
+    const client = getSupabaseClient();
+    const matches: Array<{ source: string; code: string; billNo: string; vendor: string; reason: string }> = [];
+
+    if (client) {
+      // ตรวจสอบใน orders (col6 = DO No., col17 = ตั๋วชั่ง No.)
+      const [ordersRes, inboxRes] = await Promise.all([
+        client.from('orders').select('col1,col6,col8,col17').or(`col6.eq.${billNo},col17.eq.${billNo}`).limit(5),
+        client.from('line_inbox').select('id,doc_number,store_name,status').eq('doc_number', billNo).neq('id', excludeInboxId || '').in('status', ['verified']).limit(5)
+      ]);
+
+      if (ordersRes.data) {
+        for (const row of ordersRes.data) {
+          const matchedNo = isServerDocMatch(row.col6, billNo) || isServerDocMatch(row.col17, billNo);
+          const vendorMatch = !storeName || !row.col8 || row.col8.trim().toLowerCase() === storeName.trim().toLowerCase();
+          if (matchedNo && vendorMatch) {
+            matches.push({
+              source: 'orders',
+              code: row.col1 || '',
+              billNo: row.col6 || row.col17 || billNo,
+              vendor: row.col8 || storeName || '',
+              reason: `เลขที่บิล ${billNo} มีบันทึกใบ DO แล้ว (${row.col1 || 'ในระบบ'})`
+            });
+          }
+        }
+      }
+
+      if (inboxRes.data) {
+        for (const row of inboxRes.data) {
+          matches.push({
+            source: 'line_inbox',
+            code: row.id || '',
+            billNo: row.doc_number || billNo,
+            vendor: row.store_name || storeName || '',
+            reason: `เลขที่บิล ${billNo} ถูกตรวจรับไปแล้วใน LINE Inbox (id=${row.id})`
+          });
+        }
+      }
+    }
+
+    return res.json({ isDuplicate: matches.length > 0, matches });
+  } catch (err: any) {
+    console.error('[line/check-duplicate] error:', err?.message);
+    return res.json({ isDuplicate: false, matches: [], error: err?.message });
+  }
+});
+
 // 3. Real LINE Messaging API Webhook Endpoint (POST /api/line/webhook)
 app.post('/api/line/webhook', async (req: Request, res: Response) => {
   try {
@@ -1849,45 +1903,10 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         const billNo = analysis.extractedData.col17 || analysis.extractedData.col6 || analysis.extractedData.col4 || '';
         const storeName = analysis.extractedData.col8 || '';
 
-        // กฎ: ถ้าเป็นเอกสารบิล แต่อ่านเลขที่ไม่ได้ — @mention ผู้ส่ง ขอถ่ายใหม่ ไม่บันทึกเข้าระบบ
-        if (analysis.isBillDocument && !billNo) {
-          inboxItem.status = 'scan_failed';
-          // ใช้ mention function เพื่อ @mention ตรงไปยังผู้ส่งในกลุ่ม LINE
-          inboxItem.botReplySent = await sendLineRetakeReplyWithMention(replyToken, quoteToken, userId, senderName);
-          inboxItem.botReplyText = `@${senderName} ❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่`;
-          // ลบออกจาก in-memory queue — ไม่บันทึก Supabase (skip Step 5 & 6)
-          const qIdx = lineWebhookInboxQueue.indexOf(inboxItem);
-          if (qIdx !== -1) lineWebhookInboxQueue.splice(qIdx, 1);
-          console.log(`[LINE Webhook] Bill no unreadable — @mentioned ${senderName} to retake. NOT saved. messageId=${messageId}`);
-          continue;
-        }
-
-        const dupInQueue = lineWebhookInboxQueue.find(
-          other =>
-            other.id !== inboxItem.id &&
-            other.status !== 'ignored_non_bill' &&
-            billNo &&
-            isServerDocMatch(
-              other.extractedData?.col17 || other.extractedData?.col6 || other.extractedData?.col4,
-              billNo
-            ) &&
-            (!storeName ||
-              !other.extractedData?.col8 ||
-              other.extractedData.col8.trim().toLowerCase() === storeName.trim().toLowerCase())
-        );
-
-        if (dupInQueue) {
-          inboxItem.status = 'duplicate_warning';
-          inboxItem.duplicateInfo = {
-            isDuplicate: true,
-            matchedCode: `คิว LINE (${dupInQueue.lineSenderName})`,
-            matchedBillNo: billNo,
-            matchedVendor: storeName,
-            reason: `บิลเลขที่ ${billNo} ร้าน ${storeName} เพิ่งถูกส่งเข้ากลุ่มโดย ${dupInQueue.lineSenderName}`
-          };
-        } else {
-          inboxItem.status = 'pending_review';
-        }
+        // กฎใหม่: เก็บบิลไว้เสมอ ไม่ว่าจะอ่านเลขที่ได้หรือไม่
+        // ถ้าอ่านไม่ได้ → status = 'scan_failed' (เก็บรูปไว้, คีย์มือหรือสแกนซ้ำภายหลังได้)
+        // การเช็คบิลซ้ำจะทำตอนบันทึกตรวจรับ (Verify) เท่านั้น
+        inboxItem.status = billNo ? 'pending_review' : 'scan_failed';
 
         const replyText = buildLineQuoteReplyText({
           isBillDocument: true,
@@ -1895,13 +1914,15 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           docType: analysis.detectedDocType,
           storeName,
           senderName,
-          isDuplicate: Boolean(dupInQueue),
-          duplicateMatchedCode: dupInQueue ? `ส่งแล้วโดย ${dupInQueue.lineSenderName}` : undefined,
+          isDuplicate: false,
           scanFailed: !billNo
         });
 
         inboxItem.botReplyText = replyText;
         inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, replyText);
+        if (!billNo) {
+          console.log(`[LINE Webhook] Unreadable bill saved as scan_failed (collect-first mode). messageId=${messageId}, sender=${senderName}`);
+        }
       } catch (scanErr) {
         console.error('LINE Webhook AI scan error (bill safely kept in queue):', scanErr);
         inboxItem.status = 'scan_failed';
