@@ -50,7 +50,9 @@ import {
   ExternalLink,
   Play,
   Key,
-  Sparkles
+  Sparkles,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { BillingNoteRecord } from '../types';
 import { SUPABASE_SQL_DDL_SCHEMA } from '../utils/supabaseClient';
@@ -298,6 +300,59 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [isTestingDrive, setIsTestingDrive] = useState(false);
   const [isSavingDrive, setIsSavingDrive] = useState(false);
 
+  // Gemini AI API Key State
+  const [geminiConfig, setGeminiConfig] = useState<{
+    hasKey: boolean;
+    maskedKey: string;
+    keySource: 'ui_config' | 'env_var' | 'none';
+  }>({ hasKey: false, maskedKey: '', keySource: 'none' });
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
+  const [isSavingGemini, setIsSavingGemini] = useState(false);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+
+  const loadSystemConfig = async () => {
+    try {
+      const res = await fetch('/api/system/config');
+      const data = await res.json();
+      if (data.success) {
+        setGeminiConfig({
+          hasKey: data.hasGeminiKey,
+          maskedKey: data.maskedGeminiKey || '',
+          keySource: data.keySource || 'none'
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load system config:', err);
+    }
+  };
+
+  const handleSaveGeminiKey = async () => {
+    if (!geminiKeyInput.trim()) {
+      showToast('กรุณาใส่ GEMINI_API_KEY ก่อน', 'info');
+      return;
+    }
+    setIsSavingGemini(true);
+    try {
+      const res = await fetch('/api/system/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geminiApiKey: geminiKeyInput.trim() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(data.message || 'บันทึก Gemini API Key สำเร็จ');
+        setGeminiKeyInput('');
+        loadSystemConfig();
+      } else {
+        showToast(data.error || 'บันทึกไม่สำเร็จ', 'info');
+      }
+    } catch {
+      showToast('เกิดข้อผิดพลาดในการบันทึก', 'info');
+    } finally {
+      setIsSavingGemini(false);
+    }
+  };
+
   const loadDriveConfig = async () => {
     setIsLoadingDriveConfig(true);
     try {
@@ -383,6 +438,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
         setDbConfig(prev => ({
           ...prev,
           supabaseUrl: data.config.supabaseUrl || '',
+          // Only populate keys if not already filled by user (avoid overwriting with masked values)
+          supabaseAnonKey: prev.supabaseAnonKey || '',
+          supabaseServiceRoleKey: prev.supabaseServiceRoleKey || '',
+          pgConnectionString: prev.pgConnectionString || '',
           isEnabled: data.config.isEnabled !== undefined ? data.config.isEnabled : true
         }));
       }
@@ -396,6 +455,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   useEffect(() => {
     loadDatabaseConfig();
     loadDriveConfig();
+    loadSystemConfig();
   }, []);
 
   const handleSaveDbConfig = async (e?: React.FormEvent) => {
@@ -1065,7 +1125,70 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </div>
             </div>
 
+            {/* ─── Gemini AI API Key Section ─── */}
+            <div className={`bg-white rounded-2xl border-2 p-5 shadow-xs space-y-3 ${geminiConfig.hasKey ? 'border-emerald-300' : 'border-rose-300'}`}>
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-violet-600" />
+                  <h3 className="text-sm font-bold text-slate-900">2.5 Gemini AI API Key (สำหรับอ่านบิล)</h3>
+                </div>
+                {geminiConfig.hasKey ? (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> ตั้งค่าแล้ว ({geminiConfig.keySource === 'env_var' ? 'Env Var' : 'UI Config'})
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" /> ยังไม่ได้ตั้งค่า — AI อ่านบิลไม่ได้!
+                  </span>
+                )}
+              </div>
+
+              {geminiConfig.hasKey && (
+                <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-800 flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Key ที่ใช้งานอยู่: <code className="font-mono">{geminiConfig.maskedKey}</code> — ใส่ Key ใหม่ด้านล่างเพื่อเปลี่ยน</span>
+                </div>
+              )}
+
+              <div className="space-y-2 text-xs">
+                <label className="block font-bold text-slate-700">
+                  {geminiConfig.hasKey ? 'เปลี่ยน GEMINI_API_KEY ใหม่' : 'ใส่ GEMINI_API_KEY'}
+                  <span className="text-rose-500 ml-1">*</span>
+                </label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type={showGeminiKey ? 'text' : 'password'}
+                      value={geminiKeyInput}
+                      onChange={e => setGeminiKeyInput(e.target.value)}
+                      placeholder="AIzaSy..."
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-violet-500 bg-white pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGeminiKey(v => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                    >
+                      {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSaveGeminiKey}
+                    disabled={isSavingGemini || !geminiKeyInput.trim()}
+                    className="px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-700 text-white font-bold text-xs transition cursor-pointer shadow-xs disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {isSavingGemini ? 'กำลังบันทึก...' : geminiConfig.hasKey ? '🔄 เปลี่ยน Key' : '💾 บันทึก Key'}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  รับ API Key ได้ฟรีที่ <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-violet-600 underline font-semibold">aistudio.google.com/apikey</a>
+                </p>
+              </div>
+            </div>
+
             {/* Section 3: Dynamic Categories & Units (No Code Changes Needed) */}
+
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2">
@@ -1622,15 +1745,22 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
 
                 {/* Supabase Anon Key */}
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">
+                  <label className="block font-bold text-slate-700 mb-1 flex items-center gap-2">
                     Supabase Anon Public Key (สำหรับหน้าเว็บ & Realtime) <span className="text-rose-500">*</span>
+                    {dbStatus?.hasAnonKey && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
+                        <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
+                      </span>
+                    )}
                   </label>
                   <input
-                    type="text"
+                    type="password"
                     value={dbConfig.supabaseAnonKey}
                     onChange={e => setDbConfig(prev => ({ ...prev, supabaseAnonKey: e.target.value }))}
-                    placeholder="eyJh..."
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white"
+                    placeholder={dbStatus?.hasAnonKey ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'eyJh...'}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
+                      dbStatus?.hasAnonKey ? 'border-emerald-300' : 'border-slate-300'
+                    }`}
                   />
                   <p className="text-[11px] text-slate-500 mt-1">
                     ดูได้จาก Supabase Dashboard → <strong>Project Settings → API → Project API keys (anon public)</strong>
@@ -1640,34 +1770,48 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 {/* Supabase Service Role Key */}
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>Supabase Service Role Key (บันทึกหลังบ้าน ปลอดภัย 100%)</span>
+                    <span className="flex items-center gap-2">
+                      Supabase Service Role Key (บันทึกหลังบ้าน ปลอดภัย 100%)
+                      {dbStatus?.hasServiceKey && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
+                          <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
+                        </span>
+                      )}
+                    </span>
                     <span className="text-[10px] text-amber-700 font-normal">สำหรับ LINE Webhook & จัดการระบบ</span>
                   </label>
                   <input
                     type="password"
                     value={dbConfig.supabaseServiceRoleKey}
-                    onChange={e =>
-                      setDbConfig(prev => ({ ...prev, supabaseServiceRoleKey: e.target.value }))
-                    }
-                    placeholder="eyJh... (หากไม่กรอกจะใช้ Anon Key)"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white"
+                    onChange={e => setDbConfig(prev => ({ ...prev, supabaseServiceRoleKey: e.target.value }))}
+                    placeholder={dbStatus?.hasServiceKey ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'eyJh... (หากไม่กรอกจะใช้ Anon Key)'}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
+                      dbStatus?.hasServiceKey ? 'border-emerald-300' : 'border-slate-300'
+                    }`}
                   />
                 </div>
 
                 {/* Direct PostgreSQL Connection String */}
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>PostgreSQL Connection URI (ทางเลือกสำหรับรัน DDL ตรง)</span>
+                    <span className="flex items-center gap-2">
+                      PostgreSQL Connection URI (ทางเลือกสำหรับรัน DDL ตรง)
+                      {dbStatus?.hasPgConnection && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
+                          <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
+                        </span>
+                      )}
+                    </span>
                     <span className="text-[10px] text-slate-400 font-normal">Database Direct / Pooler</span>
                   </label>
                   <input
                     type="password"
                     value={dbConfig.pgConnectionString}
-                    onChange={e =>
-                      setDbConfig(prev => ({ ...prev, pgConnectionString: e.target.value }))
-                    }
-                    placeholder="postgresql://postgres:[password]@db.xyz.supabase.co:5432/postgres"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white"
+                    onChange={e => setDbConfig(prev => ({ ...prev, pgConnectionString: e.target.value }))}
+                    placeholder={dbStatus?.hasPgConnection ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'postgresql://postgres:[password]@db.xyz.supabase.co:5432/postgres'}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
+                      dbStatus?.hasPgConnection ? 'border-emerald-300' : 'border-slate-300'
+                    }`}
                   />
                   <p className="text-[11px] text-slate-500 mt-1">
                     ดูได้จาก Supabase Dashboard → <strong>Project Settings → Database → Connection string (URI)</strong>

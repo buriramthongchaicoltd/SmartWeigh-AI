@@ -73,17 +73,39 @@ const rateLimitScan = (req: Request, res: Response, next: () => void) => {
   next();
 };
 
+// ─── System Config File (GEMINI_API_KEY + other runtime settings) ───────────
+const SYSTEM_CONFIG_FILE_PATH = path.resolve(__dirname, '.system_config.json');
+
+interface SystemConfig {
+  geminiApiKey?: string;
+}
+
+function getSystemConfig(): SystemConfig {
+  try {
+    if (fs.existsSync(SYSTEM_CONFIG_FILE_PATH)) {
+      return JSON.parse(fs.readFileSync(SYSTEM_CONFIG_FILE_PATH, 'utf-8'));
+    }
+  } catch (e) { /* ignore */ }
+  return {};
+}
+
+function saveSystemConfig(patch: Partial<SystemConfig>) {
+  const current = getSystemConfig();
+  fs.writeFileSync(SYSTEM_CONFIG_FILE_PATH, JSON.stringify({ ...current, ...patch }, null, 2), 'utf-8');
+}
+
+/** Returns active Gemini API Key: file config first, then env var */
+function getActiveGeminiApiKey(): string {
+  return (getSystemConfig().geminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+}
+
 // Shared Gemini client instance
 const getGeminiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getActiveGeminiApiKey();
   if (!apiKey) return null;
   return new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      }
-    }
+    apiKey,
+    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
   });
 };
 
@@ -148,13 +170,46 @@ async function callGeminiWithResilience(ai: GoogleGenAI, requestPayload: any, ov
 
 // Health & Status endpoint
 app.get('/api/status', (req: Request, res: Response) => {
-  const hasKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5);
+  const activeKey = getActiveGeminiApiKey();
+  const hasKey = Boolean(activeKey && activeKey.length > 5);
+  const keySource = activeKey
+    ? (getSystemConfig().geminiApiKey ? 'ui_config' : 'env_var')
+    : 'none';
   res.json({
     status: 'ok',
     hasKey,
+    keySource,
     model: FLASH_LITE_MODELS[0],
     timestamp: new Date().toISOString()
   });
+});
+
+// System Config API — Gemini Key management via Settings UI
+app.get('/api/system/config', (_req: Request, res: Response) => {
+  const cfg = getSystemConfig();
+  const activeKey = getActiveGeminiApiKey();
+  const hasGeminiKey = Boolean(activeKey && activeKey.length > 5);
+  // Return masked key for display (first 8 chars + ****)
+  const maskedKey = hasGeminiKey ? activeKey.substring(0, 8) + '••••••••••••••••••••' : '';
+  return res.json({
+    success: true,
+    hasGeminiKey,
+    maskedGeminiKey: maskedKey,
+    keySource: cfg.geminiApiKey ? 'ui_config' : (process.env.GEMINI_API_KEY ? 'env_var' : 'none')
+  });
+});
+
+app.post('/api/system/config', (req: Request, res: Response) => {
+  const { geminiApiKey } = req.body || {};
+  if (typeof geminiApiKey === 'string') {
+    const trimmed = geminiApiKey.trim();
+    if (trimmed.length < 10) {
+      return res.status(400).json({ success: false, error: 'GEMINI_API_KEY ต้องมีความยาวอย่างน้อย 10 ตัวอักษร' });
+    }
+    saveSystemConfig({ geminiApiKey: trimmed });
+    return res.json({ success: true, message: 'บันทึก GEMINI_API_KEY เรียบร้อยแล้ว ระบบ AI พร้อมทำงาน' });
+  }
+  return res.status(400).json({ success: false, error: 'กรุณาระบุ geminiApiKey' });
 });
 
 // Bill & Order Scan Endpoint using Gemini 3.8 Flash Vision
@@ -1930,6 +1985,8 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
         cfg.pgConnectionString
     );
 
+    // Mask sensitive values: show first 12 chars + ••• for display
+    const maskSecret = (val?: string) => val ? val.substring(0, 12) + '•••••••••••••••••••••••••••' : '';
     const maskedPgConn = cfg.pgConnectionString
       ? cfg.pgConnectionString.replace(/:([^:@]+)@/, ':••••••@')
       : '';
@@ -1945,6 +2002,9 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
           ? 'supabase_rest'
           : 'offline',
         supabaseUrl: cfg.supabaseUrl,
+        // Return masked values so UI can show "configured" state
+        supabaseAnonKey: maskSecret(cfg.supabaseAnonKey),
+        supabaseServiceRoleKey: maskSecret(cfg.supabaseServiceRoleKey),
         hasAnonKey: Boolean(cfg.supabaseAnonKey),
         hasServiceKey: Boolean(cfg.supabaseServiceRoleKey),
         hasPgConnection: Boolean(cfg.pgConnectionString),
