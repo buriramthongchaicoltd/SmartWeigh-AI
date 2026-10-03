@@ -230,6 +230,16 @@ ALTER TABLE public.system_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.billing_notes ENABLE ROW LEVEL SECURITY;
 
 -- Allow read/write for authenticated and anon users (Full Applet Integration)
+-- DROP before CREATE so this script is idempotent (safe to re-run anytime)
+DROP POLICY IF EXISTS "Allow all operations for orders" ON public.orders;
+DROP POLICY IF EXISTS "Allow all operations for purchase_orders" ON public.purchase_orders;
+DROP POLICY IF EXISTS "Allow all operations for line_inbox" ON public.line_inbox;
+DROP POLICY IF EXISTS "Allow all operations for stores" ON public.stores;
+DROP POLICY IF EXISTS "Allow all operations for projects" ON public.projects;
+DROP POLICY IF EXISTS "Allow all operations for app_users" ON public.app_users;
+DROP POLICY IF EXISTS "Allow all operations for system_config" ON public.system_config;
+DROP POLICY IF EXISTS "Allow all operations for billing_notes" ON public.billing_notes;
+
 CREATE POLICY "Allow all operations for orders" ON public.orders FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations for purchase_orders" ON public.purchase_orders FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations for line_inbox" ON public.line_inbox FOR ALL USING (true) WITH CHECK (true);
