@@ -2262,14 +2262,16 @@ function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
     console.warn('[DB Config] Failed to read .supabase_config.json', err);
   }
 
-  // Default Project Supabase URL (ฝังเป็นค่าตั้งต้นของระบบ ไม่ต้องกรอกใหม่)
-  const DEFAULT_SUPABASE_URL = 'https://beytwcmjebrqpormoulh.supabase.co';
+  // Default Project Supabase credentials (ฝังถาวร — ไม่ต้องกรอกใหม่ทุกครั้ง)
+  const DEFAULT_SUPABASE_URL         = 'https://bmytwcnjebrqpormoalh.supabase.co';
+  const DEFAULT_SUPABASE_ANON_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJteXR3Y25qZWJycXBvcm1vYWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5ODU1OTksImV4cCI6MjEwNjU2MTU5OX0.4hqvunADQ6oGDos22UPKewPjniIcq_mWLNVkTv2aoHA';
+  const DEFAULT_SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJteXR3Y25qZWJycXBvcm1vYWxoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MDk4NTU5OSwiZXhwIjoyMTA2NTYxNTk5fQ.tnsTEIJSNkTpEN8jr4vq9Ney9Rze7dexz0zmsbzzDIE';
 
-  // Priority: UI file config > Environment Variable > Project Default
-  const supabaseUrl = (fileConfig.supabaseUrl?.trim() || process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
-  const supabaseAnonKey = (fileConfig.supabaseAnonKey?.trim() || process.env.SUPABASE_ANON_KEY || '').trim();
-  const supabaseServiceRoleKey = (fileConfig.supabaseServiceRoleKey?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-  const pgConnectionString = (fileConfig.pgConnectionString?.trim() || process.env.DATABASE_URL || '').trim();
+  // Priority: UI file config > Environment Variable > Project Default (hardcoded)
+  const supabaseUrl            = (fileConfig.supabaseUrl?.trim()            || process.env.SUPABASE_URL              || DEFAULT_SUPABASE_URL).trim();
+  const supabaseAnonKey        = (fileConfig.supabaseAnonKey?.trim()        || process.env.SUPABASE_ANON_KEY         || DEFAULT_SUPABASE_ANON_KEY).trim();
+  const supabaseServiceRoleKey = (fileConfig.supabaseServiceRoleKey?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY || DEFAULT_SUPABASE_SERVICE_KEY).trim();
+  const pgConnectionString     = (fileConfig.pgConnectionString?.trim()     || process.env.DATABASE_URL              || '').trim();
 
   // Detect config source for UI display and logging
   const hasFileConfig = Boolean(fileConfig.supabaseUrl?.trim() || fileConfig.supabaseAnonKey?.trim());
