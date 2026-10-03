@@ -13,7 +13,7 @@
 สถานะปัจจุบัน: **สร้างโครงสร้างหลักครบทั้ง 11 เมนู (รวมระบบรับวางบิล Express RR 4 Steps) + ตรวจสอบจุดเสี่ยงและซิงก์ข้อมูลข้ามเมนูครบ 100%**
 
 | ลำดับ | เมนูในระบบ | สถานะ | รายละเอียดการทำงานหลัก |
-| :--- | :--- | :---: | :--- |
+| :--- | :--- | :--- | :--- |
 | **1** | **กล่องพักบิลจาก LINE** (`line_inbox`) | ✅ พร้อมใช้งาน | รับรูปบิลจากกลุ่ม LINE OA ผ่าน Webhook (`/api/line/webhook`), AI สแกนแยกประเภทอัตโนมัติ, ดักจับบิลซ้ำ, ตอบกลับด้วย Reply+Quote Token (0 โควตา), เก็บชื่อผู้ส่งและชื่อกลุ่ม LINE แยกจากชื่อโครงการ |
 | **2** | **ใบส่งของ / ใบส่งสินค้า (DO)** (`orders`) | ✅ พร้อมใช้งาน | ตารางหลัก 39 คอลัมน์ (7 โซน), แบ่ง 3 มุมมองหลัก (`ทั้งหมด 39 คอลัมน์`, `DO สินค้าทั่วไป`, `DO สินค้าที่มีการชั่งน้ำหนัก`), การ์ดสรุป KPI 6 ใบแบบสมดุล |
 | **3** | **ใบสั่งซื้อ (PO)** (`pos`) | ✅ พร้อมใช้งาน | เปิดใบสั่งซื้อ/สแกน PO ด้วย AI, ระบบชนบิล 3-Way Matching (`reconcilePO`) ตัดโควตาส่งมอบสะสมอัตโนมัติ พร้อมพิมพ์ใบสั่งซื้อหัวกระดาษบริษัท |
@@ -24,7 +24,8 @@
 | **8** | **ออกรายงาน Excel / PDF** (`reports`) | ✅ พร้อมใช้งาน | ศูนย์ออกรายงานทางการ A4 (5 แม่แบบรายงาน) พร้อมหัวกระดาษ+โลโก้ บริษัท บุรีรัมย์ธงชัยก่อสร้าง จำกัด, ช่องลงนาม 3 ฝ่าย และส่งออก Excel ครบทุกชีต |
 | **9** | **ทะเบียนร้านค้า** (`stores`) | ✅ พร้อมใช้งาน | ฐานข้อมูลคู่ค้า/ผู้จำหน่าย คำนวณยอดซื้อสะสม ชำระแล้ว และหนี้คงค้างแบบ Real-time จากตารางบิลจริง (`syncStoreFinancials`) |
 | **10** | **ทะเบียนโครงการ** (`projects`) | ✅ พร้อมใช้งาน | ฐานข้อมูลโครงการก่อสร้าง/หน้างาน ติดตามงบประมาณ ยอดเปิด PO ยอดรับของจริง และคลิกดูบิลรายโครงการได้ทันที |
-| **11** | **ผู้ใช้งาน & สิทธิ์ / ตั้งค่าระบบ** (`users`, `settings`) | ✅ พร้อมใช้งาน | ระบบสิทธิ์ 3 ระดับ (`Admin`, `Manager`, `User`), บัญชีมาสเตอร์ฝังถาวร (`Admin` / `123456`), ตั้งค่าบริษัท/เกณฑ์เตือน/หมวดวัสดุ และสำรอง/กู้คืนไฟล์ `.json` |
+| **11** | **ผู้ใช้งาน & สิทธิ์ / ตั้งค่าระบบ** (`users`, `settings`) | ✅ พร้อมใช้งาน | ระบบสิทธิ์ 3 ระดับ (`Admin`, `Manager`, `User`), บัญชีมาสเตอร์ฝังถาวร (`Admin` / `123456`), จัดการ Google Drive (2 โหมด) + Auto-Test อัตโนมัติ, ตั้งค่าบริษัท/เกณฑ์เตือน/หมวดวัสดุ และสำรอง/กู้คืนไฟล์ `.json` |
+| **—** | **คลาวด์โฮสติ้ง Render.com & Git CI/CD** | 🌐 ออนไลน์ 100% | เว็บแอปออนไลน์ระดับ Production ที่ `https://smartweigh-ai.onrender.com` พร้อมระบบ Auto-Commit/Push ผ่าน `commit.bat` |
 
 ---
 
@@ -68,8 +69,12 @@
 ## 3. โครงสร้างไฟล์สำคัญของระบบ (Project File Map)
 
 ```text
-├── server.ts                          # Express Backend + Gemini AI (/api/scan-bill) + LINE Webhook (/api/line/webhook)
+├── server.ts                          # Express Backend + Gemini AI (/api/scan-bill) + LINE Webhook + Google Drive API
+├── google_apps_script_drive.gs        # Google Apps Script Web App สำหรับจัดการโฟลเดอร์ 5 โซน & Zero-Junk
+├── DATABASE_STORAGE_BLUEPRINT.md      # พิมพ์เขียวฐานข้อมูล Supabase Cloud PostgreSQL Schema
 ├── HANDOVER_DOCUMENTATION.md          # เอกสารส่งต่องานและสถาปัตยกรรมระบบฉบับนี้
+├── render.yaml                        # กำหนดค่า Cloud Deployment บน Render.com Web Service
+├── commit.bat / auto_commit.ps1       # สคริปต์ดับเบิลคลิก Auto-Commit & Auto-Push ขึ้น GitHub ในหน้าต่างเดียว
 └── src/
     ├── types.ts                       # โครงสร้าง TypeScript Interfaces ทั้งหมดของระบบ
     ├── App.tsx                        # State หลัก, การชนบิลอัตโนมัติ (Auto-Reconciliation), Cascade Delete/Unlink
@@ -84,7 +89,7 @@
         ├── Header.tsx                 # แถบเมนูซ้าย (SidebarNav) โลโก้บริษัท + แถบปุ่มคำสั่งด้านบน + กระดิ่งแจ้งเตือน
         ├── StatSummaryCards.tsx       # การ์ดสรุป KPI 6 ใบด้านบน (บิลทั้งหมด, DO ทั่วไป, DO ชั่งน้ำหนัก, ยอดรวม, จ่ายแล้ว, ค้างชำระ)
         ├── TableView39Cols.tsx        # ตารางหลัก 39 คอลัมน์ (รองรับ 3 มุมมองบิล DO, ตั๋วชั่งปลายทาง, ใบเสร็จ/กำกับภาษี)
-        ├── LineInboxView.tsx          # ตารางกล่องพักบิลจาก LINE OA
+        ├── LineInboxView.tsx          # ตารางกล่องพักบิลจาก LINE OA พร้อมปุ่มซิงก์รูปขึ้น Drive ZONE_00
         ├── ScanModal.tsx              # หน้าต่างอัปโหลด/สแกนเอกสารด้วย AI
         ├── VerifyModal.tsx            # หน้าต่างตรวจสอบบิลแบบจอคู่ (รูปบิลคู่กับฟอร์มข้อมูล 7 โซน)
         ├── POManagementView.tsx       # หน้าบริหารใบสั่งซื้อ (PO) และติดตามโควตา
@@ -96,7 +101,7 @@
         ├── StoresManagementView.tsx   # หน้าทะเบียนร้านค้า/คู่ค้า
         ├── ProjectsManagementView.tsx # หน้าทะเบียนโครงการก่อสร้าง
         ├── UsersRolesView.tsx         # หน้าจัดการผู้ใช้งานและตารางกำหนดสิทธิ์ (RBAC)
-        └── SystemSettingsView.tsx     # หน้าตั้งค่าระบบ ข้อมูลบริษัท สำรอง/กู้คืนข้อมูล (.json) และเอกสารส่งต่องาน
+        └── SystemSettingsView.tsx     # หน้าตั้งค่าระบบ: Supabase Cloud, Google Drive 5 โซน (Auto-Test), LINE OA, ข้อมูลบริษัท
 ```
 
 ---
@@ -108,16 +113,23 @@
 1. **Supabase Cloud (Core Transactional Database — PostgreSQL + Realtime):**
    - จัดเก็บข้อมูลธุรกรรมตาราง 39 คอลัมน์ (`orders`), ใบสั่งซื้อ (`purchase_orders`), กล่องพัก LINE (`line_inbox`), ร้านค้า (`stores`), โครงการ (`projects`) และผู้ใช้งาน (`app_users`) แบบ Realtime
    - เก็บรหัสอ้างอิงไฟล์ Google Drive (`drive_file_id`, `drive_folder_id`) ผูกติดกับทุกใบงาน
-2. **Google Drive (File Storage, Auto-Move & Zero-Junk Cleanup):**
+2. **Google Drive API (Auto-Move, Zero-Junk Cleanup & 2 Connection Modes):**
+   - **รองรับ 2 โหมดการเชื่อมต่อ:**
+     - **โหมดที่ 1: Google Apps Script (GAS Web App) [แนะนำ — ใช้งานง่ายสุด 100%]:** นำสคริปต์ `google_apps_script_drive.gs` ไป Deploy บน Google Account ของบริษัท ไม่ต้องสร้าง Google Cloud Console Project ไม่ต้องขอ JSON Service Account Key และใช้พื้นที่ Google Drive ของบัญชีผู้ใช้ได้โดยตรง
+     - **โหมดที่ 2: Google Service Account:** สำหรับองค์กรที่ใช้ Google Cloud Platform แบบเป็นทางการ โดยระบุ Service Account Email และ Private Key
+   - **ระบบทดสอบการเชื่อมต่ออัตโนมัติ (Auto-Test & Real-Time Error Reporting):**
+     - ตรวจสอบสถานะการเชื่อมต่อให้อัตโนมัติทันทีที่เซิร์ฟเวอร์เริ่มทำงาน (Startup Self-Test)
+     - ตรวจสอบสถานะให้อัตโนมัติในเบื้องหลังเมื่อเปิดหน้าจอตั้งค่า (`POST /api/startup/retest`)
+     - ตรวจสอบทันทีหลังกดปุ่มบันทึกข้อมูล พร้อมแสดงป้าย `เชื่อมต่อสำเร็จ (ชื่อโฟลเดอร์)` หรือป้ายเตือนสีแดงพร้อมระบุสาเหตุข้อผิดพลาดทันทีหากตั้งค่าไม่ถูกต้อง
    - จัดเก็บไฟล์ภาพบิลแยกเป็น **5 โซนโฟลเดอร์มาตรฐานตามประเภทและเลขที่เอกสาร** (ไม่เอาชื่อโครงการครอบโฟลเดอร์ เพื่อให้เปลี่ยนโครงการในตารางได้ตลอดเวลาโดยโฟลเดอร์ไม่รวน):
      - `📁 00_กล่องพักบิล_LINE_รอตรวจรับ` — พักรูปจาก LINE ที่ยังไม่ได้ตรวจรับ
      - `📁 01_ใบสั่งซื้อ_PO` — เก็บไฟล์ PO แยกตามเลข PO
      - `📁 02_ใบงานหลัก_DO_ครบชุด/TR-xxxx_DO-xxxx` — **โฟลเดอร์ประจำใบงาน** (รวมรูป DO + ตั๋วชั่ง + ใบกำกับภาษีที่ชนคู่กันแล้วไว้ในที่เดียว)
      - `📁 03_ตั๋วชั่งปลายทาง_รอจับคู่DO` — พักตั๋วชั่งที่ยังไม่มีใบ DO มาชน (เมื่อชนกับ DO สำเร็จ ระบบย้ายไฟล์เข้าโฟลเดอร์ `02` ของ DO นั้นอัตโนมัติ)
      - `📁 04_ใบเสร็จกำกับภาษี_เอกเทศ` — เก็บบิลซื้อสดหรือใบกำกับภาษีที่ยังไม่ผูก DO (เมื่อผูกกับ DO สำเร็จ ระบบย้ายไฟล์เข้าโฟลเดอร์ `02` ของ DO นั้นอัตโนมัติ)
-   - **Zero-Junk Auto Cleanup:**
-     - เมื่อเปลี่ยนรูปบิลใหม่ หรือลบรูปเดิม $\rightarrow$ ระบบสั่งลบไฟล์เก่า (`drive_file_id`) ออกจาก Google Drive ทันที
-     - เมื่อลบใบงานออกจากระบบ $\rightarrow$ ระบบสั่งลบไฟล์และโฟลเดอร์ของใบงานนั้นออกจาก Google Drive ทันที ไม่เหลือไฟล์ขยะตกค้าง
+   - **กฎเหล็กการย้ายและลบไฟล์ (Strict File Operations):**
+     - **Verified-Only Move Rule:** ย้ายไฟล์ตั๋วชั่งเข้าโฟลเดอร์ `02` เฉพาะเมื่อมีการยืนยันการจับคู่บิลแล้วเท่านั้น และย้ายกลับ `03` อัตโนมัติเมื่อยกเลิกการจับคู่
+     - **Zero-Junk Auto Cleanup:** เมื่อเปลี่ยนรูปบิลใหม่ หรือลบรูปเดิม $\rightarrow$ ระบบสั่งลบไฟล์เก่า (`drive_file_id`) ออกจาก Google Drive ทันที และเมื่อลบใบงาน $\rightarrow$ ลบโฟลเดอร์ใบงานพร้อม Rescue Rule ป้องกันตั๋วชั่งสูญหาย ไม่เหลือไฟล์ขยะตกค้างในไดรฟ์
 
 ---
 
@@ -185,21 +197,28 @@
 
 ---
 
-## 6. แผนงานพัฒนาต่อยอดในระยะถัดไป (Next Steps & Future Roadmap)
+## 6. สรุปสถานะความคืบหน้า & แผนงานขั้นตอนถัดไป (Roadmap & Next Steps)
 
-เพื่อให้การพัฒนาต่อยอดเป็นไปอย่างมีระบบ แนะนำลำดับงานถัดไปดังนี้:
+### 6.1 ส่วนที่พัฒนาเสร็จสมบูรณ์แล้ว 100% (Completed Milestones)
+1. **✅ โมดูล "ระบบรับวางบิลฝ่ายจัดซื้อ & ส่งออก Express" (`PurchasingBillingView.tsx`)**
+   - พัฒนาครบ 4 ขั้นตอน: ชนบิล DO, ปรับราคา/เกณฑ์น้ำหนัก/VAT/เศษสตางค์, พิมพ์ใบปะหน้า A4 & Export CSV/TXT, และ Auto-Stamp เลขที่ RR ล็อกบิล `BILLED`
+2. **✅ ระบบจัดเก็บไฟล์ Google Drive API (5 โซนมาตรฐาน & Zero-Junk & 2 โหมดการเชื่อมต่อ)**
+   - รองรับทั้ง **Google Apps Script Web App** (แนะนำ) และ **Service Account**
+   - มีระบบ **Auto-Test อัตโนมัติ** ตอนเปิดหน้าจอ, ตอนบันทึก และตอน Startup บนเซิร์ฟเวอร์ พร้อมระบบรายงาน Error แบบ Real-Time
+   - ดำเนินการตามกฎ **Verified-Only Move Rule** และ **Zero-Junk Cleanup** ปลอดภัย 100%
+3. **✅ การ Deploy ขึ้น Production Cloud (Render.com Web Service)**
+   - ออนไลน์ใช้งานได้จริงที่ URL: `https://smartweigh-ai.onrender.com`
+   - มีไฟล์กำหนดค่า `render.yaml` พร้อมระบบ Auto-Deploy เมื่อ Push เข้าสู่ GitHub Branch `main`
+4. **✅ สคริปต์ Git Automation สำหรับ Windows (`commit.bat` & `auto_commit.ps1`)**
+   - ดับเบิลคลิกทำงานในหน้าต่างเดียว รองรับภาษาไทย UTF-8 with BOM และขึ้นบรรทัดใหม่ CRLF 100%
 
-1. **✅ [สร้างเสร็จแล้ว] ระยะที่ 1: โมดูล "ระบบรับวางบิลฝ่ายจัดซื้อ & ส่งออก Express" (`PurchasingBillingView.tsx`)**
-   - พัฒนาแยกงานเป็น 4 ขั้นตอนแบบ Dedicated Wizard ชัดเจน ไม่แสดงปนกัน:
-     - **ขั้นตอนที่ 1:** เลือกร้านค้า & บันทึกข้อมูลใบวางบิลกระดาษ (Target Amount) พร้อมปุ่มเลือกร้านค้าด่วน
-     - **ขั้นตอนที่ 2:** พื้นที่เลือกใบส่งของ (DO) พร้อมตัวกรองสถานะ, ค้นหา, แตกรายการย่อยใน DO เดียว
-     - **ขั้นตอนที่ 3:** กำหนดเกณฑ์คำนวณ (22/15/20/MIN), ขอบเขตยอด, ภาษี VAT, และตารางตรวจราคาต่อหน่วย
-     - **ขั้นตอนที่ 4:** ตรวจสอบยอดรวม Reconciliation เปรียบเทียบ Side-by-Side ปรับเศษสตางค์ และยืนยันบันทึก
-   - ออกใบสรุปปะหน้า A4, ส่งออกไฟล์ Express (.CSV/.TXT) และประทับเลข RR ล็อกบิล BILLED อัตโนมัติ
-2. **ระยะที่ 2: เชื่อมต่อ Supabase Cloud (PostgreSQL + Realtime)**
-   - รันสคริปต์สร้างตารางจากไฟล์ `/DATABASE_STORAGE_BLUEPRINT.md` บน Supabase และเชื่อมต่อเข้ากับ `App.tsx` + `server.ts` เพื่อให้ทุกเครื่องเห็นข้อมูลตรงกันแบบ Realtime
-3. **ระยะที่ 3: เชื่อมต่อ Google Drive API พร้อมระบบ Auto-Move & Zero-Junk Cleanup**
-   - ผูก Google Service Account / OAuth2 ที่ฝั่ง `server.ts` เพื่อสร้างโฟลเดอร์ 5 โซนอัตโนมัติ ย้ายไฟล์ตั๋วชั่ง/ใบกำกับภาษีเข้าโฟลเดอร์ใบงานหลักเมื่อชนบิลสำเร็จ และลบไฟล์ขยะอัตโนมัติเมื่อมีการแก้ไขหรือลบเอกสาร
-4. **ระยะที่ 4: เชื่อมต่อ LINE Official Account จริงในระดับ Production**
-   - นำ `Webhook URL` (`https://<โดเมนของระบบ>/api/line/webhook`) ไปวางใน LINE Developers Console → Messaging API
-   - ตั้งค่า `Channel Access Token` และ `Channel Secret` และเชิญบอทเข้ากลุ่มรับบิลของบริษัท
+---
+
+### 6.2 ขั้นตอนที่เหลือสำหรับการเปิดใช้งานเต็มรูปแบบ (Remaining Action Items)
+
+1. **ขั้นตอนที่ 1 (ผู้ใช้งาน): เชื่อมต่อ Supabase Cloud Database**
+   - นำสคริปต์ SQL จากไฟล์ `DATABASE_STORAGE_BLUEPRINT.md` ไปรันใน SQL Editor บน Supabase Project
+   - กรอกค่า `SUPABASE_URL` และ `SUPABASE_ANON_KEY` ใน Render Dashboard → Environment Variables เพื่อให้ข้อมูลทุกเครื่องซิงก์กันสดๆ
+2. **ขั้นตอนที่ 2 (ผู้ใช้งาน): ตั้งค่า Webhook สำหรับ LINE Official Account จริง**
+   - นำ Webhook URL: `https://smartweigh-ai.onrender.com/api/line/webhook` ไปวางใน LINE Developers Console
+   - ใส่ `Channel Access Token` และ `Channel Secret` ในการตั้งค่าระบบ แล้วทดสอบส่งรูปบิลเข้ากลุ่ม LINE โครงการ
