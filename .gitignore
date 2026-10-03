@@ -1,0 +1,46 @@
+# ========================
+# ความลับ & ข้อมูล sensitive
+# ========================
+.env
+.env.local
+.env.production
+.supabase_config.json
+.google_drive_config.json
+
+# ========================
+# Node.js
+# ========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp
+.pnp.js
+
+# ========================
+# Build output
+# ========================
+dist/
+build/
+*.js.map
+
+# ========================
+# OS & Editor
+# ========================
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.idea/
+
+# ========================
+# Logs
+# ========================
+*.log
+logs/
+
+# ========================
+# Temp & cache
+# ========================
+.freebuff/
+.cache/
+*.tmp
