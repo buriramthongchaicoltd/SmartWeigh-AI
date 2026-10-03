@@ -1370,5 +1370,17 @@
   - ถอด `.git/hooks/post-commit` ที่ซ้ำซ้อนและติดบั๊ก `/dev/tty` บน Windows ออก เพื่อให้ทำงานราบรื่น 100% ผ่านหน้าต่างเดียว
 - **สถานะ:** ทดสอบการดับเบิลคลิก `commit.bat` ผ่านสมบูรณ์ 100% ภาษาไทยแสดงผลคมชัด ไม่วนลูป
 
+---
+
+## [2026-10-03] กำหนดค่าสำหรับ Deploy ระบบขึ้น Render.com Web Service
+- **วัตถุประสงค์งาน:**
+  - แก้ไขปัญหา Deploy failed บน Render.com (5.0s Exit status 1)
+  - ลบไฟล์ `bun.lock` ออกจาก Git เพื่อไม่ให้ Render สับสนระหว่าง Bun กับ Node.js
+  - ย้าย `tsx` และ `tailwindcss` เข้า `dependencies` หลักใน [package.json](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/package.json) เพื่อให้ติดตั้งครบเมื่อ Build บน Cloud
+  - ปรับ Start script เป็น `tsx server.ts`
+  - สร้างไฟล์ [render.yaml](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/render.yaml) กำหนด `buildCommand: npm install && npm run build` และ `startCommand: npm run start` ชัดเจน
+- **สถานะ:** Build ทดสอบผ่านสมบูรณ์ 100% และ Push ขึ้น GitHub เรียบร้อย
+
+
 
 
