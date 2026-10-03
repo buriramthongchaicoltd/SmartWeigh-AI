@@ -4,6 +4,28 @@
 
 ---
 
+## [2026-10-03] Architecture Enforce: Drive-First Image Storage & Fix 33MB Query Timeout
+
+### ปัญหาที่ได้รับรายงาน
+1. เข้าหน้าระบบแล้วไม่โหลดข้อมูล/หน้าเว็บว่างเปล่า เกิด Timeout
+2. Supabase ถูกบันทึก base64 รูปภาพขนาดใหญ่ (~33MB จาก 69 แถว) ผิดวัตถุประสงค์สถาปัตยกรรม (Supabase = Relational Database, Google Drive = File Storage)
+
+### การแก้ไข
+1. **Exclude `image_url` จาก List Query (`server.ts`):**
+   - ใน `sync-all` และ `GET /api/line/inbox` ให้ดึงเฉพาะ metadata ทุกคอลัมน์โดยไม่ดึง `image_url` (ที่เป็น base64 ก้อนใหญ่) เพื่อลด payload จาก 33MB เหลือไม่กี่ KB ทำให้โหลดข้อมูลขึ้นทันที
+   - เพิ่ม on-demand endpoint `GET /api/line/inbox/image/:id` เมื่อผู้ใช้กดดูรูปภาพในหน้ารายการ
+2. **ปรับสถาปัตยกรรม Drive-First (`server.ts`, `src/utils/supabaseClient.ts`):**
+   - เปลี่ยน `mapLineInboxToSupabase` ให้ `image_url: null` เสมอ ห้ามเก็บ base64 ใน Supabase
+   - ปรับปรุง `POST /api/drive/sync-inbox-images` ให้เมื่ออัปโหลดรูปขึ้น Google Drive สำเร็จ ให้สั่ง `image_url: null` ใน Supabase เพื่อล้างข้อมูล base64 เดิมออก คืนพื้นที่และลบไฟล์ขยะ
+3. **ปรับปรุง Frontend (`LineInboxView.tsx`):**
+   - รองรับ on-demand image loading และแสดงปุ่ม `📁 ซิงก์รูปเข้า Google Drive`
+
+### Git Commits
+- `a7881c8` — fix(critical): exclude image_url from list queries to fix 33MB timeout - line_inbox now loads all 69 rows instantly + on-demand image loading
+- `1179648` — fix(architecture): Drive-first image storage - never store base64 in Supabase, images must be in Google Drive only. sync-inbox-images clears old base64 after Drive upload.
+
+---
+
 ## [2026-10-03] LINE Inbox Critical Fixes — Multi-User Sync + doc_number + Drive Integration
 
 ### ปัญหาที่ได้รับรายงาน
