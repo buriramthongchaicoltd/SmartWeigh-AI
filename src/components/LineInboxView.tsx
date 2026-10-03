@@ -127,19 +127,41 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   const handleSyncImagesToDrive = async (force: boolean = false) => {
     setIsSyncingDrive(true);
+    let totalUploaded = 0;
+    let hasMore = true;
+    let batchCount = 0;
     try {
-      const res = await fetch('/api/drive/sync-inbox-images', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force, rescanAi: true })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast(data.message || `ซิงก์รูปภาพขึ้น Google Drive สำเร็จ ${data.uploadedCount} รายการ!`);
-        await onSyncWebhookQueue();
-      } else {
-        showToast(data.error || 'การซิงก์รูปภาพขึ้น Google Drive ไม่สำเร็จ', 'info');
+      while (hasMore && batchCount < 20) {
+        batchCount++;
+        const res = await fetch('/api/drive/sync-inbox-images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            force: force && batchCount === 1,
+            rescanAi: false,
+            batchSize: 5
+          })
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(`เซิร์ฟเวอร์ตอบกลับรหัส ${res.status}: ${errText.slice(0, 120)}`);
+        }
+
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.error || 'การซิงก์รูปภาพขัดข้อง');
+        }
+
+        totalUploaded += data.uploadedCount || 0;
+        if (!data.hasMore || data.uploadedCount === 0) {
+          hasMore = false;
+          showToast(data.message || `ซิงก์รูปภาพขึ้น Google Drive สำเร็จ ${totalUploaded} รายการ!`);
+        } else {
+          showToast(`กำลังซิงก์รูปภาพ... สำเร็จแล้ว ${totalUploaded} ใบ (เหลืออีก ${data.remainingCount} ใบ)`, 'info');
+        }
       }
+      await onSyncWebhookQueue();
     } catch (err: any) {
       showToast(`การซิงก์รูปภาพขัดข้อง: ${err?.message}`, 'info');
     } finally {

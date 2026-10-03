@@ -3058,7 +3058,8 @@ async function callGasDriveApi(gasUrl: string, payload: any): Promise<any> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-    redirect: 'follow'
+    redirect: 'follow',
+    signal: AbortSignal.timeout(45000)
   });
   if (!resp.ok) {
     throw new Error(`Google Apps Script ตอบกลับด้วยรหัส HTTP ${resp.status}`);
@@ -3864,13 +3865,25 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
 
     const forceAll = Boolean(req.body?.force);
     const rescanAi = Boolean(req.body?.rescanAi);
+    const batchSize = Math.min(Math.max(Number(req.body?.batchSize) || 5, 1), 10);
 
-    // Fetch inbox items
+    // Count remaining pending items
+    let countQuery = client
+      .from('line_inbox')
+      .select('id', { count: 'exact', head: true });
+
+    if (!forceAll) {
+      countQuery = countQuery.or('drive_file_id.is.null,drive_file_id.eq.');
+    }
+
+    const { count: totalPendingCount } = await countQuery;
+
+    // Fetch inbox items in small safe batch (default 5 items to avoid Render 100s timeout / OOM)
     let query = client
       .from('line_inbox')
       .select('id, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
       .order('received_at', { ascending: false })
-      .limit(100);
+      .limit(batchSize);
 
     if (!forceAll) {
       query = query.or('drive_file_id.is.null,drive_file_id.eq.');
@@ -3884,7 +3897,13 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
 
     const pending = rows || [];
     if (pending.length === 0) {
-      return res.json({ success: true, uploadedCount: 0, message: 'รูปบิลทั้งหมดเชื่อมต่อกับ Google Drive แล้ว ไม่มีรายการค้างอยู่' });
+      return res.json({
+        success: true,
+        uploadedCount: 0,
+        remainingCount: 0,
+        hasMore: false,
+        message: 'รูปบิลทั้งหมดเชื่อมต่อกับ Google Drive แล้ว ไม่มีรายการค้างอยู่'
+      });
     }
 
     let uploadedCount = 0;
@@ -4022,13 +4041,18 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
       }
     }
 
+    const remainingCount = Math.max(0, (totalPendingCount || pending.length) - uploadedCount);
+    const hasMore = remainingCount > 0 && uploadedCount > 0;
+
     return res.json({
       success: true,
       uploadedCount,
       aiRescanCount,
-      totalPending: pending.length,
+      totalPending: totalPendingCount || pending.length,
+      remainingCount,
+      hasMore,
       errors: errors.slice(0, 5),
-      message: `ดึงรูปและอัปโหลดขึ้น Google Drive สำเร็จ ${uploadedCount}/${pending.length} ใบ (อ่านข้อมูลใหม่ด้วย AI ${aiRescanCount} ใบ)${errors.length > 0 ? ` [พบปัญหา ${errors.length} รายการ]` : ''}`
+      message: `ดึงรูปและอัปโหลดขึ้น Google Drive สำเร็จ ${uploadedCount} ใบ${remainingCount > 0 ? ` (เหลืออีก ${remainingCount} ใบ)` : ' (ครบทั้งหมดแล้ว)'}`
     });
   } catch (err: any) {
     console.error('Drive Sync Error:', err);

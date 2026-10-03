@@ -4,6 +4,31 @@
 
 ---
 
+## [2026-10-03] แก้ไขข้อผิดพลาด 502 Bad Gateway ในการซิงก์รูปภาพกล่องพัก LINE ขึ้น Google Drive (`/api/drive/sync-inbox-images`)
+
+### ปัญหาที่ได้รับแจ้ง
+- เมื่อกดปุ่ม "ซิงก์รูปขึ้น Drive" ในหน้ากล่องพักบิล LINE เกิดข้อผิดพลาด `sync-inbox-images:1 Failed to load resource: the server responded with a status of 502 ()`
+
+### สาเหตุของปัญหา (Root Cause)
+1. **Request Timeout บน Render Proxy (> 100 วินาที):**
+   - ใน `server.ts` เดิมดึงบิลทั้งหมดครั้งละ 100 ใบ (`limit(100)`) และประมวลผลต่อกันเป็นลูปยาว
+   - `LineInboxView.tsx` มีการส่ง `rescanAi: true` ทำให้ระบบไปสั่งรัน Gemini AI วิเคราะห์ภาพบิลซ้ำทุกใบ (ใบละ 5–10 วินาที) บวกกับเวลาอัปโหลดภาพขนาดใหญ่ขึ้น Google Apps Script (ใบละ 5–8 วินาที)
+   - เมื่อมีบิลหลายใบ เวลาการประมวลผลเกิน 100 วินาที ส่งผลให้ Render Reverse Proxy ตัดการเชื่อมต่อทันทีด้วยรหัส **502 Bad Gateway**
+2. **ความเสี่ยง Memory Spike (OOM):**
+   - การคิวรี Base64 image 100 ใบพร้อมกันอาจใช้ RAM เกิน 300–400 MB ซึ่งใกล้เคียงกับ RAM Limit 512 MB ของ Render Free Tier
+
+### การแก้ไขแบบเจาะจง (Targeted Changes)
+1. **`server.ts`**:
+   - ปรับ Endpoint `POST /api/drive/sync-inbox-images` ให้รับ `batchSize` (จำกัดครั้งละ 5–10 ใบ ค่าเริ่มต้น 5 ใบ)
+   - ส่งข้อมูล `remainingCount` และ `hasMore` กลับไปให้ Frontend เพื่อให้ทราบจำนวนบิลที่เหลือ
+   - เพิ่ม `signal: AbortSignal.timeout(45000)` ใน `callGasDriveApi` ป้องกันการค้างของเครือข่ายเกิน 45 วินาที
+2. **`src/components/LineInboxView.tsx`**:
+   - ปรับปรุงฟังก์ชัน `handleSyncImagesToDrive` ให้ทำงานแบบ **Chunked Batch Loop (ครั้งละ 5 ใบ)**
+   - ปิด `rescanAi: false` เป็นค่าเริ่มต้นเพื่อไม่ให้เรียก Gemini AI ซ้ำกับบิลที่เคยสแกนแล้วโดยไม่จำเป็น
+   - เพิ่มการแสดงความคืบหน้าแบบ Real-time บน Toast เช่น: `กำลังซิงก์รูปภาพ... สำเร็จแล้ว 5 ใบ (เหลืออีก 12 ใบ)` จนครบทุกใบอย่างราบรื่น ไม่เกิด Timeout 502 อีก 100%
+
+---
+
 ## [2026-10-03] ตรวจสอบความสมบูรณ์ทั้งระบบ & อัปเดตเอกสารส่งต่องาน (HANDOVER_DOCUMENTATION.md)
 
 ### งานที่ดำเนินการ
