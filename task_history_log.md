@@ -4,6 +4,39 @@
 
 ---
 
+## [2026-10-03] LINE Inbox Critical Fixes — Multi-User Sync + doc_number + Drive Integration
+
+### ปัญหาที่ได้รับรายงาน
+1. กล่องพักบิลจาก LINE: เห็นรูปบิล แต่ไม่เห็นเก็บใน Google Drive
+2. เลขที่บิลบางบิลแสดง บางบิลไม่แสดง
+3. ระบบแสดงข้อมูลเฉพาะคนที่เปิดอยู่ ไม่แสดงข้อมูลทั้งหมดจาก Supabase
+4. Endpoint `POST /api/drive/sync-inbox-images` ที่ UI เรียกใช้ยังไม่มีในระบบ
+
+### Root Cause Analysis
+1. **`GET /api/line/inbox` อ่านจาก in-memory `lineWebhookInboxQueue` เท่านั้น** → Render.com เป็น ephemeral server เมื่อ restart queue หายหมด + บิลเก่าใน Supabase ไม่ถูกโหลด
+2. **ไม่มี `doc_number` dedicated column** → บิลที่ถูก save ตอน `queued` (ก่อน AI scan เสร็จ) มี `extractedData` ว่าง ทำให้ col6/col17/col4 ไม่มีค่า
+3. **ไม่มี endpoint `POST /api/drive/sync-inbox-images`** → ปุ่ม "ซิงก์รูปขึ้น Drive" ใน UI กด error ตลอด
+
+### การแก้ไข
+**`server.ts`:**
+- `GET /api/line/inbox` → เปลี่ยนดึงจาก **Supabase `line_inbox`** เป็นหลัก แล้ว merge กับ in-memory queue (บิลใหม่ที่ยังไม่ได้ persist) ทำให้ทุก user เห็นข้อมูลเหมือนกัน 100%
+- เพิ่ม `POST /api/drive/sync-inbox-images` → Upload รูปบิลทุกใบที่ยังไม่มีใน Drive (`drive_file_id IS NULL`) ขึ้น ZONE_00 ทั้ง GAS Mode และ Service Account Mode
+- ปรับ `analyzeLineBillWithGemini` → เพิ่ม regex fallback strip label prefix ("เลขที่ 12345" → "12345") ทำให้อ่านเลขที่บิลได้แม่นยำขึ้น
+
+**`src/utils/supabaseClient.ts`:**
+- DDL schema → เพิ่ม column `doc_number TEXT`, `doc_date TEXT`, `store_name TEXT`, `is_bill_document BOOLEAN` และ 3 indexes (doc_number, status, received_at) เพื่อ query เร็วขึ้น
+- `mapLineInboxToSupabase()` → Extract `doc_number` ตาม document type (col6/col17/col4) save เป็น dedicated column, เพิ่ม `drive_file_location`, `drive_web_view_link`, `is_bill_document`, `image_hash`
+- `mapSupabaseToLineInbox()` → Back-fill `col6`/`col17`/`col4` จาก `doc_number` column ถ้า `extractedData` ว่าง, restore `lineSenderAvatar`, `lineGroupId`, `duplicateInfo`, `verifiedOrderId`
+
+### ไฟล์ที่แก้ไข
+- `server.ts` — GET /api/line/inbox, POST /api/drive/sync-inbox-images, analyzeLineBillWithGemini
+- `src/utils/supabaseClient.ts` — DDL schema, mapLineInboxToSupabase, mapSupabaseToLineInbox
+
+### Git Commit
+`d626b1a` — fix(line-inbox): fetch from Supabase for multi-user sync + doc_number column + drive sync-inbox-images endpoint + improved docNumber extraction
+
+---
+
 ## [2026-10-03] Multi-User Supabase Cloud Inbox Synchronization (Single Source of Truth)
 
 ### ความต้องการ
