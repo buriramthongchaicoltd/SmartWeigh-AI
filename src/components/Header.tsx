@@ -25,7 +25,8 @@ import {
   Info,
   LogOut,
   CheckCircle2,
-  FileCheck2
+  FileCheck2,
+  Database
 } from 'lucide-react';
 import {
   AppUser,
@@ -80,6 +81,11 @@ interface HeaderProps {
   onDismissNotification?: (id: string) => void;
   onClearDismissedNotifications?: () => void;
   onOpenLoginModal?: () => void;
+  // Database connection status (shown as compact indicator in header)
+  isDbConnected?: boolean;
+  dbSyncTimestamp?: string | null;
+  onSyncDb?: () => void;
+  isSyncingDb?: boolean;
 }
 
 const TAB_META: Record<MainTabType, { label: string; subtitle: string; badgeText: string; badgeColor: string }> = {
@@ -174,7 +180,11 @@ export const Header: React.FC<HeaderProps> = ({
   dismissedNotifIds = [],
   onDismissNotification,
   onClearDismissedNotifications,
-  onOpenLoginModal
+  onOpenLoginModal,
+  isDbConnected,
+  dbSyncTimestamp,
+  onSyncDb,
+  isSyncingDb
 }) => {
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const notifRef = useRef<HTMLDivElement | null>(null);
@@ -381,6 +391,20 @@ export const Header: React.FC<HeaderProps> = ({
               <span>เพิ่มโครงการใหม่</span>
             </button>
           )}
+
+          {/* DB Connection Status Indicator (compact dot) */}
+          <button
+            type="button"
+            onClick={onSyncDb}
+            disabled={!isDbConnected || isSyncingDb}
+            title={isDbConnected ? `Supabase Cloud PostgreSQL — ซิงก์ล่าสุด: ${dbSyncTimestamp || 'เพิ่งเชื่อมต่อ'}` : 'ยังไม่ได้เชื่อมต่อฐานข้อมูล Supabase'}
+            className="flex items-center gap-1.5 px-2 py-2 rounded-xl border transition cursor-pointer text-xs disabled:cursor-default bg-white border-slate-200 hover:bg-slate-50"
+          >
+            <Database className={`w-3.5 h-3.5 ${isDbConnected ? 'text-emerald-600' : 'text-slate-400'}`} />
+            <span className={`w-2 h-2 rounded-full shrink-0 ${
+              isDbConnected ? 'bg-emerald-500 animate-pulse' : isSyncingDb ? 'bg-amber-400 animate-pulse' : 'bg-slate-300'
+            }`} />
+          </button>
 
           {/* Notification Bell Dropdown */}
           <div className="relative" ref={notifRef}>

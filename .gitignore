@@ -1,11 +1,10 @@
 # ========================
-# ความลับ & ข้อมูล sensitive
+# ความลับ & ข้อมูล sensitive (เฉพาะ local env)
 # ========================
 .env
 .env.local
 .env.production
-.supabase_config.json
-.google_drive_config.json
+
 
 # ========================
 # Local helper scripts (ไม่จำเป็นต้องขึ้น GitHub)

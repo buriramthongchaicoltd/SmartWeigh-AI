@@ -8,3 +8,20 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+
+      # ─── Supabase Cloud (ตั้งค่าครั้งเดียวบน Render Dashboard → ใช้งานได้ตลอด ไม่หายเมื่อ redeploy) ───
+      # วิธีตั้งค่า: Render Dashboard → Environment → Add Environment Variable
+      - key: SUPABASE_URL
+        sync: false   # sync: false = Render จะไม่แสดงค่าใน log (ป้องกัน secret รั่ว)
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # ─── Gemini AI API Key ───────────────────────────────────────────────────────────────────────
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # ─── (Optional) Direct PostgreSQL connection string ─────────────────────────────────────────
+      # - key: DATABASE_URL
+      #   sync: false

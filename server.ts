@@ -208,7 +208,9 @@ app.get('/api/status', (req: Request, res: Response) => {
 });
 
 // System Config API — Gemini Key management via Settings UI
-app.get('/api/system/config', (_req: Request, res: Response) => {
+app.get('/api/system/config', async (_req: Request, res: Response) => {
+  // Ensure latest config is restored from Supabase system_config (handles Render redeploys)
+  await restoreConfigsFromSupabase();
   const cfg = getSystemConfig();
   const activeKey = getActiveGeminiApiKey();
   const hasGeminiKey = Boolean(activeKey && activeKey.length > 5);
@@ -1169,10 +1171,12 @@ function buildLineQuoteReplyText(params: {
   }
 
   if (scanFailed || !cleanBillNo) {
+    // ยังไม่สามารถอ่านเลขที่บิลได้ — ขอให้ถ่ายใหม่ ไม่เก็บเข้าระบบ
     return [
-      `📥 เก็บรูปบิลเข้าระบบรอตรวจสอบแล้ว`,
-      `• สถานะ: รอแอดมินตรวจสอบเลขที่บิล`,
-      `• ผู้ส่ง: ${senderName}`
+      `❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่และส่งใหม่ครับ`,
+      `• สาเหตุ: ภาพไม่ชัด / เลขที่บิลเบลอหรืออ่านไม่ออก`,
+      `• ผู้ส่ง: ${senderName}`,
+      `📸 กรุณาถ่ายใหม่ให้ชัดขึ้น เพื่อให้บอทอ่านเลขที่เอกสารได้ถูกต้อง`
     ].join('\n');
   }
 
@@ -1220,6 +1224,68 @@ async function sendLineFreeQuoteReply(
   } catch (err) {
     console.warn('LINE Reply API warning:', err);
     return false;
+  }
+}
+
+/**
+ * Sends a retake-request reply to LINE group WITH @mention of the original sender.
+ * Uses LINE mention feature so the sender sees a notification directly.
+ * Only used for the "bill number unreadable" case — never for normal bill confirmations.
+ */
+async function sendLineRetakeReplyWithMention(
+  replyToken: string | undefined,
+  quoteToken: string | undefined,
+  userId: string,
+  senderName: string
+): Promise<boolean> {
+  if (!replyToken || !lineBotConfig.channelAccessToken || !lineBotConfig.autoQuoteReply) {
+    return false;
+  }
+
+  // LINE mention: @{senderName} ต้องอยู่ต้นข้อความ และระบุ index + length ให้ตรง
+  const mentionTag = `@${senderName}`;
+  const bodyText = [
+    `❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่และส่งใหม่ครับ`,
+    `• สาเหตุ: ภาพไม่ชัด / เลขที่บิลเบลอหรืออ่านไม่ออก`,
+    `📸 กรุณาถ่ายใหม่ให้ชัดขึ้น เพื่อให้บอทอ่านเลขที่เอกสารได้ถูกต้อง`
+  ].join('\n');
+  const fullText = `${mentionTag} ${bodyText}`;
+
+  try {
+    const messagePayload: Record<string, any> = {
+      type: 'text',
+      text: fullText,
+      mentionees: [
+        {
+          index: 0,                    // ตำแหน่งเริ่มต้นของ @mention ในข้อความ
+          length: mentionTag.length,   // ความยาวของ @mention tag
+          userId,                      // LINE userId ของผู้ส่งบิล
+          type: 'user'
+        }
+      ]
+    };
+    if (quoteToken) {
+      messagePayload.quoteToken = quoteToken;
+    }
+
+    const resp = await fetch('https://api.line.me/v2/bot/message/reply', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${lineBotConfig.channelAccessToken}`
+      },
+      body: JSON.stringify({ replyToken, messages: [messagePayload] })
+    });
+
+    if (!resp.ok) {
+      // Fallback: ถ้า mention ไม่ work (เช่น userId unknown) ให้ส่งแบบปกติแทน
+      console.warn('[LINE Retake] Mention reply failed, falling back to plain reply');
+      return sendLineFreeQuoteReply(replyToken, quoteToken, `${senderName} — ${bodyText}`);
+    }
+    return true;
+  } catch (err) {
+    console.warn('[LINE Retake] Reply with mention error:', err);
+    return sendLineFreeQuoteReply(replyToken, quoteToken, `${senderName} — ${bodyText}`);
   }
 }
 
@@ -1536,7 +1602,9 @@ async function analyzeLineBillWithGemini(
 }
 
 // 1. Get & Update LINE OA Bot Configuration
-app.get('/api/line/config', (_req: Request, res: Response) => {
+app.get('/api/line/config', async (_req: Request, res: Response) => {
+  // Ensure latest config is restored from Supabase system_config (handles Render redeploys)
+  await restoreConfigsFromSupabase();
   return res.json({
     success: true,
     config: {
@@ -1711,8 +1779,9 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       }
 
       // Step 3: QUEUE-FIRST SAFETY — Push into queue immediately BEFORE AI scan so zero bills are ever dropped!
+      // ID กฎ: LINE_{messageId} ตาม Blueprint — messageId ของ LINE เป็น unique key ป้องกัน duplicate อัตโนมัติ
       const inboxItem: any = {
-        id: `line-bill-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: messageId ? `LINE_${messageId}` : `LINE_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`,
         lineMessageId: messageId,
         lineQuoteToken: quoteToken,
         lineReplyToken: replyToken,
@@ -1780,7 +1849,19 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         const billNo = analysis.extractedData.col17 || analysis.extractedData.col6 || analysis.extractedData.col4 || '';
         const storeName = analysis.extractedData.col8 || '';
 
-        // Check duplicate within existing webhook queue
+        // กฎ: ถ้าเป็นเอกสารบิล แต่อ่านเลขที่ไม่ได้ — @mention ผู้ส่ง ขอถ่ายใหม่ ไม่บันทึกเข้าระบบ
+        if (analysis.isBillDocument && !billNo) {
+          inboxItem.status = 'scan_failed';
+          // ใช้ mention function เพื่อ @mention ตรงไปยังผู้ส่งในกลุ่ม LINE
+          inboxItem.botReplySent = await sendLineRetakeReplyWithMention(replyToken, quoteToken, userId, senderName);
+          inboxItem.botReplyText = `@${senderName} ❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่`;
+          // ลบออกจาก in-memory queue — ไม่บันทึก Supabase (skip Step 5 & 6)
+          const qIdx = lineWebhookInboxQueue.indexOf(inboxItem);
+          if (qIdx !== -1) lineWebhookInboxQueue.splice(qIdx, 1);
+          console.log(`[LINE Webhook] Bill no unreadable — @mentioned ${senderName} to retake. NOT saved. messageId=${messageId}`);
+          continue;
+        }
+
         const dupInQueue = lineWebhookInboxQueue.find(
           other =>
             other.id !== inboxItem.id &&
@@ -1919,8 +2000,10 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
     }
 
     const receivedAt = new Date().toISOString();
-    const inboxId = `line-sim-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
-    const messageId = `MSG-${Date.now()}`;
+    const simTimestamp = Date.now();
+    // ID กฎ: LINE_SIM_{timestamp} — บ่งบอกชัดว่าเป็น simulation (ไม่มี LINE messageId จริง)
+    const inboxId = `LINE_SIM_${simTimestamp}`;
+    const messageId = `SIM_MSG_${simTimestamp}`;
     const quoteToken = `QT-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
 
     try {
@@ -2166,25 +2249,42 @@ interface ServerDbConfig {
   lastTestedAt?: string;
 }
 
-function getStoredDbConfig(): ServerDbConfig {
+function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
   let fileConfig: Partial<ServerDbConfig> = {};
   try {
     if (fs.existsSync(CONFIG_FILE_PATH)) {
       const content = fs.readFileSync(CONFIG_FILE_PATH, 'utf-8');
-      fileConfig = JSON.parse(content);
+      const parsed = JSON.parse(content);
+      // ใช้ค่าจาก file เฉพาะ field ที่ไม่ว่างเปล่า
+      if (parsed && typeof parsed === 'object') fileConfig = parsed;
     }
   } catch (err) {
     console.warn('[DB Config] Failed to read .supabase_config.json', err);
   }
 
+  // Default Project Supabase URL (ฝังเป็นค่าตั้งต้นของระบบ ไม่ต้องกรอกใหม่)
+  const DEFAULT_SUPABASE_URL = 'https://beytwcmjebrqpormoulh.supabase.co';
+
+  // Priority: UI file config > Environment Variable > Project Default
+  const supabaseUrl = (fileConfig.supabaseUrl?.trim() || process.env.SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
+  const supabaseAnonKey = (fileConfig.supabaseAnonKey?.trim() || process.env.SUPABASE_ANON_KEY || '').trim();
+  const supabaseServiceRoleKey = (fileConfig.supabaseServiceRoleKey?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const pgConnectionString = (fileConfig.pgConnectionString?.trim() || process.env.DATABASE_URL || '').trim();
+
+  // Detect config source for UI display and logging
+  const hasFileConfig = Boolean(fileConfig.supabaseUrl?.trim() || fileConfig.supabaseAnonKey?.trim());
+  const hasEnvConfig = Boolean(process.env.SUPABASE_URL || process.env.SUPABASE_ANON_KEY);
+  const configSource = hasFileConfig ? 'ui_config' : hasEnvConfig ? 'env_var' : 'none';
+
   return {
-    supabaseUrl: (fileConfig.supabaseUrl || process.env.SUPABASE_URL || '').trim(),
-    supabaseAnonKey: (fileConfig.supabaseAnonKey || process.env.SUPABASE_ANON_KEY || '').trim(),
-    supabaseServiceRoleKey: (fileConfig.supabaseServiceRoleKey || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim(),
-    pgConnectionString: (fileConfig.pgConnectionString || process.env.DATABASE_URL || '').trim(),
+    supabaseUrl,
+    supabaseAnonKey,
+    supabaseServiceRoleKey,
+    pgConnectionString,
     isEnabled: fileConfig.isEnabled !== undefined ? fileConfig.isEnabled : true,
     autoSyncIntervalMinutes: fileConfig.autoSyncIntervalMinutes || 15,
-    lastTestedAt: fileConfig.lastTestedAt
+    lastTestedAt: fileConfig.lastTestedAt,
+    _source: configSource
   };
 }
 
@@ -2289,6 +2389,8 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
       config: {
         isConfigured,
         isEnabled: cfg.isEnabled,
+        // แสดง source เพื่อให้ UI บอกผู้ใช้ได้ว่า config มาจากไหน
+        configSource: (cfg as any)._source || 'none', // 'env_var' | 'ui_config' | 'none'
         mode: cfg.pgConnectionString
           ? 'postgres_direct'
           : cfg.supabaseUrl
@@ -2333,6 +2435,10 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
       isEnabled: isEnabled !== undefined ? Boolean(isEnabled) : undefined,
       autoSyncIntervalMinutes:
         typeof autoSyncIntervalMinutes === 'number' ? autoSyncIntervalMinutes : undefined
+    });
+
+    setImmediate(() => {
+      restoreConfigsFromSupabase().catch(() => {});
     });
 
     return res.json({
@@ -2443,20 +2549,31 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
   }
 
   try {
+    const tablesCounts: Record<string, number> = {};
+    const tablesErrors: Record<string, string> = {};
+
     const checkTable = async (tableName: string) => {
       try {
-        const { error } = await client.from(tableName).select('id').limit(1);
-        if (!error) return true;
+        const { count, error } = await client.from(tableName).select('id', { count: 'exact', head: true });
+        if (!error) {
+          tablesCounts[tableName] = count ?? 0;
+          return true;
+        }
         if (
           error.code === '42P01' ||
           error.message?.includes('does not exist') ||
           error.message?.includes('not found')
         ) {
+          tablesErrors[tableName] = 'ไม่พบตารางในฐานข้อมูล';
           return false;
         }
-        // If RLS blocked or empty table, table actually exists!
+        // If error is permission/RLS or column issue, table exists but access is constrained
+        console.warn(`[DB Test] Table ${tableName} query notice:`, error.message);
+        tablesErrors[tableName] = error.message || 'ติดสิทธิ์ RLS หรือ Permission';
+        tablesCounts[tableName] = 0;
         return true;
-      } catch {
+      } catch (err: any) {
+        tablesErrors[tableName] = err?.message || 'Check failed';
         return false;
       }
     };
@@ -2477,6 +2594,8 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
       mode: 'supabase_rest',
       latencyMs,
       tables: tablesStatus,
+      tableCounts: tablesCounts,
+      tableErrors: Object.keys(tablesErrors).length > 0 ? tablesErrors : undefined,
       isSchemaReady: Object.values(tablesStatus).every(Boolean),
       message: isAnyTableFound
         ? 'เชื่อมต่อ Supabase Cloud สำเร็จ และพบตารางในฐานข้อมูล'
@@ -2654,6 +2773,37 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
       client.from('system_config').select('*')
     ]);
 
+    // Check and log errors for each table (e.g. RLS blocking, missing column)
+    const queryErrors: Record<string, string> = {};
+    if (ordersRes.error) {
+      console.error('[Sync-All] orders error:', ordersRes.error.message);
+      queryErrors.orders = ordersRes.error.message;
+    }
+    if (posRes.error) {
+      console.error('[Sync-All] purchase_orders error:', posRes.error.message);
+      queryErrors.purchase_orders = posRes.error.message;
+    }
+    if (storesRes.error) {
+      console.error('[Sync-All] stores error:', storesRes.error.message);
+      queryErrors.stores = storesRes.error.message;
+    }
+    if (projectsRes.error) {
+      console.error('[Sync-All] projects error:', projectsRes.error.message);
+      queryErrors.projects = projectsRes.error.message;
+    }
+    if (billingNotesRes.error) {
+      console.error('[Sync-All] billing_notes error:', billingNotesRes.error.message);
+      queryErrors.billing_notes = billingNotesRes.error.message;
+    }
+    if (lineInboxRes.error) {
+      console.error('[Sync-All] line_inbox error:', lineInboxRes.error.message);
+      queryErrors.line_inbox = lineInboxRes.error.message;
+    }
+    if (usersRes.error) {
+      console.error('[Sync-All] app_users error:', usersRes.error.message);
+      queryErrors.app_users = usersRes.error.message;
+    }
+
     const mappedOrders = (ordersRes.data || []).map(mapSupabaseToOrder);
     const mappedPOs = (posRes.data || []).map(mapSupabaseToPO);
     const mappedStores = (storesRes.data || []).map(mapSupabaseToStore);
@@ -2671,6 +2821,7 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
+      queryErrors: Object.keys(queryErrors).length > 0 ? queryErrors : undefined,
       data: {
         orders: mappedOrders,
         pos: mappedPOs,
@@ -3229,12 +3380,19 @@ async function getOrCreateSubfolder(accessToken: string, parentFolderId: string,
 // ----------------------------------------------------------------------------
 
 // 1. Get Google Drive configuration
-app.get('/api/drive/config', (req: Request, res: Response) => {
+app.get('/api/drive/config', async (req: Request, res: Response) => {
+  // Ensure latest config is restored from Supabase system_config (handles Render redeploys)
+  await restoreConfigsFromSupabase();
   const cfg = getStoredDriveConfig();
+  // isConfigured: gasWebAppUrl alone (GAS mode) is enough — rootFolderId may be configured later
+  const isConfigured = Boolean(
+    cfg.gasWebAppUrl ||
+    (cfg.rootFolderId && (cfg.serviceAccountEmail || cfg.directAccessToken || cfg.refreshToken))
+  );
   res.json({
     success: true,
     config: {
-      isConfigured: Boolean(cfg.rootFolderId && (cfg.gasWebAppUrl || cfg.serviceAccountEmail || cfg.directAccessToken || cfg.refreshToken)),
+      isConfigured,
       isEnabled: cfg.isEnabled,
       connectionMode: cfg.connectionMode || (cfg.gasWebAppUrl ? 'gas' : 'service_account'),
       gasWebAppUrl: cfg.gasWebAppUrl || null,
@@ -3876,6 +4034,17 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
 async function runStartupSelfTest() {
   console.log('[Startup] Running self-test for configured services...');
   startupStatus.ranAt = new Date().toISOString();
+
+  // Log config source so it's clear in Render logs where each value comes from
+  const _dbCfgForLog = getStoredDbConfig() as any;
+  console.log(`[Startup] Supabase config source: ${_dbCfgForLog._source}`);
+  if (_dbCfgForLog._source === 'env_var') {
+    console.log('[Startup] ✅ Supabase credentials loaded from Environment Variables (Render Dashboard) — ไม่หายเมื่อ redeploy');
+  } else if (_dbCfgForLog._source === 'ui_config') {
+    console.log('[Startup] ⚠️  Supabase credentials loaded from local file (.supabase_config.json) — จะหายเมื่อ Render redeploy! แนะนำให้ตั้งค่าเป็น Environment Variables แทน');
+  } else {
+    console.log('[Startup] ❌ Supabase: ยังไม่มีค่า — กรุณาตั้งค่า SUPABASE_URL, SUPABASE_ANON_KEY ใน Render Dashboard → Environment');
+  }
 
   // --- 1. Test Supabase ---
   const dbCfg = getStoredDbConfig();

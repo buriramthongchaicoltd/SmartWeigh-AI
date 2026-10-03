@@ -1,0 +1,5 @@
+{
+  "supabaseUrl": "https://beytwcmjebrqpormoulh.supabase.co",
+  "isEnabled": true,
+  "autoSyncIntervalMinutes": 15
+}

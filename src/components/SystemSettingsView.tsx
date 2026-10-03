@@ -213,6 +213,7 @@ interface SystemSettingsViewProps {
     projects: ProjectRecord[];
     billingNotes: BillingNoteRecord[];
   }) => void;
+  onReloadDatabase?: () => Promise<void>;
   showToast: (msg: string, type?: 'success' | 'info') => void;
 }
 
@@ -230,6 +231,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   onUpdateSettings,
   onRestoreBackup,
   onSyncFromCloud,
+  onReloadDatabase,
   showToast
 }) => {
   const [subTab, setSubTab] = useState<'settings' | 'backup' | 'database' | 'handover'>('settings');
@@ -260,8 +262,11 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     lastTestedAt?: string | null;
     message?: string;
     tables?: Record<string, boolean>;
+    tableCounts?: Record<string, number>;
+    tableErrors?: Record<string, string>;
     isSchemaReady?: boolean;
     serverVersion?: string;
+    configSource?: 'env_var' | 'ui_config' | 'none'; // แหล่งที่มาของ config
   } | null>(null);
   const [isLoadingDbConfig, setIsLoadingDbConfig] = useState(false);
   const [isTestingDb, setIsTestingDb] = useState(false);
@@ -535,6 +540,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           hasServiceKey: data.config.hasServiceKey,
           hasPgConnection: data.config.hasPgConnection,
           lastTestedAt: data.config.lastTestedAt,
+          configSource: data.config.configSource || 'none',
           // Keep isConnected from previous test unless not configured
           isConnected: data.config.isConfigured ? (prev?.isConnected ?? undefined) : false
         }));
@@ -574,6 +580,14 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             ? `✅ เชื่อมต่อสำเร็จ (${data.latencyMs ?? '—'} ms) — พร้อมใช้งาน`
             : data.error || 'เชื่อมต่อไม่สำเร็จ กรุณาตรวจสอบ Key'
         }));
+        // ถ้าต่อได้สำเร็จ และในแอปยังไม่มี orders/pos/stores ให้ซิงก์ดึงข้อมูลมาแสดงทันที
+        if (data.success && data.isConnected && orders.length === 0 && pos.length === 0 && stores.length === 0) {
+          if (onReloadDatabase) {
+            onReloadDatabase();
+          } else if (onSyncFromCloud) {
+            handleSyncFromCloud();
+          }
+        }
       } catch {
         // silent — don't show error toast on auto-test
       }
@@ -623,6 +637,11 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       if (data.success) {
         setStartupStatus(data);
         await Promise.all([loadDatabaseConfig(), loadDriveConfig()]);
+        if (onReloadDatabase) {
+          await onReloadDatabase();
+        } else if (onSyncFromCloud) {
+          await handleSyncFromCloud();
+        }
         showToast('ทดสอบระบบอัตโนมัติ (Self-Test) ทั้งหมดสำเร็จเรียบร้อย');
       } else {
         showToast(data.error || 'การทดสอบตนเองไม่สำเร็จ', 'info');
@@ -673,7 +692,13 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const data = await res.json();
       if (data.success) {
         showToast(data.message || 'บันทึกการตั้งค่าฐานข้อมูลสำเร็จ');
-        loadDatabaseConfig();
+        await loadDatabaseConfig();
+        // ทันทีที่บันทึกสำเร็จ ให้ดึงข้อมูลจาก Supabase Cloud เข้าสู่ระบบทันที
+        if (onReloadDatabase) {
+          await onReloadDatabase();
+        } else if (onSyncFromCloud) {
+          await handleSyncFromCloud();
+        }
       } else {
         showToast(data.error || 'บันทึกการตั้งค่าไม่สำเร็จ', 'info');
       }
@@ -703,6 +728,12 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       }));
       if (data.success && data.isConnected) {
         showToast(`เชื่อมต่อสำเร็จ (${data.latencyMs} ms) — ${data.message}`);
+        // ทันทีที่ทดสอบเชื่อมต่อสำเร็จ ให้ดึงข้อมูลจาก Supabase Cloud เข้าสู่ระบบทันที
+        if (onReloadDatabase) {
+          onReloadDatabase();
+        } else if (onSyncFromCloud) {
+          handleSyncFromCloud();
+        }
       } else {
         showToast(data.error || 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ กรุณาตรวจสอบ URL และ Key', 'info');
       }
@@ -770,18 +801,23 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const handleSyncFromCloud = async () => {
     setIsSyncingDb(true);
     try {
-      const res = await fetch('/api/database/sync-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      const data = await res.json();
-      if (data.success && data.data) {
-        if (onSyncFromCloud) {
-          onSyncFromCloud(data.data);
-        }
-        showToast(`ดึงข้อมูลจาก Cloud สำเร็จ: DO ${data.counts?.orders || 0} ใบ, PO ${data.counts?.pos || 0} ใบ`);
+      if (onReloadDatabase) {
+        await onReloadDatabase();
+        showToast('ดึงและซิงก์ข้อมูลทั้งหมดจาก Supabase Cloud เรียบร้อยแล้ว!');
       } else {
-        showToast(data.error || 'ดึงข้อมูลไม่สำเร็จ', 'info');
+        const res = await fetch('/api/database/sync-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (data.success && data.data) {
+          if (onSyncFromCloud) {
+            onSyncFromCloud(data.data);
+          }
+          showToast(`ดึงข้อมูลจาก Cloud สำเร็จ: DO ${data.counts?.orders || 0} ใบ, PO ${data.counts?.pos || 0} ใบ`);
+        } else {
+          showToast(data.error || 'ดึงข้อมูลไม่สำเร็จ', 'info');
+        }
       }
     } catch (err: any) {
       showToast(`ดึงข้อมูลขัดข้อง: ${err?.message}`, 'info');
@@ -1998,6 +2034,49 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 </div>
               </div>
 
+              {/* Banner: แจ้ง config source — แนะนำให้ใช้ env vars แทน ui config */}
+              {dbStatus && dbStatus.configSource !== 'env_var' && (
+                <div className={`rounded-xl border p-3.5 flex items-start gap-3 text-sm ${
+                  dbStatus.configSource === 'ui_config'
+                    ? 'bg-amber-50 border-amber-200'
+                    : 'bg-red-50 border-red-200'
+                }`}>
+                  <span className="text-xl mt-0.5 shrink-0">
+                    {dbStatus.configSource === 'ui_config' ? '⚠️' : '❌'}
+                  </span>
+                  <div>
+                    {dbStatus.configSource === 'ui_config' ? (
+                      <>
+                        <p className="font-bold text-amber-800">Config มาจาก UI — จะหายทุกครั้งที่ Redeploy!</p>
+                        <p className="text-amber-700 mt-1">เพื่อแก้ปัญหาถาวร กรุณาตั้งค่าเป็น Environment Variables บน Render Dashboard แทน:</p>
+                        <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-amber-800 bg-amber-100 rounded-lg p-2">
+                          <li>SUPABASE_URL = {dbStatus.supabaseUrl || 'https://xxx.supabase.co'}</li>
+                          <li>SUPABASE_ANON_KEY = eyJ...</li>
+                          <li>SUPABASE_SERVICE_ROLE_KEY = eyJ... (ถ้ามี)</li>
+                        </ul>
+                        <p className="text-amber-600 text-xs mt-1.5">วิธี: Render Dashboard → เลือก Service → <strong>Environment</strong> → Add Environment Variable → ตั้งครั้งเดียว ใช้ได้ตลอด ไม่หาย</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-bold text-red-800">ยังไม่ได้ตั้งค่า Supabase</p>
+                        <p className="text-red-700 mt-1">กรุณาตั้งค่า Environment Variables บน Render Dashboard:</p>
+                        <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-red-800 bg-red-100 rounded-lg p-2">
+                          <li>SUPABASE_URL</li>
+                          <li>SUPABASE_ANON_KEY</li>
+                          <li>SUPABASE_SERVICE_ROLE_KEY</li>
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              {dbStatus?.configSource === 'env_var' && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 flex items-center gap-2.5 text-sm">
+                  <span className="text-emerald-600 text-lg">✅</span>
+                  <p className="text-emerald-800 font-medium">Config โหลดจาก Environment Variables — ไม่หายเมื่อ Redeploy</p>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -2235,6 +2314,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     { key: 'billing_notes', name: '7. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' }
                   ].map(t => {
                     const isFound = dbStatus?.tables ? dbStatus.tables[t.key] : false;
+                    const rowCount = dbStatus?.tableCounts ? dbStatus.tableCounts[t.key] : undefined;
+                    const tableErr = dbStatus?.tableErrors ? dbStatus.tableErrors[t.key] : undefined;
                     return (
                       <div
                         key={t.key}
@@ -2245,8 +2326,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                         }`}
                       >
                         <div>
-                          <div className="font-bold">{t.name}</div>
+                          <div className="font-bold flex items-center gap-1.5">
+                            <span>{t.name}</span>
+                            {rowCount !== undefined && isFound && (
+                              <span className="font-mono text-[10px] font-bold text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded-md">
+                                {rowCount} แถว
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[10px] text-slate-500">{t.desc}</div>
+                          {tableErr && (
+                            <div className="text-[10px] text-amber-600 font-medium mt-0.5">
+                              ⚠️ {tableErr}
+                            </div>
+                          )}
                         </div>
                         <div>
                           {isFound ? (
@@ -2307,18 +2400,34 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
 
                 <div className="grid grid-cols-3 gap-2 text-center text-xs">
                   <div className="p-2 rounded-xl bg-slate-50 border border-slate-200">
-                    <div className="text-[10px] text-slate-500">ใบส่งของ 39 ช่อง</div>
+                    <div className="text-[10px] text-slate-500">ใบส่งของ 39 ช่อง (ในระบบ)</div>
                     <div className="font-bold font-mono text-slate-900 text-sm">{orders.length} ใบ</div>
                   </div>
                   <div className="p-2 rounded-xl bg-slate-50 border border-slate-200">
-                    <div className="text-[10px] text-slate-500">ใบสั่งซื้อ PO</div>
+                    <div className="text-[10px] text-slate-500">ใบสั่งซื้อ PO (ในระบบ)</div>
                     <div className="font-bold font-mono text-indigo-700 text-sm">{pos.length} ใบ</div>
                   </div>
                   <div className="p-2 rounded-xl bg-slate-50 border border-slate-200">
-                    <div className="text-[10px] text-slate-500">ร้านค้า / คู่ค้า</div>
+                    <div className="text-[10px] text-slate-500">ร้านค้า / คู่ค้า (ในระบบ)</div>
                     <div className="font-bold font-mono text-blue-700 text-sm">{stores.length} แห่ง</div>
                   </div>
                 </div>
+
+                {orders.length === 0 && pos.length === 0 && stores.length === 0 && dbStatus?.isConnected && (
+                  <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-800 text-xs flex items-center justify-between gap-2">
+                    <div className="text-[11px]">
+                      <span className="font-bold">💡 ฐานข้อมูลเชื่อมต่อแล้ว:</span> ข้อมูลในหน้าจอขณะนี้เป็น 0 หากต้องการดึงข้อมูลล่าสุดจาก Supabase Cloud มาแสดง สามารถกดดึงข้อมูลได้ทันที
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleSyncFromCloud}
+                      disabled={isSyncingDb}
+                      className="px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-bold text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {isSyncingDb ? 'กำลังดึง...' : 'ดึงข้อมูลเดี๋ยวนี้'}
+                    </button>
+                  </div>
+                )}
 
                 <div className="space-y-2 pt-1 text-xs">
                   <button

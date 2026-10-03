@@ -283,16 +283,6 @@ export default function App() {
         if (Array.isArray(d.users) && d.users.length > 0) setUsers(ensureSystemMasterAdmin(d.users));
         if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
 
-        // Clear legacy local storage once DB is successfully loaded
-        try {
-          localStorage.removeItem(STORAGE_ORDERS_KEY);
-          localStorage.removeItem(STORAGE_STORES_KEY);
-          localStorage.removeItem(STORAGE_POS_KEY);
-          localStorage.removeItem(STORAGE_PROJECTS_KEY);
-          localStorage.removeItem(STORAGE_LINE_INBOX_KEY);
-          localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
-        } catch {}
-
         const hasDbOrdersOrStores = (d.orders?.length || 0) > 0 || (d.stores?.length || 0) > 0 || (d.pos?.length || 0) > 0;
         if (!hasDbOrdersOrStores) {
           // If DB is newly connected and completely empty, check if user has old localStorage data to migrate
@@ -330,6 +320,16 @@ export default function App() {
           } catch (e) {
             console.warn('Auto-migration check error:', e);
           }
+        } else {
+          // Clear legacy local storage once DB is successfully loaded with data
+          try {
+            localStorage.removeItem(STORAGE_ORDERS_KEY);
+            localStorage.removeItem(STORAGE_STORES_KEY);
+            localStorage.removeItem(STORAGE_POS_KEY);
+            localStorage.removeItem(STORAGE_PROJECTS_KEY);
+            localStorage.removeItem(STORAGE_LINE_INBOX_KEY);
+            localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
+          } catch {}
         }
       } else {
         setIsDbConnected(false);
@@ -2284,13 +2284,28 @@ export default function App() {
     stores?: StoreMerchant[];
     projects?: ProjectRecord[];
     billingNotes?: BillingNoteRecord[];
+    lineInbox?: LineBillInboxItem[];
+    users?: AppUser[];
+    systemSettings?: SystemSettings;
   }) => {
-    if (cloudData.orders && Array.isArray(cloudData.orders)) setOrders(cloudData.orders);
+    if (cloudData.orders && Array.isArray(cloudData.orders)) setOrders(reconcileAndHealOrders(cloudData.orders));
     if (cloudData.pos && Array.isArray(cloudData.pos)) setPos(cloudData.pos);
     if (cloudData.stores && Array.isArray(cloudData.stores)) setStores(cloudData.stores);
     if (cloudData.projects && Array.isArray(cloudData.projects)) setProjects(cloudData.projects);
     if (cloudData.billingNotes && Array.isArray(cloudData.billingNotes)) setBillingNotes(cloudData.billingNotes);
+    if (cloudData.lineInbox && Array.isArray(cloudData.lineInbox)) setLineInbox(cloudData.lineInbox);
+    if (cloudData.users && Array.isArray(cloudData.users) && cloudData.users.length > 0) setUsers(ensureSystemMasterAdmin(cloudData.users));
+    if (cloudData.systemSettings) setSystemSettings(normalizeSystemSettings(cloudData.systemSettings));
+    setIsDbConnected(true);
+    setDbSyncTimestamp(new Date().toLocaleTimeString('th-TH'));
   };
+
+  // Re-fetch database data when switching to business tabs to keep views fresh
+  useEffect(() => {
+    if (isDbConnected && activeTab !== 'settings') {
+      fetchDatabaseData();
+    }
+  }, [activeTab]);
 
   // Project count strictly from registered projects in `projects`
   const totalUniqueProjectsCount = projects.length;
@@ -2361,59 +2376,14 @@ export default function App() {
           onDismissNotification={(id) => setDismissedNotifIds(prev => [...prev, id])}
           onClearDismissedNotifications={() => setDismissedNotifIds([])}
           onOpenLoginModal={() => setIsLoginModalOpen(true)}
+          isDbConnected={isDbConnected}
+          dbSyncTimestamp={dbSyncTimestamp}
+          onSyncDb={fetchDatabaseData}
+          isSyncingDb={isSyncingDb}
         />
 
         {/* Main Container */}
         <main className="flex-1 max-w-[1920px] w-full mx-auto p-3 md:p-4 space-y-4 overflow-x-hidden">
-          {/* 100% Real Database Mode Live Status Indicator */}
-          {isDbConnected ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-white border border-emerald-200/90 px-3.5 py-2 rounded-xl text-xs shadow-2xs">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shadow-xs"></span>
-                <span className="font-bold text-slate-800">ระบบทำงานบนฐานข้อมูลจริง 100%:</span>
-                <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/60">
-                  Supabase Cloud PostgreSQL
-                </span>
-                {dbSyncTimestamp && (
-                  <span className="text-slate-500 hidden sm:inline">
-                    (ซิงก์ล่าสุด {dbSyncTimestamp})
-                  </span>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={fetchDatabaseData}
-                disabled={isSyncingDb}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition cursor-pointer disabled:opacity-50"
-                title="ดึงข้อมูลล่าสุดจากฐานข้อมูล Supabase"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingDb ? 'animate-spin' : ''}`} />
-                <span>{isSyncingDb ? 'กำลังซิงก์...' : 'ซิงก์ฐานข้อมูล'}</span>
-              </button>
-            </div>
-          ) : isDbLoaded ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-50 border border-amber-200 px-3.5 py-2.5 rounded-xl text-xs text-amber-900 shadow-2xs">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <div>
-                  <span className="font-bold">ยังไม่ได้เชื่อมต่อฐานข้อมูล Supabase Cloud: </span>
-                  <span>กรุณาระบุ URL & Key ในหน้าตั้งค่าระบบ เพื่อเปิดใช้งานฐานข้อมูลจริงแบบ 100%</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveTab('settings')}
-                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold transition cursor-pointer shrink-0"
-              >
-                ไปตั้งค่าฐานข้อมูล
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 bg-white border border-slate-200 px-3.5 py-2 rounded-xl text-xs text-slate-600 shadow-2xs">
-              <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
-              <span>กำลังเชื่อมต่อและโหลดข้อมูลจากฐานข้อมูล Supabase Cloud PostgreSQL...</span>
-            </div>
-          )}
           {/* KPI Statistics Bar shown ONLY on DO (39-Col) & Analytics views */}
           {(activeTab === 'orders' || activeTab === 'analytics') && (
             <StatSummaryCards
@@ -2615,6 +2585,7 @@ export default function App() {
               onUpdateSettings={setSystemSettings}
               onRestoreBackup={handleRestoreBackup}
               onSyncFromCloud={handleSyncFromCloud}
+              onReloadDatabase={fetchDatabaseData}
               showToast={showToast}
             />
           )}

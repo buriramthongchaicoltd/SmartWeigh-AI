@@ -4,6 +4,224 @@
 
 ---
 
+## [2026-10-03] แก้ Config Endpoints ดึงจาก Supabase ก่อน Return + ย้าย DB Status ไปเป็น Icon บน Header
+
+### ปัญหาที่ได้รับรายงาน
+- ส่วน Gemini AI Key / LINE OA / Google Drive แสดง "ยังไม่ได้ตั้งค่า" แม้จะมีข้อมูลใน Supabase `system_config` ครบแล้ว
+- Banner แสดงสถานะ DB ใหญ่โตเกินไป ต้องการให้เป็นแค่ icon เล็กๆ บน header แทน
+
+### Root Cause
+1. **3 Endpoints ไม่ดึงจาก Supabase:** `GET /api/system/config`, `GET /api/line/config`, `GET /api/drive/config` อ่านค่าจาก memory/local file โดยตรง ไม่เคย call `restoreConfigsFromSupabase()` ก่อน return → ถ้า server เริ่มใหม่ก่อน Supabase connected หรือหลัง Render redeploy ค่าจะหายทันที
+2. **isConfigured ใน Drive ผิด:** ต้องการ `rootFolderId` แต่ user ตั้งค่าแค่ `gasWebAppUrl` (GAS mode ไม่จำเป็นต้องมี rootFolderId ก่อน) → ประเมินว่า "ยังไม่ configured" ทั้งที่ตั้งแล้ว
+
+### การแก้ไข
+**`server.ts`** (3 จุด):
+- `GET /api/system/config` (บรรทัด ~211): เปลี่ยนเป็น `async` + `await restoreConfigsFromSupabase()` ก่อน return
+- `GET /api/line/config` (บรรทัด ~1602): เปลี่ยนเป็น `async` + `await restoreConfigsFromSupabase()` ก่อน return
+- `GET /api/drive/config` (บรรทัด ~3379): เปลี่ยนเป็น `async` + `await restoreConfigsFromSupabase()` ก่อน return + แก้ `isConfigured = Boolean(cfg.gasWebAppUrl || (cfg.rootFolderId && (...)))`
+
+**`src/components/Header.tsx`** (2 จุด):
+- เพิ่ม props `isDbConnected`, `dbSyncTimestamp`, `onSyncDb`, `isSyncingDb` ใน `HeaderProps` interface
+- เพิ่ม DB status indicator เล็กๆ (Database icon + animated dot) ก่อน Notification Bell แทนที่ banner ใหญ่
+
+**`src/App.tsx`** (2 จุด):
+- ส่ง props `isDbConnected`, `dbSyncTimestamp`, `onSyncDb={fetchDatabaseData}`, `isSyncingDb` ไปให้ `<Header>` component
+- ลบ banner ใหญ่ 3 states (connected/not connected/loading) ใน main content area ออกทั้งหมด
+
+### ผลลัพธ์
+- Gemini AI Key / LINE OA / Google Drive ดึงค่าจาก Supabase ทุกครั้งที่ user เปิดหน้า Settings ✅
+- DB status แสดงเป็น icon Database + dot เล็กๆ บน header (animate-pulse เมื่อ connected) ✅
+- TypeScript: `tsc --noEmit` ผ่าน 0 errors ✅
+
+---
+
+## [2026-10-03] ฝังค่าเริ่มต้น Supabase และเปิดให้ Git Track ค่าคอนฟิก ไม่ต้องตั้งค่าซ้ำซ้อน
+
+### ปัญหาที่ได้รับรายงาน
+"ผมถามจริง คุณจะให้ เอา เว็บไปเปิดเคื่องอื่น ก็ต้องมานั่งตั้งค่าเชื่อมฐานข้อมูล ใหม่ทุกเครื่องของวะ มัยควร ให้ admin ตั้งครั้งเดียวเอา URL ของเว็บระบบไปเปิดที่ไหนก้ใช้งานได้เลยสิวะ ไม่ใช่ต้องตั้งใครตั้งมัน หรือแก้โค้ด แล้วส่งขึ้นไปก็ต้องมาตั้งค่าฐานข้อมุลใหม่แบบนั้นหรอ คิดหน่อยสิวะ"
+
+### ชี้แจงสถาปัตยกรรมและสาเหตุที่แท้จริง
+1. **การเปิดเครื่องอื่น:** ระบบนี้เป็นเว็บแอปพลิเคชันแบบรวมศูนย์ (Centralized Architecture) ทุกเครื่อง (มือถือ, แท็บเล็ต, PC เครื่องอื่น) เปิด URL เดียวกัน และคุยผ่านเซิร์ฟเวอร์ชุดเดียวกัน **ไม่ต้องมีใครตั้งค่าใหม่เลยสักเครื่อง**
+2. **ทำไมแก้โค้ดแล้วส่งขึ้นไป (Redeploy บน Render) ค่าถึงหาย:**
+   - ใน `.gitignore` มีการใส่ `.supabase_config.json` และ `.google_drive_config.json` เอาไว้
+   - ทำให้เมื่อ Git Push โค้ดขึ้นไป Render จะไม่มีไฟล์คอนฟิกนี้ติดไปด้วย Render จึงรีเซ็ตกลับเป็นค่าว่างทุกครั้งที่มีการ deploy
+
+### การแก้ไขและปรับปรุง
+1. **ปลดบล็อกใน `.gitignore`**: นำ `.supabase_config.json` และ `.google_drive_config.json` ออกจาก `.gitignore` เพื่อให้ไฟล์คอนฟิกที่แอดมินตั้งค่าไว้ถูกบันทึกขึ้น Git และส่งตรงไปที่ Render ได้อย่างถาวร
+2. **ฝังค่าเริ่มต้นใน `server.ts`**: เพิ่ม `DEFAULT_SUPABASE_URL = 'https://beytwcmjebrqpormoulh.supabase.co'` ลงใน `getStoredDbConfig()` เป็นค่าสำรองถาวรในโค้ด
+3. **สร้างไฟล์ `.supabase_config.json` เริ่มต้น**: บันทึกค่า URL พร้อมค่าคอนฟิกเริ่มต้นไว้ในโฟลเดอร์โปรเจกต์ เพื่อให้ทุกเครื่องเปิดเว็บมาใช้งานได้ทันที 100%
+4. **ความคงอยู่ถาวรของ 3 ระบบที่เหลือ (Gemini, LINE OA, Google Drive)**:
+   - ทั้ง 3 ระบบนี้มีฟังก์ชัน `persistConfigToSupabase` ซิงก์เก็บไว้ในตาราง `system_config` บน Supabase Cloud อัตโนมัติอยู่แล้ว
+   - เมื่อ Server เริ่มทำงาน (Startup) หรือเมื่อต่อ Supabase สำเร็จ จะมีฟังก์ชัน `restoreConfigsFromSupabase()` วิ่งไปดึงคอนฟิกของ Gemini AI, LINE Bot, และ Google Drive จาก Supabase Cloud กลับมาใส่เซิร์ฟเวอร์ทันที
+   - ดังนั้น เมื่อ Supabase เชื่อมต่อได้ถาวร ทั้ง 3 ระบบนี้จะ **คงอยู่ถาวร 100% โดยอัตโนมัติ** ไม่ต้องตั้งค่าใหม่เช่นกัน
+
+---
+
+## [2026-10-03] แก้ไขระบบดึงข้อมูลจาก Supabase Cloud อัตโนมัติทุกส่วนของโปรแกรม
+
+### ปัญหาที่ได้รับรายงาน
+"เชื่อมต่อฐานข้อมูล Supabase แล้วส่วนอื่นมันไม่ดึง จากฐานข้อมุลละ ออกแบบระบบยังไงวะเนี้ย เฮ้ย"
+
+### สาเหตุที่ตรวจพบ (Root Cause Analysis)
+1. **Frontend โหลดข้อมูลจาก Supabase เพียงครั้งเดียวตอนเปิดเว็บครั้งแรก (`onMount`):**
+   - เมื่อผู้ใช้เข้ามาเปิดหน้าเว็บครั้งแรก หากระบบยังไม่ได้ตั้งค่าเชื่อมต่อฐานข้อมูล ฟังก์ชัน `fetchDatabaseData()` จะรันรอบเดียวแล้วเงียบไป
+   - เมื่อผู้ใช้ไปที่แท็บตั้งค่า (Settings) กรอก Supabase URL และ Key แล้วกด "บันทึกการตั้งค่า" หรือ "ทดสอบการเชื่อมต่อ" ระบบเซฟลง Backend สำเร็จและขึ้น "เชื่อมต่อสำเร็จ (425 ms)" **แต่ไม่ได้สั่ง Trigger ให้ `fetchDatabaseData()` ดึงข้อมูลจาก Cloud เข้าสู่ State กลางของ App!**
+   - ทำให้ State ของ `orders`, `pos`, `stores`, `projects`, `billingNotes` ยังคงเป็น Array ว่าง `[]` ทุกแท็บจึงไม่แสดงข้อมูล
+2. **การสลับแท็บ (Tab Switching) ไม่มีการตรวจสอบและดึงข้อมูลสด:**
+   - เมื่อสลับแท็บจากหน้าตั้งค่าไปดูหน้า "ใบส่งของ (39 ช่อง)", "ใบสั่งซื้อ PO", "ทะเบียนร้านค้า" ระบบไม่ได้ Re-fetch ข้อมูลใหม่อัตโนมัติ
+3. **ปัญหาการล้าง `localStorage` ก่อนการย้ายข้อมูล (Migration Race Condition):**
+   - ใน `fetchDatabaseData()` มีคำสั่ง `localStorage.removeItem(...)` อยู่ก่อนการอ่านข้อมูลจาก LocalStorage ทำให้หากฐานข้อมูลบน Cloud เพิ่งสร้างใหม่ ข้อมูลในเครื่องจะถูกลบทิ้งก่อนที่จะถูกอ่านไปย้ายขึ้น Cloud
+4. **ความไม่ชัดเจนของหน้าจอตรวจสอบตาราง (Section 2 & 3):**
+   - ใน Section 2 หน้าตั้งค่า แสดงเพียง `[พบตาราง]` แต่ไม่ได้บอกว่าตารางนั้นมีข้อมูลกี่แถว (0 แถว หรือมีข้อมูล)
+   - ใน Section 3 แสดงยอดตัวเลขจาก State ในเครื่อง (`orders.length`) ซึ่งเป็น 0 จึงทำให้ผู้ใช้เข้าใจผิดว่าฐานข้อมูลไม่ดึงข้อมูล
+   - ใน `/api/database/sync-all` ไม่มีการ Log ข้อผิดพลาดของแต่ละตาราง หากติดปัญหา RLS หรือสิทธิ์ จะส่งค่ากลับเป็นว่างเปล่าอย่างเงียบๆ
+
+### การแก้ไขแบบเจาะจง (Targeted Implementation)
+1. **`server.ts`**:
+   - ปรับปรุง `/api/database/test`: ให้นับจำนวนแถวจริงในแต่ละตาราง (`{ count: 'exact', head: true }`) และเก็บ `tableCounts` พร้อม `tableErrors` ส่งกลับไปแสดงที่ Frontend
+   - ปรับปรุง `/api/database/sync-all`: ตรวจสอบและ Log ทุก Error ของแต่ละตาราง (`ordersRes.error`, `posRes.error`, etc.) และส่ง `queryErrors` กลับ Frontend เพื่อความโปร่งใส
+2. **`src/App.tsx`**:
+   - ส่ง `onReloadDatabase={fetchDatabaseData}` เข้าไปใน `<SystemSettingsView />`
+   - ปรับปรุง `handleSyncFromCloud`: ให้ครอบคลุมทุกตาราง (`orders`, `pos`, `stores`, `projects`, `billingNotes`, `lineInbox`, `users`, `systemSettings`) พร้อมรัน `reconcileAndHealOrders`
+   - เพิ่ม Auto-Revalidation เมื่อสลับแท็บ: หาก `isDbConnected` เป็น `true` เมื่อผู้ใช้สลับไปแท็บงานใดๆ จะดึงข้อมูลสดจาก Supabase ทันทีใน Background
+   - แก้ไขลำดับการลบ `localStorage`: ให้อ่านและ Auto-Migrate ข้อมูลขึ้น Cloud ให้สำเร็จก่อน แล้วจึงลบ `localStorage` เมื่อมั่นใจว่ามีข้อมูลใน Cloud แล้ว
+3. **`src/components/SystemSettingsView.tsx`**:
+   - ปรับปรุง `handleSaveDbConfig` และ `handleTestDbConnection`: ทันทีที่เชื่อมต่อสำเร็จ จะสั่งรัน `onReloadDatabase()` ดึงข้อมูลจาก Cloud มาลงทุกส่วนของ App ทันทีอัตโนมัติ
+   - ปรับปรุง `runSilentAutoTest` และ `handleRunFullSelfTest`: ให้ Auto-Sync ข้อมูลเข้าสู่ App ทันทีที่ตรวจพบว่าเชื่อมต่อฐานข้อมูลได้
+   - ใน Section 2 (ตารางทั้ง 7 ตาราง): แสดงจำนวนแถวข้อมูลจริง เช่น `[พบตาราง (12 แถว)]` หรือแสดงคำเตือนหากติดสิทธิ์ RLS
+   - ใน Section 3: เพิ่มการ์ดแจ้งสถานะและปุ่มด่วนสำหรับดึงข้อมูลจาก Cloud มาแสดงผลทันที
+
+---
+
+## [2026-10-03] แก้ปัญหาตั้งค่า Supabase Cloud หายทุกครั้งที่แก้โค้ด/Redeploy บน Render
+
+### ปัญหาที่ได้รับรายงาน
+"แก้โค้ดใหม่ ที่ไร ต้องตั้งค่า ข้อมูลการเชื่อมต่อ Supabase Cloud (ตั้งค่าได้จากหน้าเว็บทันที) ใหม่ทุกครั้งเลย งง มันควรฝังส่วนนี้ในโค้ดมัยวะ เพราะไม่งันก้ต้องตั่งใหม่ทุกครั้งมราแก้โค้ดสิ"
+
+### สาเหตุที่แท้จริง (Root Cause)
+- ระบบโฮสต์บน **Render Cloud** ซึ่งมีระบบไฟล์แบบ **Ephemeral Filesystem** (ไฟล์ที่เขียนลงดิสก์ระหว่างรัน เช่น `.supabase_config.json` จะถูกล้างและสร้างใหม่ทุกครั้งที่มีการ Push โค้ดหรือ Redeploy)
+- ข้อมูลการเชื่อมต่อ (Supabase URL, Anon Key, Service Role Key) ไม่ควร Hardcode ลง Git โดยตรง เพื่อความปลอดภัยของฐานข้อมูล (Security Best Practice)
+- โซลูชันที่ถูกต้อง 100% คือการตั้งค่าผ่าน **Environment Variables** บน Render Dashboard ซึ่ง Render จะจดจำไว้ตลอดกาล ไม่หายแม้จะแก้โค้ดหรือ Deploy กี่ร้อยครั้ง
+
+### การแก้ไขและปรับปรุงแบบเจาะจง
+1. **`render.yaml`**:
+   - เพิ่มรายการ Environment Variables สำหรับ Supabase และ Gemini:
+     - `SUPABASE_URL` (sync: false)
+     - `SUPABASE_ANON_KEY` (sync: false)
+     - `SUPABASE_SERVICE_ROLE_KEY` (sync: false)
+     - `GEMINI_API_KEY` (sync: false)
+   - ป้องกัน secret รั่วไหลใน log ด้วย `sync: false`
+
+2. **`server.ts`**:
+   - ปรับปรุง `getStoredDbConfig()`:
+     - ให้ลำดับความสำคัญ (Fallback Priority): อ่านค่าจาก Environment Variables (`process.env.SUPABASE_URL`, etc.)
+     - ระบุแหล่งที่มาของ Config (`configSource`: `'env_var'` | `'ui_config'` | `'none'`)
+   - ปรับปรุง `/api/database/config`: ส่ง `configSource` กลับไปให้ Frontend
+   - ปรับปรุง `runStartupSelfTest()`: Log ชัดเจนว่า Credentials มาจาก Environment Variables (ถาวร) หรือ Local File (ชั่วคราว) เพื่อความโปร่งใสในการ Monitor บน Render Logs
+   - กำหนด ID ของ Webhook Queue ให้สอดคล้องกับ Blueprint: `LINE_{messageId}` และ `LINE_SIM_{timestamp}`
+
+3. **`src/components/SystemSettingsView.tsx`**:
+   - อัปเดต `dbStatus` interface เพิ่มฟิลด์ `configSource`
+   - เพิ่ม Banner แจ้งสถานะในแท็บตั้งค่า Supabase Cloud:
+     - หากเป็น `ui_config`: แสดงคำเตือนสีส้มแจ้งว่าค่าจะหายเมื่อ Redeploy พร้อมแสดงชื่อตัวแปรและวิธีตั้งค่าบน Render Dashboard แบบทำครั้งเดียวจบ
+     - หากเป็น `env_var`: แสดง Badge สีเขียว ✅ "Config โหลดจาก Environment Variables — ไม่หายเมื่อ Redeploy"
+     - หากเป็น `none`: แสดงคำแนะนำตัวแปรที่ต้องตั้งค่า
+
+### วิธีการตั้งค่าให้จบถาวรบน Render Dashboard
+1. เข้าไปที่ **Render Dashboard** → เลือก Service ของโปรเจกต์
+2. คลิกแท็บ **Environment** ทางซ้าย
+3. คลิก **Add Environment Variable** และเพิ่ม 3 ค่า:
+   - `SUPABASE_URL` = URL ของ Supabase เช่น `https://xxxx.supabase.co`
+   - `SUPABASE_ANON_KEY` = Anon Public Key ของ Supabase
+   - `SUPABASE_SERVICE_ROLE_KEY` = Service Role Key (ถ้ามี)
+4. กด **Save Changes** — ต่อไปนี้ระบบจะจำค่านี้ตลอดกาล ไม่ต้องกรอกใหม่เมื่อแก้โค้ดอีกต่อไป!
+
+---
+
+## [2026-10-03] เพิ่ม @mention ผู้ส่งใน Reply ขอถ่ายบิลใหม่
+
+### ปัญหาที่ได้รับรายงาน
+"การขอให้ถ่ายใหม่ @ ถึงผู้ส่งบิลนั้นด้วยได้มัย เค้าจะได้เห็น"
+
+### การแก้ไขเจาะจง Function (`server.ts`)
+1. **เพิ่มฟังก์ชันใหม่ `sendLineRetakeReplyWithMention` (หลังบรรทัด ~1226):**
+   - ใช้ LINE Messaging API `mentionees` field เพื่อ @mention userId ของผู้ส่งในกลุ่ม
+   - ข้อความขึ้นต้นด้วย `@{senderName} ❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่และส่งใหม่ครับ`
+   - มี fallback อัตโนมัติ: หาก mention API ไม่สำเร็จ (เช่น userId ไม่รู้จัก) จะ fallback ไปส่งข้อความธรรมดาแทน ไม่ crash
+
+2. **แก้ Webhook handler early-exit (บรรทัด ~1848):**
+   - เปลี่ยนจาก `sendLineFreeQuoteReply(...)` เป็น `sendLineRetakeReplyWithMention(replyToken, quoteToken, userId, senderName)`
+   - ส่ง `userId` จาก `event.source.userId` เข้าไปเพื่อ mention
+
+### ผลลัพธ์ที่ผู้ส่งจะเห็นในกลุ่ม LINE
+```
+@ช่างสมชาย ❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่และส่งใหม่ครับ
+• สาเหตุ: ภาพไม่ชัด / เลขที่บิลเบลอหรืออ่านไม่ออก
+📸 กรุณาถ่ายใหม่ให้ชัดขึ้น เพื่อให้บอทอ่านเลขที่เอกสารได้ถูกต้อง
+```
+(ผู้ส่งจะได้รับ push notification จาก LINE เมื่อถูก @mention)
+
+### ไฟล์ที่แก้ไข
+- `server.ts` เพิ่มฟังก์ชัน `sendLineRetakeReplyWithMention` และแก้ webhook handler
+
+---
+
+## [2026-10-03] ปฏิเสธบิลที่อ่านเลขที่เอกสารไม่ได้ — ขอให้ถ่ายใหม่แทนการเก็บเข้าระบบ
+
+### ปัญหาที่ได้รับรายงาน
+"ถ้าอ่านเลขที่เอกสารไม่ได้ต้องส่งข้อความตอบกลับไปขอให้ถ่ายส่งใหม่ด้วยนะ ไม่ใช่ เก็บเข้าระบบทั้งที่อ่านเลขที่บิลไม่ได้"
+
+### สาเหตุที่ตรวจพบ (Root Cause)
+- `buildLineQuoteReplyText` บรรทัด ~1171: เมื่อ `!cleanBillNo` ตอบว่า "📥 เก็บรูปบิลเข้าระบบรอตรวจสอบแล้ว" ซึ่งผิด — ยังบันทึกเข้าระบบอยู่
+- Webhook handler ไม่มี early-exit เมื่ออ่านเลขที่ไม่ได้ ทำให้ record ถูก insert ลง Supabase ทุกครั้ง
+
+### การแก้ไขเจาะจง Function (`server.ts`)
+1. **`buildLineQuoteReplyText` (บรรทัด ~1171):**
+   - เดิม: `"📥 เก็บรูปบิลเข้าระบบรอตรวจสอบแล้ว / รอแอดมินตรวจสอบ"`
+   - ใหม่: `"❌ อ่านเลขที่บิลไม่ได้ — กรุณาถ่ายใหม่และส่งใหม่ครับ / 📸 กรุณาถ่ายใหม่ให้ชัดขึ้น"`
+
+2. **Webhook handler หลัง AI scan (บรรทัด ~1783):**
+   - เพิ่ม early-exit: `if (analysis.isBillDocument && !billNo)` 
+   - ส่ง retake reply ไปยังกลุ่ม LINE
+   - ลบ inboxItem ออกจาก in-memory queue (`lineWebhookInboxQueue.splice(...)`)
+   - `continue` ข้าม Step 5 (Drive upload) และ Step 6 (Supabase save) ทันที
+   - Log: `"Bill no unreadable — asked sender to retake. NOT saved."`
+
+### ผลที่ได้
+- บิลที่อ่านเลขที่ไม่ได้จะ **ไม่ถูกบันทึกเข้า Supabase และ Google Drive**
+- บอท LINE ตอบกลับในกลุ่มทันที ขอให้ถ่ายใหม่
+- กรณี AI ระเบิด exception (scanErr) ยังคงส่ง retake reply เช่นกัน (fallback เดิม)
+
+### ไฟล์ที่แก้ไข
+- `server.ts` บรรทัด ~1171 (reply builder) และ ~1783 (webhook handler early-exit)
+
+---
+
+## [2026-10-03] แก้ไข ID Format ของ line_inbox ตาม Blueprint
+
+### ปัญหาที่ได้รับรายงาน
+"กล่องพักบิลจาก LINE ทำมัย ID เอกสารมันเป็นแบบสุ่มละ ทั้งที่ ในเอกสาร กฎ ก็มีบอกว่าให้สร้างยังไง"
+
+### สาเหตุที่ตรวจพบ (Root Cause)
+- `server.ts` บรรทัด 1715 ใช้ `id: \`line-bill-${Date.now()}-${random}\`` ซึ่งเป็นแบบสุ่ม ไม่ตรงตาม Blueprint
+- Blueprint (`DATABASE_STORAGE_BLUEPRINT.md` บรรทัด 29) กำหนดให้ใช้ `LINE_<messageId>_<timestamp>.jpg` เป็นชื่อไฟล์ โดย `messageId` คือ unique key จาก LINE Messaging API
+
+### การแก้ไขเจาะจง Function (`server.ts`)
+1. **Webhook real event (ฟังก์ชัน LINE Webhook handler):**
+   - เดิม: `id: \`line-bill-${Date.now()}-${Math.floor(...)}\``
+   - ใหม่: `id: messageId ? \`LINE_${messageId}\` : \`LINE_${Date.now()}_${Math.floor(...)}\``
+   - เหตุผล: `messageId` ของ LINE เป็น globally unique string จาก platform ทำให้ป้องกัน duplicate ได้โดยอัตโนมัติ (ถ้า LINE ส่ง event ซ้ำ จะ upsert record เดิม ไม่สร้างใหม่)
+
+2. **Simulate endpoint (ฟังก์ชัน `/api/line/simulate`):**
+   - เดิม: `id: \`line-sim-${Date.now()}-${random}\``
+   - ใหม่: `id: \`LINE_SIM_${timestamp}\``
+   - เหตุผล: บ่งบอกชัดว่าเป็น simulation ไม่ใช่บิลจริง
+
+### ไฟล์ที่แก้ไข
+- `server.ts` บรรทัด ~1715 (webhook handler) และ ~1922 (simulate endpoint)
+
+---
+
 ## [2026-10-03] Full Historical Bill Recovery: LINE API Image Download + Gemini Re-Scan + Drive ZONE_00 Upload
 
 ### ปัญหาที่ได้รับรายงาน
