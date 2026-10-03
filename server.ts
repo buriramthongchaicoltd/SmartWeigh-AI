@@ -1569,21 +1569,25 @@ app.post('/api/line/config', (req: Request, res: Response) => {
 });
 
 // 2. Poll & Acknowledge Incoming Webhook Queue for Browser localStorage Sync
+// Columns for line_inbox list — EXCLUDES image_url (base64 ~500KB each) to prevent 33MB payload timeout
+const LINE_INBOX_LIST_COLUMNS = 'id,received_at,line_message_id,line_quote_token,line_sender_name,line_group_name,drive_file_id,drive_file_location,drive_web_view_link,detected_doc_type,ai_confidence,status,duplicate_of_order_id,duplicate_reason,bot_replied,bot_reply_mode,bot_reply_text,extracted_data,store_suggestion,doc_number,doc_date,store_name,is_bill_document,image_hash';
+
 app.get('/api/line/inbox', async (_req: Request, res: Response) => {
   try {
     const client = getSupabaseClient();
     if (client) {
       // Primary: fetch from Supabase so ALL users see the SAME bills (real-time multi-user)
+      // Intentionally exclude 'image_url' (base64 images) — loaded on-demand via /api/line/inbox/image/:id
       const { data, error } = await client
         .from('line_inbox')
-        .select('*')
+        .select(LINE_INBOX_LIST_COLUMNS)
         .order('received_at', { ascending: false })
         .limit(500);
 
       if (!error && Array.isArray(data)) {
         const supabaseItems = data.map(mapSupabaseToLineInbox);
 
-        // Merge in-memory queue (items not yet persisted to Supabase)
+        // Merge in-memory queue (items not yet persisted — these still have image in memory)
         const supabaseIds = new Set(supabaseItems.map((i: any) => i.id));
         const queueOnly = lineWebhookInboxQueue.filter(q => !supabaseIds.has(q.id));
         const merged = [...queueOnly, ...supabaseItems];
@@ -1596,6 +1600,30 @@ app.get('/api/line/inbox', async (_req: Request, res: Response) => {
   } catch (err: any) {
     console.warn('[GET /api/line/inbox] Error fetching from Supabase, falling back to queue:', err?.message);
     return res.json({ success: true, items: lineWebhookInboxQueue });
+  }
+});
+
+// Load single bill image on-demand (GET /api/line/inbox/image/:id)
+// Called only when user clicks to view/rescan a specific bill
+app.get('/api/line/inbox/image/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const client = getSupabaseClient();
+    if (!client) {
+      // Try in-memory queue
+      const qItem = lineWebhookInboxQueue.find(q => q.id === id);
+      if (qItem?.image) return res.json({ success: true, image: qItem.image });
+      return res.status(404).json({ success: false, error: 'ไม่พบรูปบิล' });
+    }
+    const { data, error } = await client
+      .from('line_inbox')
+      .select('id, image_url')
+      .eq('id', id)
+      .single();
+    if (error || !data) return res.status(404).json({ success: false, error: 'ไม่พบรูปบิล' });
+    return res.json({ success: true, image: data.image_url || '' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
@@ -2571,13 +2599,16 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
       });
     }
 
+    // NOTE: line_inbox intentionally excludes 'image_url' — base64 images are ~33MB total
+    // Images are loaded on-demand via GET /api/line/inbox/image/:id to prevent sync-all timeout
+    const LINE_INBOX_COLUMNS = 'id,received_at,line_message_id,line_quote_token,line_sender_name,line_group_name,drive_file_id,drive_file_location,drive_web_view_link,detected_doc_type,ai_confidence,status,duplicate_of_order_id,duplicate_reason,bot_replied,bot_reply_mode,bot_reply_text,extracted_data,store_suggestion,doc_number,doc_date,store_name,is_bill_document,image_hash';
     const [ordersRes, posRes, storesRes, projectsRes, billingNotesRes, lineInboxRes, usersRes, configRes] = await Promise.all([
       client.from('orders').select('*').order('created_at', { ascending: false }).limit(2000),
       client.from('purchase_orders').select('*').order('created_at', { ascending: false }),
       client.from('stores').select('*').order('name', { ascending: true }),
       client.from('projects').select('*').order('name', { ascending: true }),
       client.from('billing_notes').select('*').order('created_at', { ascending: false }),
-      client.from('line_inbox').select('*').order('received_at', { ascending: false }).limit(500),
+      client.from('line_inbox').select(LINE_INBOX_COLUMNS).order('received_at', { ascending: false }).limit(500),
       client.from('app_users').select('*').order('created_at', { ascending: true }),
       client.from('system_config').select('*')
     ]);

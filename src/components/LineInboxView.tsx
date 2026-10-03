@@ -87,12 +87,43 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     allowedGroupNames: []
   });
   const [rescanningId, setRescanningId] = useState<string | null>(null);
+  const [loadingImageId, setLoadingImageId] = useState<string | null>(null);
   const [previewImageModal, setPreviewImageModal] = useState<{
     image: string;
     title: string;
     replyText?: string;
   } | null>(null);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
+
+  // Load bill image on-demand from server (image_url is NOT in list payload to save bandwidth)
+  const handleOpenImagePreview = async (item: LineBillInboxItem) => {
+    const title = `บิลจาก ${item.lineSenderName} (${item.lineGroupName})`;
+    // If image is already in memory (e.g. from in-memory queue), use it directly
+    if (item.image && item.image.length > 10) {
+      setPreviewImageModal({ image: item.image, title, replyText: item.botReplyText });
+      return;
+    }
+    // If Drive link available, open in new tab instead
+    if (item.driveWebViewLink) {
+      window.open(item.driveWebViewLink, '_blank', 'noopener');
+      return;
+    }
+    // Load from server on-demand
+    setLoadingImageId(item.id);
+    try {
+      const resp = await fetch(`/api/line/inbox/image/${item.id}`);
+      const data = await resp.json();
+      if (data.success && data.image) {
+        setPreviewImageModal({ image: data.image, title, replyText: item.botReplyText });
+      } else {
+        showToast('ไม่พบรูปภาพบิลนี้ในระบบ', 'info');
+      }
+    } catch {
+      showToast('โหลดรูปภาพไม่สำเร็จ', 'info');
+    } finally {
+      setLoadingImageId(null);
+    }
+  };
 
   const handleSyncImagesToDrive = async () => {
     setIsSyncingDrive(true);
@@ -469,31 +500,37 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
                       {/* 2. Bill Image Thumbnail */}
                       <td className="py-2 px-2.5 border-r border-slate-200 text-center">
-                        {item.image ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setPreviewImageModal({
-                                image: item.image!,
-                                title: `บิลจาก ${item.lineSenderName} (${item.lineGroupName})`,
-                                replyText: item.botReplyText
-                              })
-                            }
-                            className="relative group w-10 h-12 rounded-lg overflow-hidden border border-slate-300 bg-slate-900 mx-auto flex items-center justify-center cursor-pointer shadow-2xs"
-                            title="คลิกเพื่อดูรูปบิลขยาย"
-                          >
+                        <button
+                          type="button"
+                          onClick={() => handleOpenImagePreview(item)}
+                          disabled={loadingImageId === item.id}
+                          className="relative group w-10 h-12 rounded-lg overflow-hidden border border-slate-300 bg-slate-800 mx-auto flex items-center justify-center cursor-pointer shadow-2xs"
+                          title={item.driveWebViewLink ? 'คลิกเพื่อเปิดใน Google Drive' : 'คลิกเพื่อดูรูปบิล'}
+                        >
+                          {loadingImageId === item.id ? (
+                            <RefreshCw className="w-3.5 h-3.5 text-white animate-spin" />
+                          ) : item.image && item.image.length > 10 ? (
                             <img
                               src={item.image}
                               alt="LINE Bill"
                               className="w-full h-full object-cover group-hover:scale-110 transition"
                             />
-                            <span className="absolute inset-0 bg-slate-950/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
-                              <Eye className="w-3.5 h-3.5" />
-                            </span>
-                          </button>
-                        ) : (
-                          <span className="text-slate-400 text-[10px]">-</span>
-                        )}
+                          ) : item.driveFileId ? (
+                            <>
+                              <Cloud className="w-4 h-4 text-blue-400" />
+                              <span className="absolute inset-0 bg-slate-950/50 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
+                                <Eye className="w-3.5 h-3.5" />
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <Eye className="w-3.5 h-3.5 text-slate-400" />
+                              <span className="absolute inset-0 bg-slate-950/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
+                                <Eye className="w-3.5 h-3.5" />
+                              </span>
+                            </>
+                          )}
+                        </button>
                       </td>
 
                       {/* 3. Sender & Time */}
