@@ -629,7 +629,9 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     line_quote_token: item.lineQuoteToken || null,
     line_sender_name: item.lineSenderName || null,
     line_group_name: item.lineGroupName || null,
-    image_url: item.image || null,
+    // ARCHITECTURE RULE: image_url is NEVER stored in Supabase.
+    // Images MUST be uploaded to Google Drive first. Only Drive link is stored in Supabase.
+    image_url: null,
     drive_file_id: item.driveFileId || null,
     drive_file_location: item.driveFileLocation || (item.driveFileId ? 'zone_00' : null),
     drive_web_view_link: item.driveWebViewLink || null,

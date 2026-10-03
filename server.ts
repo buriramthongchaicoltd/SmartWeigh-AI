@@ -1827,7 +1827,60 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, fallbackReply);
       }
 
-      // Persist directly to Supabase line_inbox table (100% Real Database)
+      // Step 5: Upload to Google Drive ZONE_00 BEFORE saving to Supabase
+      // Architecture rule: image MUST be in Drive, Supabase stores ONLY the Drive link
+      if (base64DataUrl && inboxItem.isBillDocument !== false) {
+        try {
+          const driveCfg = getStoredDriveConfig();
+          if (driveCfg.isEnabled && driveCfg.rootFolderId) {
+            const extData = inboxItem.extractedData as any;
+            const safeDocNo = (
+              extData?.col17 || extData?.col6 || extData?.col4 || inboxItem.id
+            ).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+            const fileName = `LINE_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
+            let driveResult: any = null;
+
+            if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+              driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+                action: 'upload',
+                rootFolderId: driveCfg.rootFolderId,
+                targetZone: 'zone_00',
+                fileName,
+                base64Image: base64DataUrl
+              });
+            } else {
+              const driveToken = await getDriveAccessToken();
+              if (driveToken) {
+                const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
+                if (zones.ZONE_00) {
+                  driveResult = await uploadFileToDrive({
+                    accessToken: driveToken,
+                    folderId: zones.ZONE_00,
+                    fileName,
+                    base64Data: base64DataUrl,
+                    mimeType
+                  });
+                }
+              }
+            }
+
+            if (driveResult && (driveResult.fileId || driveResult.success)) {
+              inboxItem.driveFileId = driveResult.fileId;
+              inboxItem.driveFileLocation = 'zone_00';
+              inboxItem.driveWebViewLink = driveResult.webViewLink;
+              console.log(`[LINE Webhook] Drive upload OK: ${fileName} (${driveResult.fileId})`);
+            } else {
+              console.warn('[LINE Webhook] Drive upload returned no fileId — image will be pending sync');
+            }
+          } else {
+            console.warn('[LINE Webhook] Google Drive not configured — image will NOT be stored in Drive. Please configure Drive in settings.');
+          }
+        } catch (driveErr) {
+          console.warn('[LINE Webhook] Drive upload error (non-blocking, bill safely queued):', driveErr);
+        }
+      }
+
+      // Step 6: Persist to Supabase (Drive link only, NO base64 image)
       try {
         const client = getSupabaseClient();
         if (client) {
@@ -1836,86 +1889,12 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       } catch (dbErr) {
         console.warn('[LINE Webhook] Failed to auto-save inboxItem to Supabase line_inbox table:', dbErr);
       }
-
-      // Auto-upload bill image to Google Drive ZONE_00 (fire-and-forget, never blocks webhook)
-      if (base64DataUrl && inboxItem.isBillDocument !== false) {
-        setImmediate(async () => {
-          try {
-            const driveCfg = getStoredDriveConfig();
-            if (driveCfg.isEnabled && driveCfg.rootFolderId) {
-              const safeDocNo = (
-                inboxItem.extractedData?.col17 ||
-                inboxItem.extractedData?.col6 ||
-                inboxItem.extractedData?.col4 ||
-                inboxItem.id
-              ).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
-
-              const fileName = `LINE_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
-
-              let driveResult: any = null;
-
-              // GAS Mode
-              if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
-                driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-                  action: 'upload',
-                  rootFolderId: driveCfg.rootFolderId,
-                  targetZone: 'zone_00',
-                  fileName,
-                  base64Image: base64DataUrl
-                });
-              } else {
-                // Service Account Mode
-                const driveToken = await getDriveAccessToken();
-                if (driveToken) {
-                  const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
-                  const zone00Id = zones.ZONE_00;
-                  if (zone00Id) {
-                    driveResult = await uploadFileToDrive({
-                      accessToken: driveToken,
-                      folderId: zone00Id,
-                      fileName,
-                      base64Data: base64DataUrl,
-                      mimeType
-                    });
-                  }
-                }
-              }
-
-              if (driveResult && (driveResult.fileId || driveResult.success)) {
-                const driveFileId = driveResult.fileId;
-                const webViewLink = driveResult.webViewLink;
-
-                // Update inboxItem in-memory with Drive file info
-                inboxItem.driveFileId = driveFileId;
-                inboxItem.driveFileLocation = 'zone_00';
-                inboxItem.driveWebViewLink = webViewLink;
-
-                // Update Supabase record with drive file info
-                try {
-                  const client = getSupabaseClient();
-                  if (client && driveFileId) {
-                    await client.from('line_inbox').update({
-                      drive_file_id: driveFileId,
-                      drive_file_location: 'zone_00',
-                      drive_web_view_link: webViewLink
-                    }).eq('id', inboxItem.id);
-                  }
-                } catch (updateErr) {
-                  console.warn('[LINE Webhook] Failed to update Drive file info in Supabase:', updateErr);
-                }
-                console.log(`[LINE Webhook] Bill image uploaded to Drive ZONE_00: ${fileName} (${driveFileId})`);
-              }
-            }
-          } catch (driveErr) {
-            console.warn('[LINE Webhook] Drive auto-upload warning (non-blocking):', driveErr);
-          }
-        });
-      }
     }
   } catch (err) {
     console.error('LINE Webhook handler error:', err);
   }
 });
+
 
 // 4. Interactive LINE OA Group Bot Simulator Endpoint (POST /api/line/simulate)
 // Allows full end-to-end testing of Queue-First storage, AI extraction, Duplicate check, and Quote Reply directly from the web UI
@@ -3702,13 +3681,15 @@ app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) =>
 
         if (driveResult && (driveResult.fileId || driveResult.success)) {
           const fileId = driveResult.fileId;
+          // Update Drive info AND clear image_url (delete base64 from Supabase - it belongs in Drive only!)
           await client.from('line_inbox').update({
             drive_file_id: fileId || null,
             drive_file_location: 'zone_00',
-            drive_web_view_link: driveResult.webViewLink || null
+            drive_web_view_link: driveResult.webViewLink || null,
+            image_url: null  // Free up Supabase storage — image is now safely in Google Drive
           }).eq('id', row.id);
           uploadedCount++;
-          console.log(`[Drive Sync Inbox] Uploaded: ${fileName} (${fileId})`);
+          console.log(`[Drive Sync Inbox] Uploaded & cleared base64 from Supabase: ${fileName} (${fileId})`);
         }
       } catch (uploadErr: any) {
         errors.push(`${row.id}: ${uploadErr?.message || 'upload error'}`);
