@@ -2329,6 +2329,8 @@ const DRIVE_CONFIG_FILE_PATH = path.resolve(__dirname, '.google_drive_config.jso
 
 interface ServerDriveConfig {
   rootFolderId: string;
+  connectionMode?: 'gas' | 'service_account';
+  gasWebAppUrl?: string;
   serviceAccountEmail?: string;
   serviceAccountPrivateKey?: string;
   serviceAccountJson?: string;
@@ -2366,8 +2368,13 @@ function getStoredDriveConfig(): ServerDriveConfig {
     }
   }
 
+  const gasUrl = (fileConfig.gasWebAppUrl || process.env.GOOGLE_APPS_SCRIPT_URL || '').trim();
+  const connMode = fileConfig.connectionMode || (gasUrl ? 'gas' : 'service_account');
+
   return {
     rootFolderId: (fileConfig.rootFolderId || process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || '').trim(),
+    connectionMode: connMode,
+    gasWebAppUrl: gasUrl,
     serviceAccountEmail: saEmail.trim(),
     serviceAccountPrivateKey: saKey.trim(),
     serviceAccountJson: rawSaJson.trim(),
@@ -2388,6 +2395,25 @@ function saveStoredDriveConfig(cfg: Partial<ServerDriveConfig>) {
   };
   fs.writeFileSync(DRIVE_CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
   return merged;
+}
+
+// Helper to call Google Apps Script Web App (Zero-Junk & Verified-Only Move without Service Account)
+async function callGasDriveApi(gasUrl: string, payload: any): Promise<any> {
+  const resp = await fetch(gasUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    redirect: 'follow'
+  });
+  if (!resp.ok) {
+    throw new Error(`Google Apps Script ตอบกลับด้วยรหัส HTTP ${resp.status}`);
+  }
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Google Apps Script ส่งผลลัพธ์ไม่ใช่ JSON: ${text.slice(0, 120)}`);
+  }
 }
 
 // In-memory token cache
@@ -2708,8 +2734,11 @@ app.get('/api/drive/config', (req: Request, res: Response) => {
   res.json({
     success: true,
     config: {
-      isConfigured: Boolean(cfg.rootFolderId && (cfg.serviceAccountEmail || cfg.directAccessToken || cfg.refreshToken)),
+      isConfigured: Boolean(cfg.rootFolderId && (cfg.gasWebAppUrl || cfg.serviceAccountEmail || cfg.directAccessToken || cfg.refreshToken)),
       isEnabled: cfg.isEnabled,
+      connectionMode: cfg.connectionMode || (cfg.gasWebAppUrl ? 'gas' : 'service_account'),
+      gasWebAppUrl: cfg.gasWebAppUrl || null,
+      hasGas: Boolean(cfg.gasWebAppUrl),
       rootFolderId: cfg.rootFolderId,
       hasServiceAccount: Boolean(cfg.serviceAccountEmail && cfg.serviceAccountPrivateKey),
       serviceAccountEmail: cfg.serviceAccountEmail || null,
@@ -2722,9 +2751,11 @@ app.get('/api/drive/config', (req: Request, res: Response) => {
 // 2. Save Google Drive configuration
 app.post('/api/drive/config', (req: Request, res: Response) => {
   try {
-    const { rootFolderId, serviceAccountJson, serviceAccountEmail, serviceAccountPrivateKey, isEnabled } = req.body;
+    const { rootFolderId, connectionMode, gasWebAppUrl, serviceAccountJson, serviceAccountEmail, serviceAccountPrivateKey, isEnabled } = req.body;
     const saved = saveStoredDriveConfig({
       rootFolderId: typeof rootFolderId === 'string' ? rootFolderId.trim() : undefined,
+      connectionMode: connectionMode === 'gas' || connectionMode === 'service_account' ? connectionMode : undefined,
+      gasWebAppUrl: typeof gasWebAppUrl === 'string' ? gasWebAppUrl.trim() : undefined,
       serviceAccountJson: typeof serviceAccountJson === 'string' ? serviceAccountJson.trim() : undefined,
       serviceAccountEmail: typeof serviceAccountEmail === 'string' ? serviceAccountEmail.trim() : undefined,
       serviceAccountPrivateKey: typeof serviceAccountPrivateKey === 'string' ? serviceAccountPrivateKey.trim() : undefined,
@@ -2738,8 +2769,10 @@ app.post('/api/drive/config', (req: Request, res: Response) => {
       success: true,
       message: 'บันทึกการตั้งค่า Google Drive สำเร็จ',
       config: {
-        isConfigured: Boolean(saved.rootFolderId && (saved.serviceAccountEmail || saved.directAccessToken)),
+        isConfigured: Boolean(saved.rootFolderId && (saved.gasWebAppUrl || saved.serviceAccountEmail || saved.directAccessToken)),
         isEnabled: saved.isEnabled,
+        connectionMode: saved.connectionMode,
+        gasWebAppUrl: saved.gasWebAppUrl || null,
         rootFolderId: saved.rootFolderId,
         serviceAccountEmail: saved.serviceAccountEmail || null
       }
@@ -2752,6 +2785,56 @@ app.post('/api/drive/config', (req: Request, res: Response) => {
 // 3. Test Google Drive Connection & Create 5 Zones
 app.post('/api/drive/test', async (req: Request, res: Response) => {
   try {
+    const cfg = getStoredDriveConfig();
+    const effectiveRootFolderId = (req.body?.rootFolderId || cfg.rootFolderId || '').trim();
+    const effectiveGasUrl = (req.body?.gasWebAppUrl || cfg.gasWebAppUrl || '').trim();
+    const effectiveConnMode = req.body?.connectionMode || cfg.connectionMode || (effectiveGasUrl ? 'gas' : 'service_account');
+
+    if (!effectiveRootFolderId) {
+      return res.status(400).json({
+        success: false,
+        error: 'กรุณากรอก Google Drive Root Folder ID ของโฟลเดอร์หลักบริษัท'
+      });
+    }
+
+    // A) Google Apps Script (GAS) Connection Mode (No Service Account required)
+    if (effectiveConnMode === 'gas' || effectiveGasUrl) {
+      if (!effectiveGasUrl) {
+        return res.status(400).json({
+          success: false,
+          error: 'กรุณากรอก URL เว็บแอป Google Apps Script (GAS Web App URL)'
+        });
+      }
+
+      const gasResult = await callGasDriveApi(effectiveGasUrl, {
+        action: 'test',
+        rootFolderId: effectiveRootFolderId
+      });
+
+      if (!gasResult || !gasResult.success) {
+        return res.status(400).json({
+          success: false,
+          error: gasResult?.error || 'การทดสอบผ่าน Google Apps Script ไม่สำเร็จ กรุณาตรวจสอบ URL เว็บแอป'
+        });
+      }
+
+      saveStoredDriveConfig({
+        rootFolderId: effectiveRootFolderId,
+        gasWebAppUrl: effectiveGasUrl,
+        connectionMode: 'gas',
+        lastTestedAt: new Date().toISOString()
+      });
+
+      return res.json({
+        success: true,
+        rootFolderName: gasResult.rootFolderName || 'Root Folder',
+        rootFolderId: gasResult.rootFolderId || effectiveRootFolderId,
+        zonesCreated: gasResult.zonesCreated || {},
+        message: 'เชื่อมต่อ Google Drive ผ่าน Google Apps Script สำเร็จ และตรวจสอบ 5 โซนมาตรฐานเรียบร้อย 100%'
+      });
+    }
+
+    // B) Service Account Flow
     const token = await getDriveAccessToken();
     if (!token) {
       return res.status(400).json({
@@ -2760,16 +2843,8 @@ app.post('/api/drive/test', async (req: Request, res: Response) => {
       });
     }
 
-    const cfg = getStoredDriveConfig();
-    if (!cfg.rootFolderId) {
-      return res.status(400).json({
-        success: false,
-        error: 'กรุณากรอก GOOGLE_DRIVE_ROOT_FOLDER_ID ของโฟลเดอร์หลักบริษัท'
-      });
-    }
-
     // Ping root folder
-    const rootCheck = await fetch(`https://www.googleapis.com/drive/v3/files/${cfg.rootFolderId}?fields=id,name`, {
+    const rootCheck = await fetch(`https://www.googleapis.com/drive/v3/files/${effectiveRootFolderId}?fields=id,name`, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
@@ -2782,7 +2857,7 @@ app.post('/api/drive/test', async (req: Request, res: Response) => {
     }
 
     const rootData: any = await rootCheck.json();
-    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    const zones = await ensureStandardDriveZones(token, effectiveRootFolderId);
     saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
 
     res.json({
@@ -2802,10 +2877,19 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
   try {
     const token = await getDriveAccessToken();
     const cfg = getStoredDriveConfig();
-    if (!token || !cfg.rootFolderId) {
+    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+
+    if (!token && !isGasMode) {
       return res.status(400).json({
         success: false,
         error: 'Google Drive ยังไม่ได้เชื่อมต่อ หรือไม่ได้เปิดใช้งาน'
+      });
+    }
+
+    if (!cfg.rootFolderId) {
+      return res.status(400).json({
+        success: false,
+        error: 'กรุณากรอก Google Drive Root Folder ID'
       });
     }
 
@@ -2821,41 +2905,74 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลรูปภาพ (base64Image)' });
     }
 
-    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
-    let targetFolderId: string;
-    let fileName: string;
-    let assignedZone: string;
-
     const safeDocNo = sanitizeDriveName(docNumber || 'NEW');
     const safeTrNo = sanitizeDriveName(trNumber || `TR-${Date.now().toString().slice(-4)}`);
 
+    let fileName: string;
+    let assignedZone: string;
+
     if (source === 'line_webhook') {
-      // 00_กล่องพักบิล_LINE_รอตรวจรับ
-      targetFolderId = zones.ZONE_00;
       assignedZone = 'zone_00';
       fileName = `LINE_${Date.now()}_${safeDocNo}.jpg`;
     } else if (docType === 'purchase_order') {
-      // 01_ใบสั่งซื้อ_PO
-      targetFolderId = zones.ZONE_01;
       assignedZone = 'zone_01';
       fileName = `PO_${safeDocNo}.jpg`;
     } else if (docType === 'dest_weighbridge') {
-      // 03_ตั๋วชั่งปลายทาง_รอจับคู่DO
-      targetFolderId = zones.ZONE_03;
       assignedZone = 'zone_03';
       fileName = `WB_${safeDocNo}_รอชนDO.jpg`;
     } else if (docType === 'tax_invoice') {
-      // 04_ใบเสร็จกำกับภาษี_เอกเทศ
-      targetFolderId = zones.ZONE_04;
       assignedZone = 'zone_04';
       fileName = `TAX_${safeDocNo}.jpg`;
     } else {
-      // 02_ใบงานหลัก_DO_ครบชุด -> Create subfolder TR-xxxx_DO-xxxx
+      assignedZone = 'zone_02';
+      fileName = `1_DO_${safeDocNo}.jpg`;
+    }
+
+    // A) If GAS Mode
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'upload',
+        rootFolderId: cfg.rootFolderId,
+        targetZone: assignedZone,
+        subfolderName: docType === 'delivery_order' ? `${safeTrNo}_DO-${safeDocNo}` : undefined,
+        fileName,
+        base64Image
+      });
+
+      if (!gasResult || !gasResult.success) {
+        throw new Error(gasResult?.error || 'การอัปโหลดไฟล์ผ่าน Google Apps Script ขัดข้อง');
+      }
+
+      return res.json({
+        success: true,
+        driveFileId: gasResult.fileId,
+        driveFolderId: gasResult.folderId || cfg.rootFolderId,
+        driveFileLocation: assignedZone,
+        webViewLink: gasResult.webViewLink,
+        message: `จัดเก็บภาพบิลลงโฟลเดอร์ Google Drive (${assignedZone}) ผ่าน Google Apps Script สำเร็จ`
+      });
+    }
+
+    // B) Service Account Flow
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'ไม่พบ Token เชื่อมต่อ Google Drive' });
+    }
+
+    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    let targetFolderId: string;
+
+    if (source === 'line_webhook') {
+      targetFolderId = zones.ZONE_00;
+    } else if (docType === 'purchase_order') {
+      targetFolderId = zones.ZONE_01;
+    } else if (docType === 'dest_weighbridge') {
+      targetFolderId = zones.ZONE_03;
+    } else if (docType === 'tax_invoice') {
+      targetFolderId = zones.ZONE_04;
+    } else {
       const subfolderName = `${safeTrNo}_DO-${safeDocNo}`;
       const subfolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
       targetFolderId = subfolderId;
-      assignedZone = 'zone_02';
-      fileName = `1_DO_${safeDocNo}.jpg`;
     }
 
     const uploadRes = await uploadFileToDrive({
@@ -2880,13 +2997,13 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
 });
 
 // 5. Verified-Only File Move Rule (POST /api/drive/sync-verified-move)
-// "ย้ายไฟล์บน Google Drive จะย้ายก็ต่อเมื่อมีการยืนยันแล้วเท่านั้น ถ้าระบบชนบิลโดยยังไม่มีการยืนยันห้ามย้าย"
-// "และเมื่อยกเลิกการชนบิล ให้ย้ายกลับคืนโฟลเดอร์เดิม"
 app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) => {
   try {
     const token = await getDriveAccessToken();
     const cfg = getStoredDriveConfig();
-    if (!token || !cfg.rootFolderId) {
+    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+
+    if (!token && !isGasMode) {
       return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
     }
 
@@ -2902,15 +3019,44 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: 'กรุณาระบุรหัสไฟล์ตั๋วชั่งปลายทาง (destTicketFileId)' });
     }
 
+    const safeDoNo = sanitizeDriveName(doDocNumber);
+    const safeTrNo = sanitizeDriveName(doTrNumber || 'TR');
+    const subfolderName = `${safeTrNo}_DO-${safeDoNo}`;
+
+    // A) If GAS Mode
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'sync_verified_move',
+        rootFolderId: cfg.rootFolderId,
+        fileId: destTicketFileId,
+        targetZone: action === 'confirm_match' ? 'zone_02' : 'zone_03',
+        subfolderName: action === 'confirm_match' ? subfolderName : undefined
+      });
+
+      if (!gasResult || !gasResult.success) {
+        throw new Error(gasResult?.error || 'การย้ายไฟล์ผ่าน Google Apps Script ขัดข้อง');
+      }
+
+      return res.json({
+        success: true,
+        action,
+        driveFileLocation: action === 'confirm_match' ? 'zone_02' : 'zone_03',
+        targetFolderId: gasResult.targetFolderId,
+        message: action === 'confirm_match'
+          ? `ย้ายตั๋วชั่ง ${destTicketDocNo} รวมเข้าโฟลเดอร์ใบงาน ${subfolderName} สำเร็จแล้วตามกฎยืนยัน (GAS)`
+          : `ย้ายตั๋วชั่ง ${destTicketDocNo} กลับไปพักที่ 03_ตั๋วชั่งปลายทาง เรียบร้อยแล้ว (GAS)`
+      });
+    }
+
+    // B) Service Account Flow
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'ไม่พบ Token เชื่อมต่อ Google Drive' });
+    }
+
     const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
 
     if (action === 'confirm_match') {
-      // Move from Zone 03 into DO subfolder under Zone 02
-      const safeDoNo = sanitizeDriveName(doDocNumber);
-      const safeTrNo = sanitizeDriveName(doTrNumber || 'TR');
-      const subfolderName = `${safeTrNo}_DO-${safeDoNo}`;
       const doFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
-
       await moveDriveFile(token, destTicketFileId, zones.ZONE_03, doFolderId);
 
       return res.json({
@@ -2921,12 +3067,7 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
         message: `ย้ายตั๋วชั่ง ${destTicketDocNo} รวมเข้าโฟลเดอร์ใบงาน ${subfolderName} สำเร็จแล้วตามกฎยืนยัน`
       });
     } else if (action === 'revoke_match') {
-      // Reverse-Move: Move file back to Zone 03 when match is unlinked/revoked
-      const safeDoNo = sanitizeDriveName(doDocNumber);
-      const safeTrNo = sanitizeDriveName(doTrNumber || 'TR');
-      const subfolderName = `${safeTrNo}_DO-${safeDoNo}`;
       const doFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
-
       await moveDriveFile(token, destTicketFileId, doFolderId, zones.ZONE_03);
 
       return res.json({
@@ -2946,12 +3087,13 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
 });
 
 // 6. Zero-Junk Cleanup Endpoint (POST /api/drive/cleanup-file)
-// ลบไฟล์เก่าทันทีเมื่ออัปโหลดรูปใหม่ทับ / ลบไฟล์และโฟลเดอร์เมื่อลบเอกสาร
 app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   try {
     const token = await getDriveAccessToken();
     const cfg = getStoredDriveConfig();
-    if (!token || !cfg.rootFolderId) {
+    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+
+    if (!token && !isGasMode) {
       return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
     }
 
@@ -2960,8 +3102,80 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
       oldFileId,
       orderFolderId,
       orderFileIds = [],
-      destTicketFileIdToRescue // Rescue rule: if DO has linked dest ticket, move it to 03 before deleting DO folder!
+      destTicketFileIdToRescue
     } = req.body;
+
+    // A) If GAS Mode
+    if (isGasMode && cfg.gasWebAppUrl) {
+      await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'cleanup',
+        rootFolderId: cfg.rootFolderId,
+        fileId: oldFileId,
+        folderId: orderFolderId,
+        rescueFileId: destTicketFileIdToRescue
+      });
+
+      return res.json({
+        success: true,
+        message: 'ทำความสะอาดลบเอกสารและไฟล์แนบออกจาก Google Drive สำเร็จ 100% (Zero-Junk Cleanup via GAS)'
+      });
+    }
+
+    // B) Service Account Flow
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'ไม่พบ Token เชื่อมต่อ Google Drive' });
+    }
+
+    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+
+    if (mode === 'delete_old_file' && oldFileId) {
+      await trashDriveFile(token, oldFileId, undefined, zones.ZONE_99);
+      return res.json({
+        success: true,
+        message: `ลบไฟล์รูปเก่า ${oldFileId} ออกจาก Google Drive สำเร็จ (Zero-Junk)`
+      });
+    }
+
+    if (mode === 'delete_order_cascade') {
+      if (destTicketFileIdToRescue && orderFolderId) {
+        try {
+          await moveDriveFile(token, destTicketFileIdToRescue, orderFolderId, zones.ZONE_03);
+          console.log(`[Drive Rescue] Rescued dest ticket ${destTicketFileIdToRescue} back to Zone 03 before DO deletion`);
+        } catch (rescueErr) {
+          console.warn('[Drive Rescue Warning] Could not rescue dest ticket:', rescueErr);
+        }
+      }
+
+      for (const fId of orderFileIds) {
+        if (fId && fId !== destTicketFileIdToRescue) {
+          try {
+            await trashDriveFile(token, fId, orderFolderId, zones.ZONE_99);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (orderFolderId && orderFolderId !== zones.ZONE_02 && orderFolderId !== cfg.rootFolderId) {
+        try {
+          await trashDriveFile(token, orderFolderId, zones.ZONE_02, zones.ZONE_99);
+        } catch {
+          // ignore
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: 'ทำความสะอาดลบเอกสารและไฟล์แนบออกจาก Google Drive สำเร็จ 100% (Zero-Junk Cleanup)'
+      });
+    }
+
+    res.status(400).json({ success: false, error: 'ระบุพารามิเตอร์ cleanup ไม่ครบถ้วน' });
+  } catch (err: any) {
+    console.error('Zero-Junk Cleanup Error:', err);
+    res.status(500).json({ success: false, error: err?.message || 'การทำความสะอาดไฟล์ล้มเหลว' });
+  }
+});
 
     const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
 

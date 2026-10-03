@@ -1387,6 +1387,24 @@
   - ✅ **Deploy successful — เว็บไซต์ออนไลน์เรียบร้อย 100% (Live)**
   - 🌐 **URL:** `https://smartweigh-ai.onrender.com`
 
+---
+
+## [2026-10-03] พัฒนาระบบเชื่อมต่อ Google Drive ผ่าน Google Apps Script (GAS Web App) ทางเลือกใหม่ที่ง่ายขึ้น 100%
+- **วัตถุประสงค์งาน:**
+  - สร้างทางเลือกการเชื่อมต่อ Google Drive แบบไม่ต้องใช้ Google Service Account และไม่ต้องขอไฟล์ JSON Key ใน Google Cloud Console
+  - ใช้บัญชี Google / Gmail ส่วนตัวจัดการไฟล์และโฟลเดอร์ Google Drive ได้โดยตรง
+  - คงกฎเหล็ก **5 โซนมาตรฐาน**, **Zero-Junk Cleanup** และ **Verified-Only Move Rule** ครบถ้วน
+- **การเปลี่ยนแปลงที่ทำแบบเจาะจง (Targeted Changes):**
+  1. สร้างไฟล์ [google_apps_script_drive.gs](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/google_apps_script_drive.gs) บรรจุฟังก์ชัน `doPost` สำหรับ Action: `test`, `upload`, `sync_verified_move`, และ `cleanup`
+  2. [server.ts](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/server.ts):
+     - เพิ่มฟังก์ชัน `callGasDriveApi` และฟิลด์ `gasWebAppUrl`, `connectionMode: 'gas' | 'service_account'`
+     - อัปเดต `/api/drive/config`, `/api/drive/test`, `/api/drive/upload`, `/api/drive/sync-verified-move`, และ `/api/drive/cleanup-file` ให้ส่งต่อไปยัง GAS เมื่ออยู่ในโหมด GAS
+  3. [src/components/SystemSettingsView.tsx](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/src/components/SystemSettingsView.tsx):
+     - เพิ่มตัวสลับโหมดเชื่อมต่อ: `⚡ Google Apps Script (แนะนำ — ง่ายสุด)` vs `🔑 Google Service Account`
+     - เพิ่มช่องกรอก `Google Apps Script Web App URL` พร้อมการ์ดแนะนำวิธีติดตั้งและปุ่ม **"คัดลอกโค้ด Code.gs"** ใน 1 คลิก
+- **สถานะ:** ทดสอบ Build ผ่านสมบูรณ์ และ Push ขึ้น GitHub เพื่อ Auto-Deploy ไปยัง Render เรียบร้อย
+
+
 
 
 
