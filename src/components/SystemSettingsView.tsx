@@ -308,7 +308,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
         setDriveConfig(prev => ({
           ...prev,
           rootFolderId: data.config.rootFolderId || '',
-          connectionMode: data.config.connectionMode || (data.config.gasWebAppUrl ? 'gas' : 'service_account'),
+          connectionMode: data.config.connectionMode || 'gas',
           gasWebAppUrl: data.config.gasWebAppUrl || '',
           serviceAccountEmail: data.config.serviceAccountEmail || '',
           isEnabled: data.config.isEnabled !== undefined ? data.config.isEnabled : true
