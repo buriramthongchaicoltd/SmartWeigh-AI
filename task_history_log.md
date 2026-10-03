@@ -1379,7 +1379,11 @@
   - ย้าย `tsx` และ `tailwindcss` เข้า `dependencies` หลักใน [package.json](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/package.json) เพื่อให้ติดตั้งครบเมื่อ Build บน Cloud
   - ปรับ Start script เป็น `tsx server.ts`
   - สร้างไฟล์ [render.yaml](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/render.yaml) กำหนด `buildCommand: npm install && npm run build` และ `startCommand: npm run start` ชัดเจน
-- **สถานะ:** Build ทดสอบผ่านสมบูรณ์ 100% และ Push ขึ้น GitHub เรียบร้อย
+- **แก้ไขปัญหา npm ERESOLVE (Peer Dependency Conflict: esbuild vs vite):**
+  - ถอด `esbuild` เวอร์ชันเก่าออกจาก `devDependencies` ใน [package.json](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/package.json) เนื่องจาก Vite จัดการ esbuild ภายในตัวอยู่แล้ว
+  - ปรับคำสั่งใน [render.yaml](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/render.yaml) เป็น `npm install --legacy-peer-deps && npm run build` เพื่อป้องกันข้อขัดแย้งของแพ็กเกจบน Node 24
+- **สถานะ:** ทดสอบ Build ผ่านสมบูรณ์ และ Push ขึ้น GitHub เรียบร้อย
+
 
 
 
