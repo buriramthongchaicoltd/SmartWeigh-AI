@@ -676,7 +676,34 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     // Only run when at least one service is configured
     if (dbReady || driveReady) {
       autoTestDoneRef.current = true;
-      runSilentAutoTest(dbReady, driveReady);
+      // ใช้ /api/startup/retest แทน runSilentAutoTest เพราะ retest จะ restore configs ก่อน แล้วค่อย test
+      // ป้องกัน race condition ระหว่าง restoreConfigsFromSupabase() กับ /api/drive/test
+      fetch('/api/startup/retest', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+          if (data.success) {
+            setStartupStatus(data);
+            // อัปเดต Drive status จาก startup result
+            if (data.drive === 'ok') {
+              setDriveStatus(prev => ({
+                ...prev,
+                isConfigured: true,
+                isConnected: true,
+                message: data.driveMessage || '✅ เชื่อมต่อ Google Drive สำเร็จ'
+              }));
+            } else if (data.drive === 'error') {
+              setDriveStatus(prev => ({
+                ...prev,
+                isConfigured: true,
+                isConnected: false,
+                message: data.driveMessage || 'เชื่อมต่อ Drive ไม่สำเร็จ'
+              }));
+            }
+          }
+        })
+        .catch(() => {
+          // silent fail — ไม่รบกวน user
+        });
     }
   }, [dbStatus?.isConfigured, driveStatus?.isConfigured]);
 

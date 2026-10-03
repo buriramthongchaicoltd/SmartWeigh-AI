@@ -1,0 +1,6 @@
+fix: auto-test Drive on Settings load via startup/retest instead of silent test
+
+- Replace runSilentAutoTest() with /api/startup/retest to avoid race condition
+- startup/retest restores configs from Supabase first, then tests Drive connection
+- Update Drive badge immediately from retest result (ok/error) without manual button press
+- Drive badge now auto-updates to green on page open if config is valid
