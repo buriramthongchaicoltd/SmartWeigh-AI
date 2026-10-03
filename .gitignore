@@ -8,6 +8,11 @@
 .google_drive_config.json
 
 # ========================
+# Local helper scripts (ไม่จำเป็นต้องขึ้น GitHub)
+# ========================
+commit.bat
+
+# ========================
 # Node.js
 # ========================
 node_modules/

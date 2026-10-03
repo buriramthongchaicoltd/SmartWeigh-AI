@@ -1356,6 +1356,14 @@
   - [x] **Checkpoint 3 (Completed):** Frontend React Triggers ใน `src/App.tsx` เชื่อมต่อกับ Verified-Only Rule และ Zero-Junk Lifecycle สมบูรณ์
   - [x] **Checkpoint 4 (Completed):** UI จัดการและทดสอบ Google Drive API ใน `SystemSettingsView.tsx`
   - [ ] **Checkpoint 5 (Next Step เมื่อผู้ใช้ต้องการ):** ใส่ค่าจริง `GOOGLE_DRIVE_ROOT_FOLDER_ID` และ Service Account Key เพื่อทดสอบอัปโหลด/ย้ายไฟล์จริงบนคลาวด์สด
-- **การตรวจสอบผล:**
-  - โค้ดได้รับการตรวจทานตามหลัก Targeted Editing ไม่เขียนใหม่ทั้งก้อน ไม่ลบฟังก์ชันเดิมทิ้ง รักษาระบบ 39 คอลัมน์ครบ 100%
+---
+
+## [2026-10-03] ติดตั้งและกำหนดค่า Git Repository & ระบบ Auto Commit/Push ผ่านไฟล์ `commit.bat`
+- **วัตถุประสงค์งาน:**
+  - ติดตั้ง Git Local Repository สำหรับโปรเจกต์ `SmartWeigh-AI`
+  - เชื่อมต่อไปยัง Remote GitHub Repository: `https://github.com/buriramthongchaicoltd/SmartWeigh-AI`
+  - สร้างสคริปต์ [commit.bat](file:///d:/Panya%20%E0%B8%AD%E0%B8%AD%E0%B8%81%E0%B9%81%E0%B8%9A%E0%B8%9A%E0%B9%82%E0%B8%9B%E0%B8%A3%E0%B9%81%E0%B8%81%E0%B8%A3%E0%B8%A1/SmartWeigh%20AI/commit.bat) สำหรับดับเบิลคลิกเพื่อตรวจสอบสถานะไฟล์, กรอกข้อความ Commit, และถามยืนยันก่อน Push ขึ้น GitHub อัตโนมัติ
+  - กำหนดค่า Personal Access Token (PAT) ใหม่ใน Git Remote เพื่อให้ Push ผ่านได้ 100%
+- **สถานะ:** เสร็จสมบูรณ์ และทดสอบการเชื่อมต่อ GitHub Remote เรียบร้อย
+
 
