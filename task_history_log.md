@@ -4,6 +4,27 @@
 
 ---
 
+## [2026-10-03] Persistent Settings across Cloud Deploys & Masked Secret Reassurance
+
+### ปัญหาที่ได้รับรายงาน
+"3. ฐานข้อมูล & เชื่อมต่อระบบภายนอก (Database & APIs) มันไม่ได้มีกรเก็บข้อมุลรอ นี้ต้องมานั่ง ตั้งค่าใหม่หมดเลย งง"
+
+### สาเหตุที่ตรวจพบ (Root Cause)
+1. **Security Masking Illusion:** เพื่อความปลอดภัย ระบบจะไม่แสดง Plain-text Password / API Key ออกมาที่หน้าจอ แต่แสดงเป็นจุด `•••••••••••••` และป้าย `✅ ตั้งค่าแล้ว` ทำให้ผู้ใช้เข้าใจผิดว่าข้อมูลหายและต้องพิมพ์ใหม่
+2. **Empty String Overwrite Bug:** เมื่อผู้ใช้กด "บันทึก" หรือ "ทดสอบ" โดยไม่ได้พิมพ์คีย์ใหม่ ฟรอนต์เอนด์ส่ง `""` (Empty String) ไปยังเซิร์ฟเวอร์ ทำให้โค้ดเดิมเอาค่าว่างไปทับคีย์จริงที่บันทึกไว้ใน RAM/Config
+3. **Render.com Ephemeral Container:** การบันทึกค่าลงเฉพาะไฟล์ชั่วคราว (`.google_drive_config.json`, `.line_config.json`, `.system_config.json`) จะถูก Reset หายไปเมื่อ Render Redeploy เวอร์ชันใหม่
+
+### การแก้ไข
+1. **Sync การตั้งค่าลงตาราง `system_config` บน Supabase Cloud ถาวร:**
+   - เพิ่มฟังก์ชัน `persistConfigToSupabase()` บันทึก `drive_config`, `line_bot_config`, `gemini_config` ลงตาราง `system_config` อัตโนมัติทุกครั้งที่มีการ Save/Test
+   - เพิ่มฟังก์ชัน `restoreConfigsFromSupabase()` ดึงการตั้งค่าทั้งหมดกลับมาจาก Supabase อัตโนมัติตอน Server Boot ทำให้การตั้งค่าอยู่คงทนถาวรแม้ Render จะ Redeploy ใหม่
+2. **Safe Merge (ป้องกันค่าว่างเขียนทับ):**
+   - ปรับปรุง `saveStoredDbConfig`, `saveStoredDriveConfig`, `POST /api/database/config`, `POST /api/database/test`, `POST /api/line/config` ให้กรองเฉพาะ non-empty string เท่านั้น ห้ามนำค่าว่างมาทับค่าเดิม
+3. **ปรับปรุง UI Reassurance ใน `SystemSettingsView.tsx`:**
+   - เพิ่มป้ายอธิบายความปลอดภัยระบุชัดเจนว่า "ระบบมีการบันทึกการตั้งค่าไว้แล้วถาวร และซ่อนรหัสไว้เพื่อความปลอดภัย ไม่ต้องกรอกซ้ำ"
+
+---
+
 ## [2026-10-03] Architecture Enforce: Drive-First Image Storage & Fix 33MB Query Timeout
 
 ### ปัญหาที่ได้รับรายงาน

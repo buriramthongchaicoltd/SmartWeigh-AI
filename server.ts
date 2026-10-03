@@ -230,6 +230,7 @@ app.post('/api/system/config', (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'GEMINI_API_KEY ต้องมีความยาวอย่างน้อย 10 ตัวอักษร' });
     }
     saveSystemConfig({ geminiApiKey: trimmed });
+    persistConfigToSupabase('gemini_config', { geminiApiKey: trimmed });
     return res.json({ success: true, message: 'บันทึก GEMINI_API_KEY เรียบร้อยแล้ว ระบบ AI พร้อมทำงาน' });
   }
   return res.status(400).json({ success: false, error: 'กรุณาระบุ geminiApiKey' });
@@ -1551,8 +1552,12 @@ app.post('/api/line/config', (req: Request, res: Response) => {
   lineBotConfig = {
     ...lineBotConfig,
     enabled: body.enabled !== undefined ? Boolean(body.enabled) : lineBotConfig.enabled,
-    channelAccessToken: body.channelAccessToken !== undefined ? String(body.channelAccessToken).trim() : lineBotConfig.channelAccessToken,
-    channelSecret: body.channelSecret !== undefined ? String(body.channelSecret).trim() : lineBotConfig.channelSecret,
+    channelAccessToken: (typeof body.channelAccessToken === 'string' && body.channelAccessToken.trim())
+      ? body.channelAccessToken.trim()
+      : lineBotConfig.channelAccessToken,
+    channelSecret: (typeof body.channelSecret === 'string' && body.channelSecret.trim())
+      ? body.channelSecret.trim()
+      : lineBotConfig.channelSecret,
     autoQuoteReply: body.autoQuoteReply !== undefined ? Boolean(body.autoQuoteReply) : lineBotConfig.autoQuoteReply,
     replyOnDuplicate: body.replyOnDuplicate !== undefined ? Boolean(body.replyOnDuplicate) : lineBotConfig.replyOnDuplicate,
     replyOnUnclearImage: body.replyOnUnclearImage !== undefined ? Boolean(body.replyOnUnclearImage) : lineBotConfig.replyOnUnclearImage,
@@ -1565,6 +1570,7 @@ app.post('/api/line/config', (req: Request, res: Response) => {
   } catch (err) {
     console.warn('[LINE Config] Failed to save .line_config.json', err);
   }
+  persistConfigToSupabase('line_bot_config', lineBotConfig);
   return res.json({ success: true, config: lineBotConfig });
 });
 
@@ -2184,12 +2190,63 @@ function getStoredDbConfig(): ServerDbConfig {
 
 function saveStoredDbConfig(cfg: Partial<ServerDbConfig>) {
   const current = getStoredDbConfig();
+  const cleaned: Partial<ServerDbConfig> = {};
+  for (const [k, v] of Object.entries(cfg)) {
+    if (v !== undefined && v !== '') {
+      (cleaned as any)[k] = v;
+    }
+  }
   const merged: ServerDbConfig = {
     ...current,
-    ...cfg
+    ...cleaned
   };
-  fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('[DB Config] Failed to write .supabase_config.json', e);
+  }
   return merged;
+}
+
+// ─── Cloud-Safe Config Persistence across Render Ephemeral Deploys ───────────
+async function persistConfigToSupabase(key: string, value: any) {
+  try {
+    const client = getSupabaseClient();
+    if (!client) return;
+    await client.from('system_config').upsert({
+      config_key: key,
+      config_value: value,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' });
+    console.log(`[Config Persistence] Synced '${key}' to Supabase system_config ✅`);
+  } catch (err: any) {
+    console.warn(`[Config Persistence] Could not sync '${key}' to Supabase:`, err?.message);
+  }
+}
+
+async function restoreConfigsFromSupabase() {
+  try {
+    const client = getSupabaseClient();
+    if (!client) return;
+    const { data, error } = await client.from('system_config').select('*');
+    if (error || !Array.isArray(data)) return;
+
+    for (const row of data) {
+      if (row.config_key === 'gemini_config' && row.config_value?.geminiApiKey) {
+        saveSystemConfig(row.config_value);
+      } else if (row.config_key === 'drive_config' && row.config_value) {
+        saveStoredDriveConfig(row.config_value);
+      } else if (row.config_key === 'line_bot_config' && row.config_value) {
+        lineBotConfig = { ...lineBotConfig, ...row.config_value };
+        try {
+          fs.writeFileSync(LINE_CONFIG_FILE_PATH, JSON.stringify(lineBotConfig, null, 2), 'utf-8');
+        } catch (_) {}
+      }
+    }
+    console.log('[Config Persistence] Restored configs from Supabase system_config table ✅');
+  } catch (err: any) {
+    console.warn('[Config Persistence] Could not restore configs from Supabase:', err?.message);
+  }
 }
 
 function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
@@ -2267,12 +2324,12 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
     } = req.body;
 
     const saved = saveStoredDbConfig({
-      supabaseUrl: typeof supabaseUrl === 'string' ? supabaseUrl.trim() : undefined,
-      supabaseAnonKey: typeof supabaseAnonKey === 'string' ? supabaseAnonKey.trim() : undefined,
+      supabaseUrl: typeof supabaseUrl === 'string' && supabaseUrl.trim() ? supabaseUrl.trim() : undefined,
+      supabaseAnonKey: typeof supabaseAnonKey === 'string' && supabaseAnonKey.trim() ? supabaseAnonKey.trim() : undefined,
       supabaseServiceRoleKey:
-        typeof supabaseServiceRoleKey === 'string' ? supabaseServiceRoleKey.trim() : undefined,
+        typeof supabaseServiceRoleKey === 'string' && supabaseServiceRoleKey.trim() ? supabaseServiceRoleKey.trim() : undefined,
       pgConnectionString:
-        typeof pgConnectionString === 'string' ? pgConnectionString.trim() : undefined,
+        typeof pgConnectionString === 'string' && pgConnectionString.trim() ? pgConnectionString.trim() : undefined,
       isEnabled: isEnabled !== undefined ? Boolean(isEnabled) : undefined,
       autoSyncIntervalMinutes:
         typeof autoSyncIntervalMinutes === 'number' ? autoSyncIntervalMinutes : undefined
@@ -2301,7 +2358,12 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
 // 3. Test Database Connection & Table Schema Existence
 app.post('/api/database/test', async (req: Request, res: Response) => {
   const startTime = Date.now();
-  const targetCfg: Partial<ServerDbConfig> = req.body || {};
+  const rawTargetCfg: Partial<ServerDbConfig> = req.body || {};
+  const targetCfg: Partial<ServerDbConfig> = {};
+  if (rawTargetCfg.supabaseUrl?.trim()) targetCfg.supabaseUrl = rawTargetCfg.supabaseUrl.trim();
+  if (rawTargetCfg.supabaseAnonKey?.trim()) targetCfg.supabaseAnonKey = rawTargetCfg.supabaseAnonKey.trim();
+  if (rawTargetCfg.supabaseServiceRoleKey?.trim()) targetCfg.supabaseServiceRoleKey = rawTargetCfg.supabaseServiceRoleKey.trim();
+  if (rawTargetCfg.pgConnectionString?.trim()) targetCfg.pgConnectionString = rawTargetCfg.pgConnectionString.trim();
   const cfg = { ...getStoredDbConfig(), ...targetCfg };
 
   const tablesStatus: Record<string, boolean> = {
@@ -2817,11 +2879,21 @@ function getStoredDriveConfig(): ServerDriveConfig {
 
 function saveStoredDriveConfig(cfg: Partial<ServerDriveConfig>) {
   const current = getStoredDriveConfig();
+  const cleaned: Partial<ServerDriveConfig> = {};
+  for (const [k, v] of Object.entries(cfg)) {
+    if (v !== undefined && v !== '') {
+      (cleaned as any)[k] = v;
+    }
+  }
   const merged: ServerDriveConfig = {
     ...current,
-    ...cfg
+    ...cleaned
   };
-  fs.writeFileSync(DRIVE_CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+  try {
+    fs.writeFileSync(DRIVE_CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('[Drive Config] Failed to write .google_drive_config.json', e);
+  }
   return merged;
 }
 
@@ -3193,6 +3265,9 @@ app.post('/api/drive/config', (req: Request, res: Response) => {
     zoneFoldersCache.clear();
     cachedDriveAccessToken = null;
 
+    // Persist to Supabase so it survives Render redeploys
+    persistConfigToSupabase('drive_config', saved);
+
     res.json({
       success: true,
       message: 'บันทึกการตั้งค่า Google Drive สำเร็จ',
@@ -3246,12 +3321,13 @@ app.post('/api/drive/test', async (req: Request, res: Response) => {
         });
       }
 
-      saveStoredDriveConfig({
+      const updated = saveStoredDriveConfig({
         rootFolderId: effectiveRootFolderId,
         gasWebAppUrl: effectiveGasUrl,
         connectionMode: 'gas',
         lastTestedAt: new Date().toISOString()
       });
+      persistConfigToSupabase('drive_config', updated);
 
       return res.json({
         success: true,
@@ -3286,7 +3362,8 @@ app.post('/api/drive/test', async (req: Request, res: Response) => {
 
     const rootData: any = await rootCheck.json();
     const zones = await ensureStandardDriveZones(token, effectiveRootFolderId);
-    saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
+    const updated = saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
+    persistConfigToSupabase('drive_config', updated);
 
     res.json({
       success: true,
@@ -3734,6 +3811,8 @@ async function runStartupSelfTest() {
           startupStatus.supabaseMessage = 'เชื่อมต่อ Supabase Cloud สำเร็จ ✅';
           console.log('[Startup] ✅ Supabase: เชื่อมต่อสำเร็จ');
           saveStoredDbConfig({ lastTestedAt: new Date().toISOString() });
+          // Restore all cloud-persisted configs (Drive, LINE OA, Gemini) from Supabase system_config
+          await restoreConfigsFromSupabase();
         } else {
           startupStatus.supabase = 'error';
           startupStatus.supabaseMessage = `เชื่อมต่อได้แต่มีข้อผิดพลาด: ${error.message}`;

@@ -2062,6 +2062,16 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 </span>
               </div>
 
+              <div className="bg-sky-50 border border-sky-200/80 rounded-xl p-3 text-sky-900 text-xs flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="font-bold">ระบบมีการบันทึกการตั้งค่าไว้แล้วถาวร</p>
+                  <p className="text-[11px] text-sky-800">
+                    เพื่อความปลอดภัยระดับสูงสุด ช่องรหัสผ่านและคีย์ลับจะถูกซ่อนเป็นจุดไข่ปลา <code className="bg-white/80 px-1 rounded text-sky-950 font-mono">••••••••</code> (คุณไม่จำเป็นต้องกรอกใหม่ เว้นแต่ต้องการเปลี่ยนค่าใหม่)
+                  </p>
+                </div>
+              </div>
+
               <form onSubmit={handleSaveDbConfig} className="space-y-3.5 text-xs">
                 {/* Supabase URL */}
                 <div>
