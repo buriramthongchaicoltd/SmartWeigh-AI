@@ -3177,61 +3177,6 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   }
 });
 
-    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
-
-    if (mode === 'delete_old_file' && oldFileId) {
-      // Zero-Junk: Trash old file immediately
-      await trashDriveFile(token, oldFileId, undefined, zones.ZONE_99);
-      return res.json({
-        success: true,
-        message: `ลบไฟล์รูปเก่า ${oldFileId} ออกจาก Google Drive สำเร็จ (Zero-Junk)`
-      });
-    }
-
-    if (mode === 'delete_order_cascade') {
-      // Rescue Rule: Check if a destination weighbridge ticket is inside this DO folder
-      if (destTicketFileIdToRescue && orderFolderId) {
-        try {
-          await moveDriveFile(token, destTicketFileIdToRescue, orderFolderId, zones.ZONE_03);
-          console.log(`[Drive Rescue] Rescued dest ticket ${destTicketFileIdToRescue} back to Zone 03 before DO deletion`);
-        } catch (rescueErr) {
-          console.warn('[Drive Rescue Warning] Could not rescue dest ticket:', rescueErr);
-        }
-      }
-
-      // Delete files inside folder
-      for (const fId of orderFileIds) {
-        if (fId && fId !== destTicketFileIdToRescue) {
-          try {
-            await trashDriveFile(token, fId, orderFolderId, zones.ZONE_99);
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      // Delete/Trash order folder itself
-      if (orderFolderId && orderFolderId !== zones.ZONE_02 && orderFolderId !== cfg.rootFolderId) {
-        try {
-          await trashDriveFile(token, orderFolderId, zones.ZONE_02, zones.ZONE_99);
-        } catch {
-          // ignore
-        }
-      }
-
-      return res.json({
-        success: true,
-        message: 'ทำความสะอาดลบเอกสารและไฟล์แนบออกจาก Google Drive สำเร็จ 100% (Zero-Junk Cleanup)'
-      });
-    }
-
-    res.status(400).json({ success: false, error: 'ระบุพารามิเตอร์ cleanup ไม่ครบถ้วน' });
-  } catch (err: any) {
-    console.error('Zero-Junk Cleanup Error:', err);
-    res.status(500).json({ success: false, error: err?.message || 'การทำความสะอาดไฟล์ล้มเหลว' });
-  }
-});
-
 // Vite mounting & static serving
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
