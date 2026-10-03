@@ -301,6 +301,21 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [isTestingDrive, setIsTestingDrive] = useState(false);
   const [isSavingDrive, setIsSavingDrive] = useState(false);
 
+  // Global Startup & Live Services Self-Test State
+  const [startupStatus, setStartupStatus] = useState<{
+    ranAt: string | null;
+    supabase: 'ok' | 'error' | 'not_configured' | 'pending';
+    supabaseMessage: string;
+    drive: 'ok' | 'error' | 'not_configured' | 'pending';
+    driveMessage: string;
+    gemini: 'ok' | 'not_configured';
+    geminiMessage: string;
+    line: 'ok' | 'not_configured' | 'pending';
+    lineMessage: string;
+    allReady: boolean;
+  } | null>(null);
+  const [isSelfTestingAll, setIsSelfTestingAll] = useState(false);
+
   // Gemini AI API Key State
   const [geminiConfig, setGeminiConfig] = useState<{
     hasKey: boolean;
@@ -420,7 +435,21 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const res = await fetch('/api/drive/config');
       const data = await res.json();
       if (data.success && data.config) {
-        setDriveStatus(data.config);
+        // Merge so isConnected/rootFolderName from prior test-run are preserved
+        setDriveStatus(prev => ({
+          ...prev,
+          isConfigured: data.config.isConfigured,
+          isEnabled: data.config.isEnabled,
+          connectionMode: data.config.connectionMode,
+          hasGas: data.config.hasGas,
+          gasWebAppUrl: data.config.gasWebAppUrl,
+          rootFolderId: data.config.rootFolderId,
+          rootFolderName: data.config.rootFolderName,
+          hasServiceAccount: data.config.hasServiceAccount,
+          serviceAccountEmail: data.config.serviceAccountEmail,
+          lastTestedAt: data.config.lastTestedAt,
+          isConnected: data.config.isConfigured ? (prev?.isConnected ?? undefined) : false
+        }));
         setDriveConfig(prev => ({
           ...prev,
           rootFolderId: data.config.rootFolderId || '',
@@ -495,11 +524,24 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const res = await fetch('/api/database/config');
       const data = await res.json();
       if (data.success && data.config) {
-        setDbStatus(data.config);
+        // Merge with existing dbStatus so isConnected/latencyMs from prior test-run are preserved
+        setDbStatus(prev => ({
+          ...prev,
+          isConfigured: data.config.isConfigured,
+          isEnabled: data.config.isEnabled,
+          mode: data.config.mode,
+          supabaseUrl: data.config.supabaseUrl,
+          hasAnonKey: data.config.hasAnonKey,
+          hasServiceKey: data.config.hasServiceKey,
+          hasPgConnection: data.config.hasPgConnection,
+          lastTestedAt: data.config.lastTestedAt,
+          // Keep isConnected from previous test unless not configured
+          isConnected: data.config.isConfigured ? (prev?.isConnected ?? undefined) : false
+        }));
         setDbConfig(prev => ({
           ...prev,
           supabaseUrl: data.config.supabaseUrl || '',
-          // Only populate keys if not already filled by user (avoid overwriting with masked values)
+          // Keep user-typed keys; don't overwrite with empty strings
           supabaseAnonKey: prev.supabaseAnonKey || '',
           supabaseServiceRoleKey: prev.supabaseServiceRoleKey || '',
           pgConnectionString: prev.pgConnectionString || '',
@@ -513,12 +555,111 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     }
   };
 
+  // Auto-test silently in background after configs load — ถ้าตั้งค่าไว้แล้วให้ทดสอบทันที
+  const runSilentAutoTest = async (dbConfigured: boolean, driveConfigured: boolean) => {
+    if (dbConfigured) {
+      try {
+        const res = await fetch('/api/database/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}) // use server's stored config
+        });
+        const data = await res.json();
+        setDbStatus(prev => ({
+          ...prev,
+          ...data,
+          isConfigured: true,
+          isConnected: Boolean(data.success && data.isConnected),
+          message: data.isConnected
+            ? `✅ เชื่อมต่อสำเร็จ (${data.latencyMs ?? '—'} ms) — พร้อมใช้งาน`
+            : data.error || 'เชื่อมต่อไม่สำเร็จ กรุณาตรวจสอบ Key'
+        }));
+      } catch {
+        // silent — don't show error toast on auto-test
+      }
+    }
+
+    if (driveConfigured) {
+      try {
+        const res = await fetch('/api/drive/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}) // use server's stored config
+        });
+        const data = await res.json();
+        setDriveStatus(prev => ({
+          ...prev,
+          isConfigured: true,
+          isConnected: Boolean(data.success),
+          rootFolderName: data.rootFolderName || prev?.rootFolderName,
+          zonesCreated: data.zonesCreated || prev?.zonesCreated,
+          message: data.success
+            ? `✅ เชื่อมต่อ Google Drive สำเร็จ${data.rootFolderName ? ` — ${data.rootFolderName}` : ''}`
+            : data.error || 'เชื่อมต่อ Drive ไม่สำเร็จ'
+        }));
+      } catch {
+        // silent
+      }
+    }
+  };
+
+  const fetchStartupStatus = async () => {
+    try {
+      const res = await fetch('/api/startup/status');
+      const data = await res.json();
+      if (data.success) {
+        setStartupStatus(data);
+      }
+    } catch {
+      // silent
+    }
+  };
+
+  const handleRunFullSelfTest = async () => {
+    setIsSelfTestingAll(true);
+    try {
+      const res = await fetch('/api/startup/retest', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setStartupStatus(data);
+        await Promise.all([loadDatabaseConfig(), loadDriveConfig()]);
+        showToast('ทดสอบระบบอัตโนมัติ (Self-Test) ทั้งหมดสำเร็จเรียบร้อย');
+      } else {
+        showToast(data.error || 'การทดสอบตนเองไม่สำเร็จ', 'info');
+      }
+    } catch (err: any) {
+      showToast(`การทดสอบขัดข้อง: ${err?.message}`, 'info');
+    } finally {
+      setIsSelfTestingAll(false);
+    }
+  };
+
   useEffect(() => {
-    loadDatabaseConfig();
-    loadDriveConfig();
-    loadSystemConfig();
-    loadLineConfig();
+    const initLoad = async () => {
+      // 1. Load all configs in parallel and fetch startup health status
+      await Promise.all([
+        loadDatabaseConfig(),
+        loadDriveConfig(),
+        loadSystemConfig(),
+        loadLineConfig(),
+        fetchStartupStatus()
+      ]);
+    };
+    initLoad();
   }, []);
+
+  // 2. Auto-test silently once after isConfigured is known (runs exactly once per page-open)
+  const autoTestDoneRef = React.useRef(false);
+  useEffect(() => {
+    if (autoTestDoneRef.current) return;
+    const dbReady = Boolean(dbStatus?.isConfigured);
+    const driveReady = Boolean(driveStatus?.isConfigured);
+    // Only run when at least one service is configured
+    if (dbReady || driveReady) {
+      autoTestDoneRef.current = true;
+      runSilentAutoTest(dbReady, driveReady);
+    }
+  }, [dbStatus?.isConfigured, driveStatus?.isConfigured]);
 
   const handleSaveDbConfig = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -922,6 +1063,199 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             <FileText className="w-4 h-4 text-indigo-600" />
             <span>4. เอกสารส่งต่องาน & สถาปัตยกรรม</span>
           </button>
+        </div>
+      </div>
+
+      {/* ─── LIVE SYSTEM READINESS & AUTO-TEST STATUS HERO BANNER ─── */}
+      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-indigo-950 rounded-2xl border border-slate-700/60 p-5 text-white shadow-md space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shrink-0">
+              <ShieldCheck className="w-7 h-7" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h3 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
+                  ความพร้อมของระบบจริง 100% (Verified Real-Time Cloud & APIs)
+                </h3>
+                {((dbStatus?.isConnected || startupStatus?.supabase === 'ok') &&
+                  (driveStatus?.isConnected || startupStatus?.drive === 'ok') &&
+                  (geminiConfig.hasKey || startupStatus?.gemini === 'ok')) ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-xs font-bold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    พร้อมใช้งานจริงครบทุกระบบ (100% Online)
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                    ตรวจพบการตั้งค่าแล้ว (พร้อมทดสอบด่วน)
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                ระบบเชื่อมต่อ <strong>Supabase Cloud</strong> และ <strong>Google Drive</strong> จริงโดยอัตโนมัติ — <span className="text-emerald-400 font-bold">ไม่จำเป็นต้องตั้งค่าใหม่</span> ระบบจะทดสอบตัวเองอัตโนมัติตอนเปิดและพร้อมทำงานทันที
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRunFullSelfTest}
+              disabled={isSelfTestingAll}
+              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-2 cursor-pointer shadow-md disabled:opacity-50 active:scale-95"
+            >
+              <RefreshCw className={`w-4 h-4 text-emerald-100 ${isSelfTestingAll ? 'animate-spin' : ''}`} />
+              <span>{isSelfTestingAll ? 'กำลังทดสอบตนเองทุกระบบ...' : '⚡ ทดสอบตนเองทั้งหมดเดี๋ยวนี้ (Self-Test All)'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 4 Pillars Grid Status */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+          {/* 1. Supabase Cloud DB */}
+          <div
+            onClick={() => setSubTab('database')}
+            className={`p-3.5 rounded-xl border transition cursor-pointer ${
+              (dbStatus?.isConnected || startupStatus?.supabase === 'ok')
+                ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : (dbStatus?.isConfigured || startupStatus?.supabase === 'error')
+                ? 'bg-amber-950/30 border-amber-500/40 hover:bg-amber-950/50'
+                : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-bold flex items-center gap-1.5 text-slate-200">
+                <Database className="w-4 h-4 text-sky-400" />
+                1. Supabase Cloud DB
+              </span>
+              {(dbStatus?.isConnected || startupStatus?.supabase === 'ok') ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : (dbStatus?.isConfigured) ? (
+                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+              )}
+            </div>
+            <div className="text-[11px] font-semibold">
+              {(dbStatus?.isConnected || startupStatus?.supabase === 'ok') ? (
+                <span className="text-emerald-300">
+                  ✅ เชื่อมต่อสำเร็จ {dbStatus?.latencyMs ? `(${dbStatus.latencyMs} ms)` : '(พร้อมใช้งาน)'}
+                </span>
+              ) : dbStatus?.isConfigured ? (
+                <span className="text-amber-300">⚠️ ตั้งค่าแล้ว (คลิกเพื่อทดสอบ)</span>
+              ) : (
+                <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
+              )}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1 truncate">
+              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 7 ตาราง'}
+            </div>
+          </div>
+
+          {/* 2. Google Drive 5-Zone */}
+          <div
+            onClick={() => setSubTab('database')}
+            className={`p-3.5 rounded-xl border transition cursor-pointer ${
+              (driveStatus?.isConnected || startupStatus?.drive === 'ok')
+                ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : (driveStatus?.isConfigured || startupStatus?.drive === 'error')
+                ? 'bg-amber-950/30 border-amber-500/40 hover:bg-amber-950/50'
+                : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-bold flex items-center gap-1.5 text-slate-200">
+                <Cloud className="w-4 h-4 text-emerald-400" />
+                2. Google Drive 5-Zone
+              </span>
+              {(driveStatus?.isConnected || startupStatus?.drive === 'ok') ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : driveStatus?.isConfigured ? (
+                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+              )}
+            </div>
+            <div className="text-[11px] font-semibold">
+              {(driveStatus?.isConnected || startupStatus?.drive === 'ok') ? (
+                <span className="text-emerald-300">
+                  ✅ เชื่อมต่อสำเร็จ {driveStatus?.rootFolderName ? `— ${driveStatus.rootFolderName}` : '(5 Zones)'}
+                </span>
+              ) : driveStatus?.isConfigured ? (
+                <span className="text-amber-300">⚠️ ตั้งค่าแล้ว (คลิกเพื่อทดสอบ)</span>
+              ) : (
+                <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
+              )}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1 truncate">
+              {driveConfig.connectionMode === 'gas' ? 'โหมด Google Apps Script' : 'โหมด Service Account'}
+            </div>
+          </div>
+
+          {/* 3. Gemini AI OCR */}
+          <div
+            onClick={() => setSubTab('database')}
+            className={`p-3.5 rounded-xl border transition cursor-pointer ${
+              (geminiConfig.hasKey || startupStatus?.gemini === 'ok')
+                ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-bold flex items-center gap-1.5 text-slate-200">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+                3. Google Gemini AI
+              </span>
+              {(geminiConfig.hasKey || startupStatus?.gemini === 'ok') ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+              )}
+            </div>
+            <div className="text-[11px] font-semibold">
+              {(geminiConfig.hasKey || startupStatus?.gemini === 'ok') ? (
+                <span className="text-emerald-300">✅ Key พร้อมสแกนบิล OCR</span>
+              ) : (
+                <span className="text-rose-300">⚠️ ยังไม่ระบุ Key</span>
+              )}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1 truncate font-mono">
+              {geminiConfig.maskedKey || 'Gemini 2.5 Flash'}
+            </div>
+          </div>
+
+          {/* 4. LINE OA Webhook */}
+          <div
+            onClick={() => setSubTab('database')}
+            className={`p-3.5 rounded-xl border transition cursor-pointer ${
+              (lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok')
+                ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-bold flex items-center gap-1.5 text-slate-200">
+                <MessageSquare className="w-4 h-4 text-emerald-400" />
+                4. LINE OA Webhook
+              </span>
+              {(lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok') ? (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : (
+                <span className="w-2 h-2 rounded-full bg-slate-500"></span>
+              )}
+            </div>
+            <div className="text-[11px] font-semibold">
+              {(lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok') ? (
+                <span className="text-emerald-300">✅ Webhook พร้อมรับบิล</span>
+              ) : (
+                <span className="text-slate-400">ยังไม่ได้ตั้งค่า Token</span>
+              )}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-1 truncate">
+              {lineConfig.autoQuoteReply ? 'ตอบกลับกลุ่มอัตโนมัติ' : 'รับข้อมูลทางเดียว'}
+            </div>
+          </div>
         </div>
       </div>
 

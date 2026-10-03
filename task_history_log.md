@@ -4,6 +4,114 @@
 
 ---
 
+## [2026-10-03] Multi-User Supabase Cloud Inbox Synchronization (Single Source of Truth)
+
+### ความต้องการ
+"ระบบเหมือนมันไม่ได้ดึงข้อมูลทั้งหมดมาแสดง มันเป็นการแสดงข้อมูลที่มีหลังจากเปิดเข้าระบบ ทำไมเป็นแบบนั้นล่ะ แบบนี้ถ้าใช้พร้อมกันหลายคนก็เห็นแยกของใครของมันสิ มันก็ไม่เห็นข้อมูลทั้งหมดเหมือนกันสิครับ"
+
+### สาเหตุที่ตรวจพบ (Root Cause)
+1. **Legacy In-Memory Queue (โค้ดตกค้างจากระบบ LocalStorage เก่า)**:
+   - Endpoint `GET /api/line/inbox` เดิมไปอ่านจาก `lineWebhookInboxQueue` (ใน RAM ของ Server)
+   - และ `POST /api/line/inbox/ack` ดันไปสั่ง `splice` ลบรายการออกจาก RAM
+   - ส่งผลให้: เครื่องแรกที่เปิดเข้ามา ดูดข้อมูลบิลไปใส่ในเครื่องตัวเอง แล้วลบออกจาก RAM เครื่องอื่นที่เปิดตามมา หรือคนที่เปิดพร้อมกัน จะไม่ได้รับข้อมูล!
+2. **App.tsx Startup Filter**:
+   - `fetchDatabaseData` มีเงื่อนไข `hasDbData` ที่เช็คเฉพาะ `orders`/`pos` ถ้ายังไม่มี DO/PO จะข้ามการโหลด `lineInbox` ทำให้เปิดเว็บมาครั้งแรก `lineInbox` เป็นค่าว่าง!
+
+### การแก้ไขให้เป็น 100% Real Database Multi-User
+1. **`server.ts` — GET /api/line/inbox**:
+   - เปลี่ยนมาคิวรีตรงจาก **Supabase Cloud PostgreSQL (`line_inbox`)** เสมอ (เรียงตาม `received_at DESC`)
+   - ยกเลิกการลบข้อมูล (ack) ออกจาก RAM ข้อมูลทุกใบคงอยู่ใน Supabase Cloud ถาวร
+2. **`src/App.tsx` — fetchDatabaseData**:
+   - โหลด `lineInbox` และทุกตารางตรงจาก Supabase Cloud ทันทีตั้งแต่เปิดเว็บ ไม่ว่าตารางอื่นจะว่างหรือไม่
+3. **`src/App.tsx` — syncWebhookQueueToLocal & Update Sync**:
+   - ซิงก์ `lineInbox` ตรงกับ Supabase Cloud ทุก 8 วินาที ทุกเครื่อง ทุกผู้ใช้ เห็นบิลตรงกัน 100% แบบ Real-Time
+   - เมื่อมีการแก้ไขหรืออัปเดตรายการใน `line_inbox` จะสั่งบันทึกลง Supabase ทันที (`debouncedSyncToDb`)
+
+---
+
+## [2026-10-03] LINE OA Compact Flex Reply + Bill No Detection Fix + Drive Sync Button
+
+### ความต้องการ
+1. ภาพบิลใน "กล่องพักรูปบิลจาก LINE" ตอนนี้เก็บอยู่ที่ไหน ทำไมไม่เห็นใน Google Drive?
+2. เลขที่บิล บางบิลแสดง บางบิลขึ้น "รอระบุ" เพราะอะไร?
+3. Flex Message ที่บอทตอบกลับใน LINE ยาวเกินไป ต้องการให้สั้นกระชับเข้าใจง่าย และให้แสดงเลขที่บิลชัดเจน
+
+### การแก้ไขและปรับปรุง
+1. **ภาพบิล & Google Drive**:
+   - ปัจจุบันภาพบิลถูกจัดเก็บปลอดภัย 100% ในฐานข้อมูล **Supabase Cloud PostgreSQL** (`line_inbox.image_url`) จึงสามารถดูและขยายรูปได้
+   - เพิ่ม Endpoint `POST /api/drive/sync-inbox-images` สำหรับกวาดภาพบิลที่มีอยู่แล้วใน Supabase ส่งขึ้น Google Drive `ZONE_00`
+   - เพิ่มปุ่ม **"📁 ซิงก์รูปเข้า Google Drive"** ในหน้ากล่องพักบิล LINE (`LineInboxView.tsx`) ให้กดส่งภาพขึ้น Drive ได้ทันทีในคลิกเดียว
+   - บิลใหม่ที่ส่งผ่าน Webhook จะถูก auto-upload ขึ้น Google Drive ZONE_00 อัตโนมัติ
+2. **เลขที่บิล (DO / Ticket No)**:
+   - ปรับปรุง Prompt ของ Gemini AI ให้กวาดสายตาหาเลขที่บิลจากทุกจุดบนเอกสาร (เล่มที่, เลขที่, No., Ticket, รหัสหัวบิล, บาร์โค้ด) ห้ามปล่อยว่าง
+   - เพิ่ม Fallback ดึง `rawAiSnapshot.rawDocNo` และ `rawRefDoNo` ใน `LineInboxView.tsx` ป้องกันการหลุดเป็น "รอระบุ"
+3. **Compact LINE Flex Message**:
+   - สร้างฟังก์ชัน `buildLineFlexReplyMessage` ออกแบบ Flex Bubble (ขนาด Kilo) สั้น กระชับ สวยงาม ทันสมัย สบายตา ไม่รกกลุ่มไลน์
+   - **แสดง "เลขที่บิล" ตัวหนาเด่นชัดเจนเป็นบรรทัดแรกเสมอ!**
+   - แสดง ร้านค้า และ ผู้ส่ง อย่างกระชับ ครบถ้วน พร้อม Fallback เป็นข้อความสั้น 3 บรรทัด
+
+---
+
+## [2026-10-03] Live System Readiness & Auto Self-Test Dashboard (ความพร้อมระบบจริง 100%)
+
+### ความต้องการ
+"ต้องทำการตั้งค่าใหม่ทั้งหมดเลยใช่มั้ยครับ ถ้ามีการ 'ตั้งค่าแล้ว' ระบบควรทดสอบตัวเองได้ทันทีเพื่อให้ระบบพร้อมใช้งานได้ทันที"
+
+### คำตอบ & การปรับปรุง
+1. **ไม่ต้องตั้งค่าใหม่ทั้งหมด**: ข้อมูลการเชื่อมต่อ (Supabase, Google Drive, Gemini API, LINE OA) บันทึกและดึงจากไฟล์ Server Configuration อย่างปลอดภัย
+2. **Auto Self-Test On Startup & UI**:
+   - เพิ่ม `POST /api/startup/retest` ใน `server.ts` สำหรับสั่ง trigger ทดสอบทั้ง 4 ระบบพร้อมกัน
+   - เพิ่มการตรวจสอบ LINE OA Webhook เข้าใน `startupStatus`
+3. **Live System Readiness Hero Banner** ใน `SystemSettingsView.tsx`:
+   - แสดงการ์ดสถานะความพร้อม 4 เสาหลัก (Supabase PostgreSQL, Google Drive 5-Zone, Gemini AI OCR, LINE OA Webhook) ด้านบนสุด มองเห็นได้ทันทีจากทุกแท็บ
+   - ปุ่ม **"⚡ ทดสอบตนเองทั้งหมดเดี๋ยวนี้ (Self-Test All)"** ให้ผู้ใช้กดทดสอบทุกระบบได้ทันทีในคลิกเดียว พร้อมอัปเดตผลลัพธ์แบบ Real-time
+   - แสดง Badge สถานะเชื่อมต่อจริง (Latency ms / โฟลเดอร์ Drive / API Key) ยืนยันการทำงานบนระบบจริง 100%
+
+---
+
+## [2026-10-03] Startup Auto Self-Test — ระบบทดสอบตัวเองทันทีตอน Startup
+
+### ความต้องการ
+"ถ้ามีการตั้งค่าแล้ว ระบบควรทดสอบตัวเองได้ทันที เพื่อให้ระบบพร้อมใช้งานได้ทันที"
+
+### สิ่งที่แก้ไข
+- **`server.ts`** — เพิ่ม `startupStatus` object (in-memory) เก็บผลทดสอบ Supabase / Drive / Gemini
+- **`server.ts`** — `runStartupSelfTest()` ถูกเรียก `setImmediate` หลัง server listen ทันที — บันทึกผลลง `startupStatus` พร้อม log ไปที่ console
+- **`server.ts`** — เพิ่ม `GET /api/startup/status` endpoint — ส่ง `startupStatus` กลับให้ frontend ดึงได้
+- **`SystemSettingsView.tsx`** — `runSilentAutoTest()` เรียก `/api/database/test` + `/api/drive/test` แบบ silent ใน background — ไม่แสดง toast, update `dbStatus.isConnected` + `driveStatus.isConnected` อัตโนมัติ
+- **`SystemSettingsView.tsx`** — `useEffect` ที่ 2 watch `dbStatus.isConfigured` / `driveStatus.isConfigured` — trigger auto-test ครั้งแรกที่รู้ว่า configured แล้ว (1 ครั้งต่อ page-open)
+
+### Flow สรุป
+```
+Server Start → readConfig → isConfigured? → runStartupSelfTest() → update startupStatus → /api/startup/status
+UI Open Settings → loadConfigs → isConfigured? → runSilentAutoTest() → update dbStatus.isConnected / driveStatus.isConnected → badge แสดงผลทันที
+```
+
+### Build ✅ ผ่านสำเร็จ
+
+---
+
+
+## [2026-10-03] CHECKPOINT 9 — Production Pipeline: Drive Upload + Settings Display Fix
+
+### ปัญหาที่แก้ไข
+1. **ภาพบิล LINE ไม่ถูกเก็บใน Google Drive** — ทั้ง Real Webhook และ Simulate endpoint ไม่มีการ call Drive API
+2. **หน้าตั้งค่าไม่แสดงสถานะที่บันทึกไว้** — `loadDatabaseConfig` / `loadDriveConfig` ทำ `setDbStatus(data.config)` แบบ overwrite ทำให้ badge "ตั้งค่าแล้ว" หายเมื่อ reload
+
+### ไฟล์ที่แก้ไข
+- **`server.ts`** (LINE Webhook ~L1750): เพิ่ม `setImmediate` auto-upload ภาพบิลไป Google Drive ZONE_00 หลัง Supabase persist — fire-and-forget ไม่ block webhook response
+- **`server.ts`** (LINE Simulate ~L1966): เพิ่ม Supabase upsert + Drive upload ให้ simulate endpoint เหมือน real webhook
+- **`SystemSettingsView.tsx`** (`loadDatabaseConfig`): แก้เป็น `setDbStatus(prev => ({...prev, ...fields}))` merge แทน overwrite เพื่อรักษา `isConfigured`, `hasAnonKey`, `hasServiceKey`
+- **`SystemSettingsView.tsx`** (`loadDriveConfig`): แก้เช่นเดียวกัน preserve `isConfigured`, `hasGas`, `rootFolderId`
+
+### ผลลัพธ์
+- หน้าตั้งค่าแสดง badge "ตั้งค่าแล้ว" ทันทีที่เปิดหน้า ไม่ต้องกด Test Connection ซ้ำ
+- ทุกบิลที่รับจาก LINE (ทั้ง real webhook และ simulate) จะถูก upload ขึ้น Drive ZONE_00 อัตโนมัติ พร้อม update `drive_file_id` / `drive_web_view_link` ใน Supabase
+- Build ผ่านสำเร็จ ✅
+
+---
+
+
 ## 📌 คู่มือส่งมอบงานและกฎเหล็กของระบบสำหรับผู้พัฒนาต่อ (Developer Handoff & Core Domain Rules)
 
 > **สำคัญมากสำหรับผู้ที่จะมาพัฒนาต่อ:** ห้ามละเมิดข้อกำหนดและโครงสร้างทางธุรกิจด้านล่างนี้โดยเด็ดขาด

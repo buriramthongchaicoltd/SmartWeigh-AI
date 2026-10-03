@@ -101,6 +101,27 @@ function getActiveGeminiApiKey(): string {
   return (getSystemConfig().geminiApiKey || process.env.GEMINI_API_KEY || '').trim();
 }
 
+// ─── Startup Self-Test Status (in-memory, reset each server restart) ─────────
+const startupStatus: {
+  ranAt: string | null;
+  supabase: 'ok' | 'error' | 'not_configured' | 'pending';
+  supabaseMessage: string;
+  drive: 'ok' | 'error' | 'not_configured' | 'pending';
+  driveMessage: string;
+  gemini: 'ok' | 'not_configured';
+  geminiMessage: string;
+  allReady: boolean;
+} = {
+  ranAt: null,
+  supabase: 'pending',
+  supabaseMessage: 'ยังไม่ได้ทดสอบ',
+  drive: 'pending',
+  driveMessage: 'ยังไม่ได้ทดสอบ',
+  gemini: 'not_configured',
+  geminiMessage: 'ยังไม่ได้ตั้งค่า',
+  allReady: false
+};
+
 // Shared Gemini client instance
 const getGeminiClient = () => {
   const apiKey = getActiveGeminiApiKey();
@@ -1383,6 +1404,14 @@ async function analyzeLineBillWithGemini(
 
   // Format bookNo + docNumber into "เล่มที่/เลขที่" if bookNo is present
   let formattedDocNo = (raw.docNumber || '').toString().trim();
+
+  // Regex fallback: strip label prefix if Gemini returned "เลขที่ 12345" or "No. 0045"
+  if (formattedDocNo) {
+    formattedDocNo = formattedDocNo
+      .replace(/^(?:เลขที่|เลขที่:|เลข|no\.|no:|invoice\s*no\.?|po\s*no\.?|do\s*no\.?)\s*/i, '')
+      .trim();
+  }
+
   const rawBook = (raw.bookNo || '')
     .toString()
     .replace(/^(?:เล่มที่|เล่ม|book\s*no\.?|book|vol\.?)\s*[:#.]?\s*/i, '')
@@ -1540,11 +1569,34 @@ app.post('/api/line/config', (req: Request, res: Response) => {
 });
 
 // 2. Poll & Acknowledge Incoming Webhook Queue for Browser localStorage Sync
-app.get('/api/line/inbox', (_req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    items: lineWebhookInboxQueue
-  });
+app.get('/api/line/inbox', async (_req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (client) {
+      // Primary: fetch from Supabase so ALL users see the SAME bills (real-time multi-user)
+      const { data, error } = await client
+        .from('line_inbox')
+        .select('*')
+        .order('received_at', { ascending: false })
+        .limit(500);
+
+      if (!error && Array.isArray(data)) {
+        const supabaseItems = data.map(mapSupabaseToLineInbox);
+
+        // Merge in-memory queue (items not yet persisted to Supabase)
+        const supabaseIds = new Set(supabaseItems.map((i: any) => i.id));
+        const queueOnly = lineWebhookInboxQueue.filter(q => !supabaseIds.has(q.id));
+        const merged = [...queueOnly, ...supabaseItems];
+
+        return res.json({ success: true, items: merged });
+      }
+    }
+    // Fallback to in-memory queue when Supabase is not configured
+    return res.json({ success: true, items: lineWebhookInboxQueue });
+  } catch (err: any) {
+    console.warn('[GET /api/line/inbox] Error fetching from Supabase, falling back to queue:', err?.message);
+    return res.json({ success: true, items: lineWebhookInboxQueue });
+  }
 });
 
 app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
@@ -1756,6 +1808,81 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       } catch (dbErr) {
         console.warn('[LINE Webhook] Failed to auto-save inboxItem to Supabase line_inbox table:', dbErr);
       }
+
+      // Auto-upload bill image to Google Drive ZONE_00 (fire-and-forget, never blocks webhook)
+      if (base64DataUrl && inboxItem.isBillDocument !== false) {
+        setImmediate(async () => {
+          try {
+            const driveCfg = getStoredDriveConfig();
+            if (driveCfg.isEnabled && driveCfg.rootFolderId) {
+              const safeDocNo = (
+                inboxItem.extractedData?.col17 ||
+                inboxItem.extractedData?.col6 ||
+                inboxItem.extractedData?.col4 ||
+                inboxItem.id
+              ).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+
+              const fileName = `LINE_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
+
+              let driveResult: any = null;
+
+              // GAS Mode
+              if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+                driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+                  action: 'upload',
+                  rootFolderId: driveCfg.rootFolderId,
+                  targetZone: 'zone_00',
+                  fileName,
+                  base64Image: base64DataUrl
+                });
+              } else {
+                // Service Account Mode
+                const driveToken = await getDriveAccessToken();
+                if (driveToken) {
+                  const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
+                  const zone00Id = zones.ZONE_00;
+                  if (zone00Id) {
+                    driveResult = await uploadFileToDrive({
+                      accessToken: driveToken,
+                      folderId: zone00Id,
+                      fileName,
+                      base64Data: base64DataUrl,
+                      mimeType
+                    });
+                  }
+                }
+              }
+
+              if (driveResult && (driveResult.fileId || driveResult.success)) {
+                const driveFileId = driveResult.fileId;
+                const webViewLink = driveResult.webViewLink;
+
+                // Update inboxItem in-memory with Drive file info
+                inboxItem.driveFileId = driveFileId;
+                inboxItem.driveFileLocation = 'zone_00';
+                inboxItem.driveWebViewLink = webViewLink;
+
+                // Update Supabase record with drive file info
+                try {
+                  const client = getSupabaseClient();
+                  if (client && driveFileId) {
+                    await client.from('line_inbox').update({
+                      drive_file_id: driveFileId,
+                      drive_file_location: 'zone_00',
+                      drive_web_view_link: webViewLink
+                    }).eq('id', inboxItem.id);
+                  }
+                } catch (updateErr) {
+                  console.warn('[LINE Webhook] Failed to update Drive file info in Supabase:', updateErr);
+                }
+                console.log(`[LINE Webhook] Bill image uploaded to Drive ZONE_00: ${fileName} (${driveFileId})`);
+              }
+            }
+          } catch (driveErr) {
+            console.warn('[LINE Webhook] Drive auto-upload warning (non-blocking):', driveErr);
+          }
+        });
+      }
     }
   } catch (err) {
     console.error('LINE Webhook handler error:', err);
@@ -1887,6 +2014,76 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
             }
           : undefined
       };
+
+      // Persist to Supabase (same as real webhook)
+      try {
+        const supaClient = getSupabaseClient();
+        if (supaClient) {
+          await supaClient.from('line_inbox').upsert(mapLineInboxToSupabase(simulatedItem as any), { onConflict: 'id' });
+        }
+      } catch (dbErr) {
+        console.warn('[LINE Simulate] Supabase save warning:', dbErr);
+      }
+
+      // Auto-upload to Google Drive ZONE_00 (fire-and-forget)
+      if (image && simulatedItem.isBillDocument) {
+        setImmediate(async () => {
+          try {
+            const driveCfg = getStoredDriveConfig();
+            if (driveCfg.isEnabled && driveCfg.rootFolderId) {
+              const _extForDrive = simulatedItem.extractedData as any;
+              const safeDocNo = (
+                _extForDrive?.col17 ||
+                _extForDrive?.col6 ||
+                _extForDrive?.col4 ||
+                inboxId
+              ).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+              const fileName = `LINE_SIM_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
+
+              let driveResult: any = null;
+              if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+                driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+                  action: 'upload',
+                  rootFolderId: driveCfg.rootFolderId,
+                  targetZone: 'zone_00',
+                  fileName,
+                  base64Image: image
+                });
+              } else {
+                const driveToken = await getDriveAccessToken();
+                if (driveToken) {
+                  const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
+                  if (zones.ZONE_00) {
+                    driveResult = await uploadFileToDrive({
+                      accessToken: driveToken,
+                      folderId: zones.ZONE_00,
+                      fileName,
+                      base64Data: image,
+                      mimeType: mimeType || 'image/jpeg'
+                    });
+                  }
+                }
+              }
+
+              if (driveResult?.fileId) {
+                try {
+                  const supaClient = getSupabaseClient();
+                  if (supaClient) {
+                    await supaClient.from('line_inbox').update({
+                      drive_file_id: driveResult.fileId,
+                      drive_file_location: 'zone_00',
+                      drive_web_view_link: driveResult.webViewLink
+                    }).eq('id', inboxId);
+                  }
+                } catch {}
+                console.log(`[LINE Simulate] Drive upload OK: ${fileName} (${driveResult.fileId})`);
+              }
+            }
+          } catch (driveErr) {
+            console.warn('[LINE Simulate] Drive upload warning (non-blocking):', driveErr);
+          }
+        });
+      }
 
       return res.json({ success: true, item: simulatedItem });
     } catch (aiErr: any) {
@@ -3398,6 +3595,227 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   }
 });
 
+// 7. Sync Inbox Images to Google Drive ZONE_00 (POST /api/drive/sync-inbox-images)
+// Uploads ALL line_inbox bill images that are NOT yet in Google Drive
+app.post('/api/drive/sync-inbox-images', async (_req: Request, res: Response) => {
+  try {
+    const driveCfg = getStoredDriveConfig();
+    if (!driveCfg.isEnabled || !driveCfg.rootFolderId) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
+    }
+
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
+    }
+
+    // Fetch inbox items that have image_url but no drive_file_id yet
+    const { data: rows, error } = await client
+      .from('line_inbox')
+      .select('id, image_url, detected_doc_type, doc_number, store_name, received_at, drive_file_id')
+      .is('drive_file_id', null)
+      .not('image_url', 'is', null)
+      .order('received_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      return res.status(500).json({ success: false, error: `ดึงข้อมูลจาก Supabase ไม่ได้: ${error.message}` });
+    }
+
+    const pending = (rows || []).filter(r => r.image_url && r.image_url.length > 10);
+    if (pending.length === 0) {
+      return res.json({ success: true, uploadedCount: 0, message: 'รูปบิลทั้งหมดเชื่อมต่อกับ Google Drive แล้ว ไม่มีรายการค้างอยู่' });
+    }
+
+    let uploadedCount = 0;
+    const errors: string[] = [];
+
+    // Ensure ZONE_00 folder exists
+    let zone00Id: string | undefined;
+    let driveToken: string | undefined;
+    if (driveCfg.connectionMode !== 'gas') {
+      driveToken = await getDriveAccessToken() || undefined;
+      if (driveToken) {
+        const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
+        zone00Id = zones.ZONE_00;
+      }
+    }
+
+    for (const row of pending) {
+      try {
+        const safeDocNo = (row.doc_number || row.id).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+        const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+        const fileName = `LINE_${dateStr}_${safeDocNo}.jpg`;
+        const base64Image = row.image_url;
+        const mimeType = base64Image.startsWith('data:') ? base64Image.split(';')[0].split(':')[1] : 'image/jpeg';
+
+        let driveResult: any = null;
+
+        if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+          driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+            action: 'upload',
+            rootFolderId: driveCfg.rootFolderId,
+            targetZone: 'zone_00',
+            fileName,
+            base64Image
+          });
+        } else if (driveToken && zone00Id) {
+          driveResult = await uploadFileToDrive({
+            accessToken: driveToken,
+            folderId: zone00Id,
+            fileName,
+            base64Data: base64Image,
+            mimeType
+          });
+        }
+
+        if (driveResult && (driveResult.fileId || driveResult.success)) {
+          const fileId = driveResult.fileId;
+          await client.from('line_inbox').update({
+            drive_file_id: fileId || null,
+            drive_file_location: 'zone_00',
+            drive_web_view_link: driveResult.webViewLink || null
+          }).eq('id', row.id);
+          uploadedCount++;
+          console.log(`[Drive Sync Inbox] Uploaded: ${fileName} (${fileId})`);
+        }
+      } catch (uploadErr: any) {
+        errors.push(`${row.id}: ${uploadErr?.message || 'upload error'}`);
+        console.warn('[Drive Sync Inbox] Upload error for row', row.id, uploadErr?.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      uploadedCount,
+      pendingCount: pending.length,
+      errorCount: errors.length,
+      message: `อัปโหลดรูปบิลขึ้น Google Drive ZONE_00 สำเร็จ ${uploadedCount}/${pending.length} รายการ${errors.length > 0 ? ` (เกิดข้อผิดพลาด ${errors.length} รายการ)` : ''}`
+    });
+  } catch (err: any) {
+    console.error('Drive Sync Inbox Images Error:', err);
+    res.status(500).json({ success: false, error: err?.message || 'การซิงก์รูปบิลขึ้น Drive ล้มเหลว' });
+  }
+});
+
+// ============================================================================
+// STARTUP AUTO-TEST: ถ้ามีการตั้งค่าไว้แล้ว ทดสอบการเชื่อมต่อทันทีตอน startup
+// ============================================================================
+async function runStartupSelfTest() {
+  console.log('[Startup] Running self-test for configured services...');
+  startupStatus.ranAt = new Date().toISOString();
+
+  // --- 1. Test Supabase ---
+  const dbCfg = getStoredDbConfig();
+  const dbConfigured = Boolean(
+    (dbCfg.supabaseUrl && (dbCfg.supabaseAnonKey || dbCfg.supabaseServiceRoleKey)) ||
+    dbCfg.pgConnectionString
+  );
+
+  if (dbConfigured) {
+    try {
+      const supaClient = getSupabaseClient(dbCfg);
+      if (supaClient) {
+        const { error } = await supaClient.from('line_inbox').select('id').limit(1);
+        if (!error) {
+          startupStatus.supabase = 'ok';
+          startupStatus.supabaseMessage = 'เชื่อมต่อ Supabase Cloud สำเร็จ ✅';
+          console.log('[Startup] ✅ Supabase: เชื่อมต่อสำเร็จ');
+          saveStoredDbConfig({ lastTestedAt: new Date().toISOString() });
+        } else {
+          startupStatus.supabase = 'error';
+          startupStatus.supabaseMessage = `เชื่อมต่อได้แต่มีข้อผิดพลาด: ${error.message}`;
+          console.warn('[Startup] ⚠️  Supabase:', error.message);
+        }
+      }
+    } catch (err: any) {
+      startupStatus.supabase = 'error';
+      startupStatus.supabaseMessage = err?.message || 'เชื่อมต่อ Supabase ล้มเหลว';
+      console.warn('[Startup] ⚠️  Supabase self-test error:', err?.message);
+    }
+  } else {
+    startupStatus.supabase = 'not_configured';
+    startupStatus.supabaseMessage = 'ยังไม่ได้ตั้งค่า Supabase';
+    console.log('[Startup] ℹ️  Supabase: ยังไม่ได้ตั้งค่า (ข้ามการทดสอบ)');
+  }
+
+  // --- 2. Test Google Drive ---
+  const driveCfg = getStoredDriveConfig();
+  const driveConfigured = Boolean(
+    driveCfg.rootFolderId && (driveCfg.gasWebAppUrl || driveCfg.serviceAccountEmail || driveCfg.refreshToken)
+  );
+
+  if (driveConfigured) {
+    try {
+      if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+        const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+          action: 'test',
+          rootFolderId: driveCfg.rootFolderId
+        });
+        if (result?.success) {
+          startupStatus.drive = 'ok';
+          startupStatus.driveMessage = `เชื่อมต่อ Google Drive (GAS) สำเร็จ${result.rootFolderName ? ` — ${result.rootFolderName}` : ''} ✅`;
+          console.log('[Startup] ✅ Google Drive (GAS):', result.rootFolderName);
+          saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
+        } else {
+          startupStatus.drive = 'error';
+          startupStatus.driveMessage = result?.error || 'เชื่อมต่อ Drive ไม่สำเร็จ';
+          console.warn('[Startup] ⚠️  Google Drive (GAS):', result?.error);
+        }
+      } else {
+        const token = await getDriveAccessToken();
+        if (token) {
+          await ensureStandardDriveZones(token, driveCfg.rootFolderId);
+          startupStatus.drive = 'ok';
+          startupStatus.driveMessage = 'เชื่อมต่อ Google Drive (Service Account) สำเร็จ ✅';
+          console.log('[Startup] ✅ Google Drive (Service Account): เชื่อมต่อสำเร็จ');
+          saveStoredDriveConfig({ lastTestedAt: new Date().toISOString() });
+        } else {
+          startupStatus.drive = 'error';
+          startupStatus.driveMessage = 'ไม่สามารถขอ Access Token ได้';
+          console.warn('[Startup] ⚠️  Google Drive: ไม่สามารถขอ Access Token ได้');
+        }
+      }
+    } catch (err: any) {
+      startupStatus.drive = 'error';
+      startupStatus.driveMessage = err?.message || 'เชื่อมต่อ Drive ล้มเหลว';
+      console.warn('[Startup] ⚠️  Google Drive self-test error:', err?.message);
+    }
+  } else {
+    startupStatus.drive = 'not_configured';
+    startupStatus.driveMessage = 'ยังไม่ได้ตั้งค่า Google Drive';
+    console.log('[Startup] ℹ️  Google Drive: ยังไม่ได้ตั้งค่า (ข้ามการทดสอบ)');
+  }
+
+  // --- 3. Check Gemini Key ---
+  const geminiKey = getActiveGeminiApiKey();
+  if (geminiKey && geminiKey.length > 5) {
+    startupStatus.gemini = 'ok';
+    startupStatus.geminiMessage = 'Gemini API Key พร้อมใช้งาน ✅';
+    console.log('[Startup] ✅ Gemini API Key: พร้อมสแกนบิล');
+  } else {
+    startupStatus.gemini = 'not_configured';
+    startupStatus.geminiMessage = 'ยังไม่ได้ตั้งค่า Gemini API Key — ระบบ AI จะยังไม่ทำงาน';
+    console.warn('[Startup] ⚠️  Gemini API Key: ยังไม่ได้ตั้งค่า');
+  }
+
+  startupStatus.allReady = (
+    (startupStatus.supabase === 'ok' || startupStatus.supabase === 'not_configured') &&
+    (startupStatus.drive === 'ok' || startupStatus.drive === 'not_configured') &&
+    startupStatus.gemini === 'ok'
+  );
+
+  console.log(`[Startup] Self-test done — Supabase:${startupStatus.supabase} Drive:${startupStatus.drive} Gemini:${startupStatus.gemini} 🚀`);
+}
+
+// GET /api/startup/status — Return startup self-test results for the Settings UI
+app.get('/api/startup/status', (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    ...startupStatus
+  });
+});
+
 // Vite mounting & static serving
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -3416,6 +3834,8 @@ async function startServer() {
 
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}`);
+    // Run self-test after server is up (non-blocking)
+    setImmediate(() => runStartupSelfTest().catch(err => console.warn('[Startup] Self-test unexpected error:', err)));
   });
 }
 

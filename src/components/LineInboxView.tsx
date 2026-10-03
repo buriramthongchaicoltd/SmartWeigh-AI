@@ -12,7 +12,8 @@ import {
   Copy,
   Check,
   Filter,
-  Search
+  Search,
+  Cloud
 } from 'lucide-react';
 import {
   DocumentType,
@@ -91,6 +92,25 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     title: string;
     replyText?: string;
   } | null>(null);
+  const [isSyncingDrive, setIsSyncingDrive] = useState(false);
+
+  const handleSyncImagesToDrive = async () => {
+    setIsSyncingDrive(true);
+    try {
+      const res = await fetch('/api/drive/sync-inbox-images', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        showToast(data.message || `ซิงก์รูปภาพขึ้น Google Drive สำเร็จ ${data.uploadedCount} รายการ!`);
+        await onSyncWebhookQueue();
+      } else {
+        showToast(data.error || 'การซิงก์รูปภาพขึ้น Google Drive ไม่สำเร็จ', 'info');
+      }
+    } catch (err: any) {
+      showToast(`การซิงก์รูปภาพขัดข้อง: ${err?.message}`, 'info');
+    } finally {
+      setIsSyncingDrive(false);
+    }
+  };
 
   const webhookUrl = `${window.location.origin}/api/line/webhook`;
 
@@ -339,6 +359,17 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
             <button
               type="button"
+              onClick={handleSyncImagesToDrive}
+              disabled={isSyncingDrive}
+              className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              title="ส่งภาพบิลทั้งหมดที่ยังไม่ได้ขึ้น Drive ไปยัง Google Drive โฟลเดอร์ ZONE_00"
+            >
+              <Cloud className={`w-3.5 h-3.5 text-emerald-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
+              <span>{isSyncingDrive ? 'กำลังส่งภาพขึ้น Drive...' : '📁 ซิงก์รูปเข้า Google Drive'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => {
                 onSyncWebhookQueue();
                 showToast('ซิงค์คิวบิลจาก LINE เรียบร้อยแล้ว');
@@ -397,12 +428,13 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               </thead>
               <tbody className="divide-y divide-slate-200 bg-white">
                 {filteredItems.map((item, idx) => {
+                  const rawSnapshot = (item.rawAiSnapshot as any) || {};
                   const billNo =
                     item.detectedDocType === 'dest_weighbridge'
-                      ? item.extractedData?.col17 || item.extractedData?.col6
+                      ? item.extractedData?.col17 || item.extractedData?.col6 || rawSnapshot.rawDocNo || rawSnapshot.rawRefDoNo || ''
                       : item.detectedDocType === 'purchase_order'
-                      ? item.extractedData?.col4 || item.extractedData?.col6
-                      : item.extractedData?.col6 || item.extractedData?.col17 || item.extractedData?.col4;
+                      ? item.extractedData?.col4 || item.extractedData?.col6 || rawSnapshot.rawDocNo || rawSnapshot.rawRefPoNo || ''
+                      : item.extractedData?.col6 || item.extractedData?.col17 || item.extractedData?.col4 || rawSnapshot.rawDocNo || rawSnapshot.rawRefDoNo || '';
 
                   const refPoOrDo =
                     item.detectedDocType === 'dest_weighbridge'

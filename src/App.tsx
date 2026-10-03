@@ -273,33 +273,28 @@ export default function App() {
         setDbSyncTimestamp(new Date().toLocaleTimeString('th-TH'));
 
         const d = json.data;
-        const hasDbData =
-          (d.orders?.length || 0) > 0 ||
-          (d.pos?.length || 0) > 0 ||
-          (d.stores?.length || 0) > 0 ||
-          (d.projects?.length || 0) > 0 ||
-          (d.billingNotes?.length || 0) > 0;
+        // Always load all records directly from Supabase Cloud PostgreSQL
+        if (Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
+        if (Array.isArray(d.pos)) setPos(d.pos);
+        if (Array.isArray(d.stores)) setStores(d.stores);
+        if (Array.isArray(d.projects)) setProjects(d.projects);
+        if (Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
+        if (Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
+        if (Array.isArray(d.users) && d.users.length > 0) setUsers(ensureSystemMasterAdmin(d.users));
+        if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
 
-        if (hasDbData) {
-          if (Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
-          if (Array.isArray(d.pos)) setPos(d.pos);
-          if (Array.isArray(d.stores)) setStores(d.stores);
-          if (Array.isArray(d.projects)) setProjects(d.projects);
-          if (Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
-          if (Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
-          if (Array.isArray(d.users) && d.users.length > 0) setUsers(ensureSystemMasterAdmin(d.users));
-          if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
+        // Clear legacy local storage once DB is successfully loaded
+        try {
+          localStorage.removeItem(STORAGE_ORDERS_KEY);
+          localStorage.removeItem(STORAGE_STORES_KEY);
+          localStorage.removeItem(STORAGE_POS_KEY);
+          localStorage.removeItem(STORAGE_PROJECTS_KEY);
+          localStorage.removeItem(STORAGE_LINE_INBOX_KEY);
+          localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
+        } catch {}
 
-          // Clear legacy local storage once DB is successfully loaded
-          try {
-            localStorage.removeItem(STORAGE_ORDERS_KEY);
-            localStorage.removeItem(STORAGE_STORES_KEY);
-            localStorage.removeItem(STORAGE_POS_KEY);
-            localStorage.removeItem(STORAGE_PROJECTS_KEY);
-            localStorage.removeItem(STORAGE_LINE_INBOX_KEY);
-            localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
-          } catch {}
-        } else {
+        const hasDbOrdersOrStores = (d.orders?.length || 0) > 0 || (d.stores?.length || 0) > 0 || (d.pos?.length || 0) > 0;
+        if (!hasDbOrdersOrStores) {
           // If DB is newly connected and completely empty, check if user has old localStorage data to migrate
           try {
             const rawOrders = localStorage.getItem(STORAGE_ORDERS_KEY);
@@ -495,36 +490,15 @@ export default function App() {
     safeSaveToLocalStorage(STORAGE_DISMISSED_NOTIFS_KEY, dismissedNotifIds);
   }, [dismissedNotifIds]);
 
-  // Sync incoming bills from real LINE OA Webhook queue into browser localStorage
+  // Real-Time Multi-User Sync: Keep lineInbox strictly synced from Supabase Cloud so all users see identical bills
   const syncWebhookQueueToLocal = React.useCallback(async () => {
     try {
       const resp = await fetch('/api/line/inbox');
       if (!resp.ok) return;
       const data = await resp.json();
       const incoming: LineBillInboxItem[] = Array.isArray(data?.items) ? data.items : [];
-      if (incoming.length === 0) return;
-
-      const syncedIds: string[] = [];
-      setLineInbox(prev => {
-        const existingIds = new Set(prev.map(i => i.id));
-        const newOnes = incoming.filter(item => {
-          if (item.status === 'queued') return false; // wait until AI finishes or falls back
-          if (!existingIds.has(item.id)) {
-            syncedIds.push(item.id);
-            return true;
-          }
-          syncedIds.push(item.id);
-          return false;
-        });
-        return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
-      });
-
-      if (syncedIds.length > 0) {
-        await fetch('/api/line/inbox/ack', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: syncedIds })
-        });
+      if (incoming.length > 0) {
+        setLineInbox(incoming);
       }
     } catch {
       // ignore background poll error
@@ -2458,10 +2432,18 @@ export default function App() {
               orders={orders}
               pos={pos}
               onUpdateInboxItem={(updated) => {
-                setLineInbox(prev => prev.map(i => (i.id === updated.id ? updated : i)));
+                setLineInbox(prev => {
+                  const next = prev.map(i => (i.id === updated.id ? updated : i));
+                  debouncedSyncToDb('line_inbox', next);
+                  return next;
+                });
               }}
               onAddInboxItems={(newItems) => {
-                setLineInbox(prev => [...newItems, ...prev]);
+                setLineInbox(prev => {
+                  const next = [...newItems, ...prev];
+                  debouncedSyncToDb('line_inbox', next);
+                  return next;
+                });
               }}
               onDeleteInboxItem={(id) => {
                 if (!currentPermissions.canDeleteOrder) {

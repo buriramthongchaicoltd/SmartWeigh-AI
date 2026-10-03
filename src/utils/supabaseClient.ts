@@ -248,6 +248,18 @@ CREATE POLICY "Allow all operations for projects" ON public.projects FOR ALL USI
 CREATE POLICY "Allow all operations for app_users" ON public.app_users FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations for system_config" ON public.system_config FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations for billing_notes" ON public.billing_notes FOR ALL USING (true) WITH CHECK (true);
+
+-- Ensure extended columns for line_inbox exist
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS image_hash TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS drive_file_location TEXT DEFAULT 'zone_00';
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS drive_web_view_link TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS doc_number TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS doc_date TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS store_name TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS is_bill_document BOOLEAN DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_line_inbox_doc_number ON public.line_inbox (doc_number);
+CREATE INDEX IF NOT EXISTS idx_line_inbox_status ON public.line_inbox (status);
+CREATE INDEX IF NOT EXISTS idx_line_inbox_received_at ON public.line_inbox (received_at DESC);
 `;
 
 /**
@@ -588,7 +600,29 @@ export function mapSupabaseToBillingNote(row: any): BillingNoteRecord {
  * Maps a LineBillInboxItem to PostgreSQL `line_inbox` row
  */
 export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
-  return {
+  const ext = item.extractedData || {};
+
+  // Extract docNumber from the right column based on document type
+  const rawSnapshot: any = item.rawAiSnapshot || {};
+  let docNumber = '';
+  if (item.detectedDocType === 'dest_weighbridge') {
+    docNumber = (ext as any).col17 || (ext as any).col6 || rawSnapshot.rawDocNo || '';
+  } else if (item.detectedDocType === 'purchase_order') {
+    docNumber = (ext as any).col4 || (ext as any).col6 || rawSnapshot.rawDocNo || '';
+  } else {
+    docNumber = (ext as any).col6 || (ext as any).col17 || (ext as any).col4 || rawSnapshot.rawDocNo || '';
+  }
+
+  const mergedExtracted = {
+    ...(ext),
+    driveFileId: item.driveFileId,
+    driveFileLocation: item.driveFileLocation || (item.driveFileId ? 'zone_00' : undefined),
+    driveWebViewLink: item.driveWebViewLink,
+    imageHash: item.imageHash,
+    rawAiSnapshot: item.rawAiSnapshot || {}
+  };
+
+  const row: any = {
     id: item.id,
     received_at: item.receivedAt || new Date().toISOString(),
     line_message_id: item.lineMessageId || null,
@@ -597,6 +631,8 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     line_group_name: item.lineGroupName || null,
     image_url: item.image || null,
     drive_file_id: item.driveFileId || null,
+    drive_file_location: item.driveFileLocation || (item.driveFileId ? 'zone_00' : null),
+    drive_web_view_link: item.driveWebViewLink || null,
     detected_doc_type: item.detectedDocType || 'delivery_order',
     ai_confidence: item.aiConfidence || 0,
     status: item.status || 'pending_review',
@@ -605,33 +641,73 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     bot_replied: Boolean(item.botReplySent),
     bot_reply_mode: 'reply_quote_free',
     bot_reply_text: item.botReplyText || null,
-    extracted_data: item.extractedData || {},
-    store_suggestion: item.storeSuggestion || null
+    extracted_data: mergedExtracted,
+    store_suggestion: item.storeSuggestion || null,
+    // Dedicated searchable columns (avoid digging through JSONB)
+    doc_number: docNumber.toString().trim() || null,
+    doc_date: ((ext as any).col7 || rawSnapshot.rawDate || '').toString().trim() || null,
+    store_name: ((ext as any).col8 || rawSnapshot.rawStoreName || '').toString().trim() || null,
+    is_bill_document: item.isBillDocument !== false,
+    image_hash: item.imageHash || null
   };
+
+  return row;
 }
 
 /**
  * Maps a PostgreSQL `line_inbox` row to frontend LineBillInboxItem
  */
 export function mapSupabaseToLineInbox(row: any): LineBillInboxItem {
+  const extData = row.extracted_data || {};
+  const detectedDocType: any = row.detected_doc_type || 'delivery_order';
+
+  // Back-fill doc_number into extractedData columns if extData is missing them
+  // (handles old rows that were saved before doc_number column existed)
+  const docNum = row.doc_number || extData.col6 || extData.col17 || extData.col4 || '';
+  if (docNum) {
+    if (detectedDocType === 'dest_weighbridge') {
+      if (!extData.col17) extData.col17 = docNum;
+    } else if (detectedDocType === 'purchase_order') {
+      if (!extData.col4) extData.col4 = docNum;
+    } else {
+      if (!extData.col6) extData.col6 = docNum;
+    }
+  }
+  if (row.doc_date && !extData.col7) extData.col7 = row.doc_date;
+  if (row.store_name && !extData.col8) extData.col8 = row.store_name;
+
   return {
     id: row.id,
     lineMessageId: row.line_message_id || '',
     lineQuoteToken: row.line_quote_token || undefined,
-    lineUserId: 'U-LINE',
+    lineUserId: extData.lineUserId || 'U-LINE',
     lineSenderName: row.line_sender_name || 'พนักงาน LINE',
+    lineSenderAvatar: extData.lineSenderAvatar || undefined,
+    lineGroupId: extData.lineGroupId || undefined,
     lineGroupName: row.line_group_name || '',
     receivedAt: row.received_at || new Date().toISOString(),
     image: row.image_url || '',
-    driveFileId: row.drive_file_id || undefined,
+    imageHash: row.image_hash || extData.imageHash || undefined,
+    driveFileId: row.drive_file_id || extData.driveFileId || undefined,
+    driveFileLocation: row.drive_file_location || extData.driveFileLocation || (row.drive_file_id ? 'zone_00' : undefined),
+    driveWebViewLink: row.drive_web_view_link || extData.driveWebViewLink || undefined,
     status: (row.status as any) || 'pending_review',
-    detectedDocType: (row.detected_doc_type as any) || 'delivery_order',
-    extractedData: row.extracted_data || {},
-    rawAiSnapshot: {},
+    detectedDocType,
+    extractedData: extData,
+    rawAiSnapshot: extData.rawAiSnapshot || {},
     storeSuggestion: row.store_suggestion || undefined,
     aiConfidence: Number(row.ai_confidence) || 0,
-    isBillDocument: true,
+    isBillDocument: row.is_bill_document !== false,
+    nonBillReason: extData.nonBillReason || undefined,
     botReplyText: row.bot_reply_text || undefined,
-    botReplySent: Boolean(row.bot_replied)
+    botReplySent: Boolean(row.bot_replied),
+    duplicateInfo: row.duplicate_of_order_id ? {
+      isDuplicate: true,
+      matchedCode: row.duplicate_of_order_id,
+      reason: row.duplicate_reason || undefined
+    } : undefined,
+    verifiedOrderId: extData.verifiedOrderId || undefined,
+    verifiedBy: extData.verifiedBy || undefined,
+    verifiedAt: extData.verifiedAt || undefined
   };
 }

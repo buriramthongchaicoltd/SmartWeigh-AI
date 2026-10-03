@@ -359,6 +359,7 @@ export interface LineBillInboxItem {
   lineGroupName: string;           // ชื่อกลุ่ม LINE (เก็บแยกจาก col2 ชื่อโครงการ 100%)
   receivedAt: string;              // วัน-เวลาที่ส่งเข้ากลุ่ม LINE (ISO)
   image: string;                   // Base64 image data
+  imageHash?: string;              // SHA-256 digital fingerprint to catch 100% duplicate photos even without billNo
   status: LineInboxItemStatus;
   detectedDocType: DocumentType;   // ประเภทเอกสารที่ AI จำแนก (หรือที่ผู้ตรวจสอบสลับเปลี่ยน)
   extractedData: Partial<OrderRecord>; // ข้อมูลที่พร้อมส่งเข้า VerifyModal / POEditModal (col2 จะว่างไว้ให้ผู้ตรวจระบุ)
@@ -383,7 +384,8 @@ export interface LineBillInboxItem {
   // Google Drive Cloud Storage Tracking (00_กล่องพักบิล_LINE)
   driveFileId?: string;
   driveFolderId?: string;
-  driveFileLocation?: 'zone_00' | 'trash';
+  driveFileLocation?: 'zone_00' | 'zone_01' | 'zone_02' | 'zone_03' | 'zone_04' | 'trash' | string;
+  driveWebViewLink?: string;
   driveSyncStatus?: 'synced' | 'pending_move' | 'pending_delete' | 'error';
 }
 
