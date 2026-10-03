@@ -11,6 +11,7 @@
 # Local helper scripts (ไม่จำเป็นต้องขึ้น GitHub)
 # ========================
 commit.bat
+auto_commit.ps1
 
 # ========================
 # Node.js
