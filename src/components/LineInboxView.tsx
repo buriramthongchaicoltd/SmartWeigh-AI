@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   MessageSquare,
   Sparkles,
@@ -105,6 +105,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   } | null>(null);
   const hoveredPreviewId = useRef<string | null>(null);
   const hoverImageCache = useRef<Map<string, string>>(new Map());
+  const [, setPreloadedImageVersion] = useState(0);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [isAuditingDrive, setIsAuditingDrive] = useState(false);
   const [driveAuditError, setDriveAuditError] = useState<string | null>(null);
@@ -247,8 +248,8 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   const handleHoverImagePreview = async (item: LineBillInboxItem, anchor: HTMLElement) => {
     const rect = anchor.getBoundingClientRect();
-    const previewWidth = 224;
-    const previewHeight = 320;
+    const previewWidth = 320;
+    const previewHeight = 460;
     const left = rect.right + previewWidth + 16 <= window.innerWidth
       ? rect.right + 12
       : Math.max(8, rect.left - previewWidth - 12);
@@ -268,10 +269,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       const loadedImage = data.success && data.image ? data.image : null;
       if (loadedImage) {
         hoverImageCache.current.set(item.id, loadedImage);
-        if (hoverImageCache.current.size > 8) {
-          const oldestId = hoverImageCache.current.keys().next().value;
-          if (oldestId) hoverImageCache.current.delete(oldestId);
-        }
+        setPreloadedImageVersion(version => version + 1);
       }
       if (hoveredPreviewId.current === item.id) {
         setHoverImagePreview(current => current?.id === item.id
@@ -406,6 +404,73 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
     return true;
   });
+  const preloadKey = filteredItems.map(item => item.id).join('|');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const queue = filteredItems.filter(item =>
+      (!item.image || item.image.length <= 10) &&
+      !hoverImageCache.current.has(item.id)
+    );
+    let nextIndex = 0;
+    let completedCount = 0;
+
+    const markImageLoaded = () => {
+      completedCount += 1;
+      if (completedCount % 8 === 0 || completedCount === queue.length) {
+        setPreloadedImageVersion(version => version + 1);
+      }
+    };
+
+    const loadNextImage = async () => {
+      while (nextIndex < queue.length && !controller.signal.aborted) {
+        const item = queue[nextIndex++];
+        try {
+          const response = await fetch(`/api/line/inbox/image/${item.id}`, {
+            signal: controller.signal
+          });
+          if (!response.ok) throw new Error(`Image request failed: ${response.status}`);
+          const data = await response.json();
+          if (!data.success || !data.image) {
+            markImageLoaded();
+            continue;
+          }
+
+          const image = new Image();
+          const previewImage = await new Promise<string>((resolve, reject) => {
+            image.onload = () => {
+              const scale = Math.min(1, 640 / Math.max(image.naturalWidth, image.naturalHeight));
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+              canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+              const context = canvas.getContext('2d');
+              if (!context) {
+                reject(new Error('Canvas is unavailable for image preview'));
+                return;
+              }
+              context.drawImage(image, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/jpeg', 0.82));
+            };
+            image.onerror = () => reject(new Error('Could not decode bill image'));
+            image.src = data.image;
+          });
+          if (controller.signal.aborted) return;
+          hoverImageCache.current.set(item.id, previewImage);
+          markImageLoaded();
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            console.warn(`[LINE inbox] Could not preload preview for ${item.id}:`, error);
+            markImageLoaded();
+          }
+        }
+      }
+    };
+
+    void Promise.all(
+      Array.from({ length: Math.min(3, queue.length) }, () => loadNextImage())
+    );
+    return () => controller.abort();
+  }, [preloadKey]);
 
   // Instant Document Type Switch
   const handleInstantDocTypeChange = (item: LineBillInboxItem, newDocType: DocumentType) => {
@@ -959,9 +1024,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                         >
                           {loadingImageId === item.id ? (
                             <RefreshCw className="w-3.5 h-3.5 text-white animate-spin" />
-                          ) : item.image && item.image.length > 10 ? (
+                          ) : (item.image && item.image.length > 10) || hoverImageCache.current.has(item.id) ? (
                             <img
-                              src={item.image}
+                              src={item.image && item.image.length > 10
+                                ? item.image
+                                : hoverImageCache.current.get(item.id)}
                               alt="LINE Bill"
                               className="w-full h-full object-cover group-hover:scale-110 transition"
                             />
@@ -985,13 +1052,13 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                           <div
                             role="status"
                             aria-live="polite"
-                            className="fixed z-[60] pointer-events-none w-56 rounded-xl border border-slate-300 bg-white p-2 shadow-2xl"
+                            className="fixed z-[60] pointer-events-none w-80 rounded-xl border border-slate-300 bg-white p-2 shadow-2xl"
                             style={{ left: hoverImagePreview.left, top: hoverImagePreview.top }}
                           >
                             <div className="mb-1 truncate text-left text-xs font-semibold text-slate-700">
                               {hoverImagePreview.title}
                             </div>
-                            <div className="flex h-64 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
+                            <div className="flex h-[420px] items-center justify-center overflow-hidden rounded-lg bg-slate-950">
                               {hoverImagePreview.image ? (
                                 <img
                                   src={hoverImagePreview.image}
