@@ -4,6 +4,20 @@
 
 ---
 
+## [2026-10-05] Add Hover Preview for LINE Inbox Bill Images
+
+### การเปลี่ยนแปลง
+- เพิ่มภาพตัวอย่างขนาดเล็กเมื่อชี้เมาส์หรือโฟกัสแป้นพิมพ์ที่ thumbnail ในกล่องพักบิล LINE โดยโหลดรูป on-demand จาก endpoint เดิม และ cache รูปล่าสุดแบบจำกัดจำนวนเพื่อไม่ให้สะสมข้อมูลภาพมากเกินไป
+- คงพฤติกรรมคลิกเดิมไว้: เปิด modal สำหรับรูปที่อยู่ในรายการ และเปิด Google Drive เมื่อมี Drive link; แสดงสถานะกำลังโหลด/โหลดไม่สำเร็จในตัวอย่างแทนการแจ้งเตือนรบกวน
+- เพิ่ม accessible label และบันทึกงานนี้ใน history
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน (ยังมีคำเตือนเดิมเรื่อง JavaScript bundle ใหญ่กว่า 500 kB)
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] System Review and Operations Documentation Refresh
 
 ### ทบทวนและบันทึกสถานะ

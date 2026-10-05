@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   MessageSquare,
   Sparkles,
@@ -95,6 +95,16 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     title: string;
     replyText?: string;
   } | null>(null);
+  const [hoverImagePreview, setHoverImagePreview] = useState<{
+    id: string;
+    title: string;
+    image: string | null;
+    left: number;
+    top: number;
+    loading: boolean;
+  } | null>(null);
+  const hoveredPreviewId = useRef<string | null>(null);
+  const hoverImageCache = useRef<Map<string, string>>(new Map());
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [isAuditingDrive, setIsAuditingDrive] = useState(false);
   const [driveAuditError, setDriveAuditError] = useState<string | null>(null);
@@ -232,6 +242,55 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       showToast('โหลดรูปภาพไม่สำเร็จ', 'info');
     } finally {
       setLoadingImageId(null);
+    }
+  };
+
+  const handleHoverImagePreview = async (item: LineBillInboxItem, anchor: HTMLElement) => {
+    const rect = anchor.getBoundingClientRect();
+    const previewWidth = 224;
+    const previewHeight = 320;
+    const left = rect.right + previewWidth + 16 <= window.innerWidth
+      ? rect.right + 12
+      : Math.max(8, rect.left - previewWidth - 12);
+    const top = Math.max(8, Math.min(rect.top, window.innerHeight - previewHeight - 8));
+    const title = `บิลจาก ${item.lineSenderName} (${item.lineGroupName})`;
+    const cachedImage = hoverImageCache.current.get(item.id);
+    const image = item.image && item.image.length > 10 ? item.image : cachedImage || null;
+
+    hoveredPreviewId.current = item.id;
+    setHoverImagePreview({ id: item.id, title, image, left, top, loading: !image });
+    if (image) return;
+
+    try {
+      const resp = await fetch(`/api/line/inbox/image/${item.id}`);
+      if (!resp.ok) throw new Error(`Image request failed: ${resp.status}`);
+      const data = await resp.json();
+      const loadedImage = data.success && data.image ? data.image : null;
+      if (loadedImage) {
+        hoverImageCache.current.set(item.id, loadedImage);
+        if (hoverImageCache.current.size > 8) {
+          const oldestId = hoverImageCache.current.keys().next().value;
+          if (oldestId) hoverImageCache.current.delete(oldestId);
+        }
+      }
+      if (hoveredPreviewId.current === item.id) {
+        setHoverImagePreview(current => current?.id === item.id
+          ? { ...current, image: loadedImage, loading: false }
+          : current);
+      }
+    } catch {
+      if (hoveredPreviewId.current === item.id) {
+        setHoverImagePreview(current => current?.id === item.id
+          ? { ...current, loading: false }
+          : current);
+      }
+    }
+  };
+
+  const closeHoverImagePreview = (itemId: string) => {
+    if (hoveredPreviewId.current === itemId) {
+      hoveredPreviewId.current = null;
+      setHoverImagePreview(null);
     }
   };
 
@@ -885,10 +944,18 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                       <td className="py-2 px-2.5 border-r border-slate-200 text-center">
                         <button
                           type="button"
-                          onClick={() => handleOpenImagePreview(item)}
+                          onClick={() => {
+                            closeHoverImagePreview(item.id);
+                            handleOpenImagePreview(item);
+                          }}
+                          onMouseEnter={event => handleHoverImagePreview(item, event.currentTarget)}
+                          onMouseLeave={() => closeHoverImagePreview(item.id)}
+                          onFocus={event => handleHoverImagePreview(item, event.currentTarget)}
+                          onBlur={() => closeHoverImagePreview(item.id)}
                           disabled={loadingImageId === item.id}
                           className="relative group w-10 h-12 rounded-lg overflow-hidden border border-slate-300 bg-slate-800 mx-auto flex items-center justify-center cursor-pointer shadow-2xs"
-                          title={item.driveWebViewLink ? 'คลิกเพื่อเปิดใน Google Drive' : 'คลิกเพื่อดูรูปบิล'}
+                          aria-label={`ดูรูปบิลจาก ${item.lineSenderName}`}
+                          title={item.driveWebViewLink ? 'ชี้เพื่อดูตัวอย่าง หรือคลิกเพื่อเปิดใน Google Drive' : 'ชี้เพื่อดูตัวอย่าง หรือคลิกเพื่อดูรูปบิล'}
                         >
                           {loadingImageId === item.id ? (
                             <RefreshCw className="w-3.5 h-3.5 text-white animate-spin" />
@@ -914,6 +981,33 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                             </>
                           )}
                         </button>
+                        {hoverImagePreview?.id === item.id && (
+                          <div
+                            role="status"
+                            aria-live="polite"
+                            className="fixed z-[60] pointer-events-none w-56 rounded-xl border border-slate-300 bg-white p-2 shadow-2xl"
+                            style={{ left: hoverImagePreview.left, top: hoverImagePreview.top }}
+                          >
+                            <div className="mb-1 truncate text-left text-xs font-semibold text-slate-700">
+                              {hoverImagePreview.title}
+                            </div>
+                            <div className="flex h-64 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
+                              {hoverImagePreview.image ? (
+                                <img
+                                  src={hoverImagePreview.image}
+                                  alt={`ตัวอย่างรูปบิลจาก ${item.lineSenderName}`}
+                                  className="max-h-full max-w-full object-contain"
+                                />
+                              ) : hoverImagePreview.loading ? (
+                                <RefreshCw className="h-5 w-5 animate-spin text-white" />
+                              ) : (
+                                <span className="px-3 text-center text-xs text-slate-300">
+                                  โหลดภาพตัวอย่างไม่สำเร็จ
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
                       </td>
 
                       {/* 3. Sender & Time */}
