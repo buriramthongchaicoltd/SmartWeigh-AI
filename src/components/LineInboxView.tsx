@@ -238,6 +238,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const handleSyncImagesToDrive = async () => {
     setIsSyncingDrive(true);
     let totalUploaded = 0;
+    let totalReusedExisting = 0;
     let totalAiRescanned = 0;
     let totalFailed = 0;
     let cursorId: string | undefined;
@@ -265,6 +266,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         }
 
         totalUploaded += data.uploadedCount || 0;
+        totalReusedExisting += data.reusedExistingCount || 0;
         totalAiRescanned += data.aiRescanCount || 0;
         totalFailed += data.failedCount || 0;
         syncErrors.push(...(Array.isArray(data.errors) ? data.errors : []));
@@ -278,14 +280,15 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         }
       }
       await onSyncWebhookQueue();
+      await handleAuditDriveInbox();
       if (totalFailed > 0) {
         const errorSummary = syncErrors.slice(0, 3).join(' | ');
         showToast(
-          `ตรวจคิวครบแล้ว: ขึ้น Drive ${totalUploaded} รายการ, สแกน AI ${totalAiRescanned} รายการ, ผิดพลาด ${totalFailed} รายการ${errorSummary ? ` — ${errorSummary}` : ''}`,
+          `ตรวจคิวครบแล้ว: เชื่อม Drive ${totalUploaded} รายการ (ใช้ไฟล์เดิม ${totalReusedExisting}), สแกน AI ${totalAiRescanned} รายการ, ผิดพลาด ${totalFailed} รายการ${errorSummary ? ` — ${errorSummary}` : ''}`,
           'info'
         );
       } else {
-        showToast(`ตรวจคิวครบแล้ว: ขึ้น Drive ${totalUploaded} รายการ และสแกน AI ${totalAiRescanned} รายการ`);
+        showToast(`ตรวจคิวครบแล้ว: เชื่อม Drive ${totalUploaded} รายการ (ใช้ไฟล์เดิม ${totalReusedExisting}), สแกน AI ${totalAiRescanned} รายการ`);
       }
     } catch (err: any) {
       showToast(`การซิงก์รูปภาพขัดข้อง: ${err?.message}`, 'info');
@@ -544,7 +547,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               onClick={handleSyncImagesToDrive}
               disabled={isSyncingDrive}
               className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-              title="ดึงรูปที่ยังไม่เคยซิงก์ทั้งหมดจาก LINE มาสแกน AI และอัปโหลดขึ้น Google Drive; ข้ามรายการที่มี Drive ID และรายการที่ตรวจรับแล้ว"
+              title="ตรวจรายการที่ยังไม่มี Drive ID; ค้นหาไฟล์เดิมที่ไม่มีการอ้างอิงด้วยการเทียบ hash ก่อนอัปโหลด เพื่อเชื่อมไฟล์เดิมและป้องกันรูปซ้ำ"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
               <span>{isSyncingDrive ? 'กำลังดึงรูป & สแกนใหม่...' : '🔄 ดึงรูป LINE & สแกนใหม่ & ขึ้น Drive ทั้งหมด'}</span>
