@@ -19,6 +19,7 @@
 - แก้ handover, blueprint และ README ให้ระบุการ login/session และข้อจำกัดที่ยังเปิด: role policy บาง action ต้องทบทวน และ service-role credential ยังไม่ได้หมุน
 - ไม่มีการแก้ข้อมูล Production หรือหมุน secret; ทดสอบ `npm run lint`, `npm run build` และ `git diff --check` ผ่าน
 - แก้ตามข้อสังเกตของผู้ใช้: ถ้าไม่มี Master Admin ใน `app_users` server สร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) ให้อัตโนมัติด้วยรหัสเริ่มต้น `123456` ที่เก็บเป็น hash; อัปเดตเอกสารให้ระบุว่าต้องเปลี่ยนรหัสทันทีหลังล็อกอินครั้งแรก
+- เปลี่ยนรหัสเริ่มต้นของ Master Admin เป็น `@Admin`; login ด้วยรหัสนี้จะย้ายบัญชีเดิมที่ยังใช้รหัสเริ่มต้น `123456` เป็น hash ของ `@Admin` และปฏิเสธรหัสเก่า. บันทึกคำเตือนว่า `@Admin` ยังคาดเดาง่าย จึงควรเปลี่ยนทันทีหลังล็อกอิน
 
 ### การเปลี่ยนแปลง
 - อัปเดต `HANDOVER_DOCUMENTATION.md`, `DATABASE_STORAGE_BLUEPRINT.md` และบันทึกงานนี้

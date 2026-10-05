@@ -38,7 +38,7 @@
 - **สูง — Supabase service-role credential อยู่ในไฟล์ config ที่ถูก track:** server เลือกใช้ `supabaseServiceRoleKey` ก่อน anon key เมื่อสร้าง client; role นี้ข้าม RLS ได้ ผู้ที่เข้าถึง repository อาจนำ credential ไปใช้ได้หากยัง active. ให้ถือว่า credential รั่วแล้วและหมุน/เพิกถอน พร้อมย้ายไปเก็บใน runtime secret และตรวจสอบ Git history/การใช้งานจริง; เอกสารนี้ไม่แสดงค่าของ credential
 - **สูง — API authentication/authorization ยังต้องทบทวนราย action:** ขณะนี้ API ที่ไม่ใช่ health check, login หรือ LINE webhook บังคับ session ฝั่ง server แล้ว และจำกัด route ตั้งค่าระบบ/จัดการผู้ใช้ไว้ที่ Admin; อย่างไรก็ตามสิทธิ์ย่อยสำหรับการแก้/ลบข้อมูลธุรกิจบางประเภทอาจยังอาศัย role UI จึงควรตรวจและเพิ่ม policy ราย action ก่อนใช้งานกับข้อมูลอ่อนไหว
 - การล็อกอินใหม่รับ Username/Password, ตรวจบัญชี `app_users` ที่ server, เก็บ password hash แบบ scrypt (อัปเกรด hash เมื่อ login ผ่านจากรหัสเดิมแบบ plaintext), ออก HttpOnly/SameSite cookie อายุ 8 ชั่วโมง และไม่มีการส่ง password กลับ browser. Session อยู่ในหน่วยความจำ process จึงหมดอายุเมื่อ server restart/deploy. ปุ่มสลับบัญชีถูกนำออก
-- หากยังไม่มี Master Admin ใน `app_users`, endpoint login จะสร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) ให้อัตโนมัติด้วยรหัสเริ่มต้น `123456` ซึ่งเก็บเป็น hash; จากนั้น Admin สามารถล็อกอินและตั้ง/เปลี่ยนบัญชีอื่นได้จากหน้าผู้ใช้งาน. **ต้องเปลี่ยนรหัสเริ่มต้นทันทีหลังล็อกอินครั้งแรก** เพราะค่าตั้งต้นเป็นที่ทราบและอยู่ใน source code ฝั่ง server
+- หากยังไม่มี Master Admin ใน `app_users`, endpoint login จะสร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) ให้อัตโนมัติด้วยรหัสเริ่มต้น `@Admin` ซึ่งเก็บเป็น hash. บัญชีที่ถูกสร้างไปก่อนหน้านี้ด้วยรหัส `123456` จะย้ายเป็น `@Admin` เมื่อ login ด้วยรหัสใหม่; รหัสเดิมถูกปฏิเสธหลัง deploy. `@Admin` เป็นรหัสที่คาดเดาง่าย ให้เปลี่ยนเป็นรหัสส่วนตัวที่ยาวและไม่ซ้ำหลังล็อกอิน
 - งานนี้ **ยังไม่ได้หมุน Supabase service-role credential**; ต้องถือว่า credential ที่อยู่ใน repository อาจถูกเปิดเผยและจัดการแยกต่างหาก. การทดสอบครั้งนี้ยืนยัน build/type-check เท่านั้น ไม่ได้ทดสอบ Production หรือฐานข้อมูลจริง
 
 ---
@@ -79,7 +79,7 @@
 ### กฎข้อที่ 5: ทุกบัญชีรวมถึง Admin ต้องยืนยัน Username/Password
 - ห้ามให้ `Admin` หรือบัญชีอื่นเข้าใช้งานจากการเลือกชื่อ/สลับบัญชีโดยไม่กรอกรหัสผ่าน; หน้าเว็บไม่ถือเป็นตัวตรวจสอบตัวตน
 - Server ตรวจ `app_users.password`, ออก session cookie และปฏิเสธ API ที่ไม่มี session; รหัสผ่านใหม่บันทึกเป็น scrypt hash และไม่ส่งคืนใน response
-- ถ้ายังไม่มี Master Admin ใน `app_users`, server จะสร้าง `Admin` ให้อัตโนมัติด้วยรหัสเริ่มต้น `123456` และเก็บเป็น hash; ให้เปลี่ยนรหัสทันทีหลังล็อกอินครั้งแรก
+- ถ้ายังไม่มี Master Admin ใน `app_users`, server จะสร้าง `Admin` ให้อัตโนมัติด้วยรหัสเริ่มต้น `@Admin` และเก็บเป็น hash. บัญชีที่เคยถูกสร้างด้วย `123456` ย้ายไป `@Admin` เมื่อ login ด้วยรหัสใหม่; `123456` จะถูกปฏิเสธ. ให้เปลี่ยน `@Admin` ซึ่งคาดเดาง่ายเป็นรหัสส่วนตัวทันที
 
 ### กฎข้อที่ 6: ห้ามใช้ `window.alert` หรือ `window.confirm`
 - เนื่องจากระบบอาจรันภายใต้สภาพแวดล้อม iFrame/Webview ปุ่มลบหรือจัดการหลายรายการ (Batch Actions) ทั้งหมดต้องใช้ **Inline Confirmation UI** (ปุ่ม `ยืนยัน / ยกเลิก` บนหน้าจอ) แทน `window.confirm()` เสมอ

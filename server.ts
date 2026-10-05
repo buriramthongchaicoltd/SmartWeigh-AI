@@ -54,7 +54,8 @@ type AuthenticatedAppUser = {
 const AUTH_COOKIE_NAME = 'smartweigh_session';
 const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SYSTEM_MASTER_USERNAME = 'Admin';
-const SYSTEM_MASTER_INITIAL_PASSWORD = '123456';
+const SYSTEM_MASTER_INITIAL_PASSWORD = '@Admin';
+const SYSTEM_MASTER_LEGACY_PASSWORD = '123456';
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
 const authSessions = new Map<string, { user: AuthenticatedAppUser; expiresAt: number }>();
 const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
@@ -177,7 +178,23 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    const checked = verifyPassword(password, row.password);
+    const isSystemMaster = row.id === 'SYSTEM-MASTER-ADMIN';
+    let checked = verifyPassword(password, row.password);
+    if (isSystemMaster && password === SYSTEM_MASTER_LEGACY_PASSWORD) {
+      return res.status(401).json({ success: false, error: 'รหัสผ่าน Master Admin เปลี่ยนแล้ว กรุณาใช้รหัสใหม่' });
+    }
+    if (isSystemMaster && password === SYSTEM_MASTER_INITIAL_PASSWORD && !checked.valid) {
+      const legacyCheck = verifyPassword(SYSTEM_MASTER_LEGACY_PASSWORD, row.password);
+      if (legacyCheck.valid) {
+        const upgradedPassword = hashPassword(SYSTEM_MASTER_INITIAL_PASSWORD);
+        const { error: upgradeError } = await client.from('app_users')
+          .update({ password: upgradedPassword })
+          .eq('id', row.id);
+        if (upgradeError) throw upgradeError;
+        row.password = upgradedPassword;
+        checked = { valid: true, needsUpgrade: false };
+      }
+    }
     if (!checked.valid) return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     if (checked.needsUpgrade) {
       const { error: upgradeError } = await client.from('app_users').update({ password: hashPassword(password) }).eq('id', row.id);
