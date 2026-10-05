@@ -2021,9 +2021,11 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           const driveCfg = getStoredDriveConfig();
           if (driveCfg.isEnabled && driveCfg.rootFolderId) {
             const extData = inboxItem.extractedData as any;
-            const safeDocNo = (
-              extData?.col17 || extData?.col6 || extData?.col4 || inboxItem.id
-            ).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+            // ใช้เลขที่เอกสาร ถ้าไม่มีใช้ LINE messageId (ตัดเลขท้าย 6 หลักสำหรับ readability)
+            const rawId = extData?.col17 || extData?.col6 || extData?.col4
+              || (inboxItem.lineMessageId ? `MSG${String(inboxItem.lineMessageId).slice(-8)}` : null)
+              || (inboxItem.id ? inboxItem.id.replace(/^LINE_(?:SIM_)?/, '') : `NOID_${Date.now()}`);
+            const safeDocNo = rawId.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
             const fileName = `LINE_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
             let driveResult: any = null;
 
@@ -4213,7 +4215,11 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         }
 
         // Upload to Google Drive ZONE_00
-        const safeDocNo = (updatedDocNo || row.id).replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+        // ชื่อไฟล์มาตรฐาน: ตัด LINE_ prefix ซ้ำออก, ใช้ messageId ท้าย 8 หลักถ้าไม่มีเลขที่เอกสาร
+        const rawDocId = updatedDocNo
+          || (row.line_message_id ? `MSG${String(row.line_message_id).slice(-8)}` : null)
+          || (row.id ? row.id.replace(/^LINE_(?:SIM_)?/, '') : `NOID_${Date.now()}`);
+        const safeDocNo = rawDocId.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
         const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
         const fileName = `LINE_${dateStr}_${safeDocNo}.jpg`;
 
@@ -4459,3 +4465,54 @@ async function startServer() {
 }
 
 startServer();
+
+// ============================================================================
+// DAILY AUTO SYNC: ดึงรูปจาก LINE & สแกนใหม่ & อัปโหลด Drive ทุกวันอัตโนมัติ
+// ทำงานทุก 24 ชั่วโมง หลัง server เริ่มต้น (ไม่พึ่ง node-cron ใด)
+// ============================================================================
+async function runDailyLineInboxSync(): Promise<void> {
+  const driveCfg = getStoredDriveConfig();
+  const client = getSupabaseClient();
+  if (!driveCfg.isEnabled || !driveCfg.rootFolderId || !client) {
+    console.log('[DailySync] Skipped — Drive or Supabase not configured');
+    return;
+  }
+
+  console.log('[DailySync] Starting daily LINE inbox sync...');
+  let totalUploaded = 0;
+  let totalAiRescan = 0;
+  let batchRound = 0;
+
+  try {
+    let hasMore = true;
+    while (hasMore && batchRound < 40) { // max 40 batches × 5 = 200 bills/run
+      batchRound++;
+      // Reuse sync-inbox-images logic via internal HTTP call to self
+      const port = Number(PORT);
+      const resp = await fetch(`http://localhost:${port}/api/drive/sync-inbox-images`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true, rescanAi: true, batchSize: 5 })
+      });
+      if (!resp.ok) break;
+      const data = await resp.json();
+      if (!data.success) break;
+      totalUploaded += data.uploadedCount || 0;
+      totalAiRescan += data.aiRescanCount || 0;
+      hasMore = Boolean(data.hasMore) && (data.uploadedCount || 0) > 0;
+      if (hasMore) await new Promise(r => setTimeout(r, 2000)); // 2s pause between batches
+    }
+    console.log(`[DailySync] ✅ Done — uploaded: ${totalUploaded}, AI rescan: ${totalAiRescan}, batches: ${batchRound}`);
+  } catch (err: any) {
+    console.error('[DailySync] Error:', err?.message);
+  }
+}
+
+// Schedule: ครั้งแรกรอ 5 นาทีหลัง startup แล้ว repeat ทุก 24 ชั่วโมง
+const DAILY_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+setTimeout(() => {
+  runDailyLineInboxSync();
+  setInterval(runDailyLineInboxSync, DAILY_SYNC_INTERVAL_MS);
+}, 5 * 60 * 1000); // start after 5 minutes
+console.log('[DailySync] Scheduled: first run in 5 minutes, then every 24 hours');
+

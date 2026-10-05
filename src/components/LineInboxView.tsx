@@ -416,17 +416,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
             <button
               type="button"
-              onClick={() => handleSyncImagesToDrive(false)}
-              disabled={isSyncingDrive}
-              className="px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-              title="ส่งภาพบิลที่ยังไม่ได้ขึ้น Drive ไปยัง Google Drive โฟลเดอร์ ZONE_00"
-            >
-              <Cloud className={`w-3.5 h-3.5 text-emerald-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-              <span>{isSyncingDrive ? 'กำลังส่งภาพ...' : '📁 ซิงก์รูปเข้า Google Drive'}</span>
-            </button>
-
-            <button
-              type="button"
               onClick={() => handleSyncImagesToDrive(true)}
               disabled={isSyncingDrive}
               className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
