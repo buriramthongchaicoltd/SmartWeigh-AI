@@ -161,7 +161,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setEnableDOWeighing(Boolean(hasDOWeighing));
     }
     setShowAllCols(false);
-  }, [orderData, isOpen]);
+  }, [orderData, isOpen, billImage]);
+
+  // Sync billImage into currentImage when it arrives async (e.g. fetched from LINE API after modal opens)
+  useEffect(() => {
+    if (billImage && billImage.length > 50) {
+      setCurrentImage(billImage);
+    }
+  }, [billImage]);
 
   // Real-time duplicate bill detection against existingOrders (Must be called before any conditional return)
   const duplicateMatches = React.useMemo(() => {
