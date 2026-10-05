@@ -3408,6 +3408,31 @@ async function uploadFileToDrive(params: {
   };
 }
 
+async function findDriveFileByName(
+  accessToken: string,
+  folderId: string,
+  fileName: string
+): Promise<{ fileId: string; webViewLink?: string } | null> {
+  const escapeQueryValue = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const query = `name = '${escapeQueryValue(fileName)}' and '${escapeQueryValue(folderId)}' in parents and trashed = false`;
+  const params = new URLSearchParams({
+    q: query,
+    pageSize: '1',
+    fields: 'files(id,name,webViewLink)'
+  });
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  if (!response.ok) {
+    throw new Error(`Google Drive file lookup failed (${response.status}): ${await response.text()}`);
+  }
+  const result = await response.json() as { files?: Array<{ id?: string; webViewLink?: string }> };
+  const existingFile = result.files?.[0];
+  return existingFile?.id
+    ? { fileId: existingFile.id, webViewLink: existingFile.webViewLink }
+    : null;
+}
+
 // Move a file from one folder to another
 async function moveDriveFile(accessToken: string, fileId: string, fromFolderId: string, toFolderId: string) {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${toFolderId}&removeParents=${fromFolderId}&fields=id,parents`;
@@ -4073,7 +4098,12 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
 
 // 7. Sync & Rescan Inbox Images to Google Drive ZONE_00 (POST /api/drive/sync-inbox-images)
 // Downloads images from Supabase or LINE API, re-scans with Gemini AI, uploads to Google Drive, and stores links in Supabase
+let inboxDriveSyncInProgress = false;
 app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => {
+  if (inboxDriveSyncInProgress) {
+    return res.status(409).json({ success: false, error: 'กำลังซิงก์คิว LINE อยู่ กรุณารอให้รอบปัจจุบันเสร็จก่อน' });
+  }
+  inboxDriveSyncInProgress = true;
   try {
     const driveCfg = getStoredDriveConfig();
     if (!driveCfg.isEnabled || !driveCfg.rootFolderId) {
@@ -4085,34 +4115,44 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
       return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
     }
 
-    const forceAll = Boolean(req.body?.force);
-    const rescanAi = Boolean(req.body?.rescanAi);
     const batchSize = Math.min(Math.max(Number(req.body?.batchSize) || 5, 1), 10);
+    const lookbackDays = req.body?.lookbackDays === undefined ? undefined : Number(req.body.lookbackDays);
+    if (lookbackDays !== undefined && (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > 365)) {
+      return res.status(400).json({ success: false, error: 'lookbackDays ต้องเป็นจำนวนเต็มระหว่าง 1 ถึง 365' });
+    }
+    const cursorId = typeof req.body?.cursorId === 'string' ? req.body.cursorId.trim() : '';
+    if (cursorId.length > 200) {
+      return res.status(400).json({ success: false, error: 'cursorId ยาวเกินกำหนด' });
+    }
+    const receivedAfter =
+      lookbackDays === undefined ? undefined : new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
 
-    // Count remaining pending items (always exclude verified bills — already imported to system)
+    // Only process inbox items that are not verified and have not yet been linked to Drive.
     let countQuery = client
       .from('line_inbox')
       .select('id', { count: 'exact', head: true })
-      .neq('status', 'verified'); // ข้ามบิลที่บันทึกตรวจรับเข้าระบบแล้ว
+      .neq('status', 'verified')
+      .or('drive_file_id.is.null,drive_file_id.eq.');
 
-    if (!forceAll) {
-      countQuery = countQuery.or('drive_file_id.is.null,drive_file_id.eq.');
+    if (receivedAfter) countQuery = countQuery.gte('received_at', receivedAfter);
+    if (cursorId) countQuery = countQuery.gt('id', cursorId);
+
+    const { count: totalPendingCount, error: countError } = await countQuery;
+    if (countError) {
+      return res.status(500).json({ success: false, error: `นับรายการคิว LINE ไม่ได้: ${countError.message}` });
     }
 
-    const { count: totalPendingCount } = await countQuery;
-
-    // Fetch inbox items in small safe batch (default 5 items to avoid Render 100s timeout / OOM)
-    // Always skip verified bills — they are already imported and their Drive file has been renamed+moved
+    // Use a stable ID cursor so failed rows are reported once per run rather than retried endlessly.
     let query = client
       .from('line_inbox')
       .select('id, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
-      .neq('status', 'verified') // ข้ามบิลที่บันทึกตรวจรับเข้าระบบแล้ว
-      .order('received_at', { ascending: false })
+      .neq('status', 'verified')
+      .or('drive_file_id.is.null,drive_file_id.eq.')
+      .order('id', { ascending: true })
       .limit(batchSize);
 
-    if (!forceAll) {
-      query = query.or('drive_file_id.is.null,drive_file_id.eq.');
-    }
+    if (receivedAfter) query = query.gte('received_at', receivedAfter);
+    if (cursorId) query = query.gt('id', cursorId);
 
     const { data: rows, error } = await query;
 
@@ -4125,6 +4165,8 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
       return res.json({
         success: true,
         uploadedCount: 0,
+        aiRescanCount: 0,
+        failedCount: 0,
         remainingCount: 0,
         hasMore: false,
         message: 'รูปบิลทั้งหมดเชื่อมต่อกับ Google Drive แล้ว ไม่มีรายการค้างอยู่'
@@ -4134,6 +4176,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     let uploadedCount = 0;
     let aiRescanCount = 0;
     const errors: string[] = [];
+    const failedIds = new Set<string>();
 
     // Ensure ZONE_00 folder exists
     let zone00Id: string | undefined;
@@ -4172,56 +4215,67 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         }
 
         if (!base64Image || base64Image.length < 50) {
+          failedIds.add(row.id);
           errors.push(`บิล ${row.id}: ไม่มีไฟล์ภาพและโหลดจาก LINE ไม่สำเร็จ`);
           continue;
         }
 
-        // Optional AI Re-scan with Gemini
+        // Re-scan each unprocessed inbox image before storing its Drive reference.
         let updatedExtractedData = row.extracted_data || {};
         let updatedDocNo = row.doc_number;
         let updatedDocType = row.detected_doc_type || 'delivery_order';
         let updatedStore = row.store_name;
+        let isBillDocument = false;
+        let aiConfidence: number | undefined;
 
-        if (rescanAi || !updatedDocNo) {
-          try {
-            const aiResult = await analyzeLineBillWithGemini(
-              base64Image,
-              mimeType,
-              row.line_sender_name || '',
-              row.line_group_name || ''
-            );
-            if (aiResult && aiResult.isBillDocument) {
-              updatedDocType = aiResult.detectedDocType;
-              updatedExtractedData = {
-                ...updatedExtractedData,
-                ...aiResult.extractedData,
-                lineInboxId: row.id,
-                lineSenderName: row.line_sender_name,
-                lineGroupName: row.line_group_name,
-                lineReceivedAt: row.received_at
-              };
-              const rawDocNo =
-                updatedExtractedData.col17 ||
-                updatedExtractedData.col6 ||
-                updatedExtractedData.col4 ||
-                '';
-              if (rawDocNo) updatedDocNo = rawDocNo;
-              if (aiResult.storeSuggestion?.name) updatedStore = aiResult.storeSuggestion.name;
-              aiRescanCount++;
-            }
-          } catch (aiErr: any) {
-            console.warn(`[Drive Sync] AI re-scan warning for ${row.id}:`, aiErr?.message);
+        try {
+          const aiResult = await analyzeLineBillWithGemini(
+            base64Image,
+            mimeType,
+            row.line_sender_name || '',
+            row.line_group_name || ''
+          );
+          aiRescanCount++;
+          isBillDocument = aiResult.isBillDocument;
+          aiConfidence = aiResult.confidence;
+          if (aiResult.isBillDocument) {
+            updatedExtractedData = {
+              ...updatedExtractedData,
+              ...aiResult.extractedData,
+              lineInboxId: row.id,
+              lineSenderName: row.line_sender_name,
+              lineGroupName: row.line_group_name,
+              lineReceivedAt: row.received_at
+            };
+            updatedDocType = aiResult.detectedDocType;
+            const rawDocNo =
+              updatedExtractedData.col17 ||
+              updatedExtractedData.col6 ||
+              updatedExtractedData.col4 ||
+              '';
+            if (rawDocNo) updatedDocNo = rawDocNo;
+            if (aiResult.storeSuggestion?.name) updatedStore = aiResult.storeSuggestion.name;
+          } else {
+            updatedExtractedData = {
+              ...updatedExtractedData,
+              nonBillReason: aiResult.nonBillReason || 'AI ตรวจพบว่าไม่ใช่เอกสารบิล',
+              lineInboxId: row.id,
+              lineSenderName: row.line_sender_name,
+              lineGroupName: row.line_group_name,
+              lineReceivedAt: row.received_at
+            };
           }
+        } catch (aiErr: any) {
+          failedIds.add(row.id);
+          errors.push(`บิล ${row.id}: สแกน AI ใหม่ไม่สำเร็จ (${aiErr?.message || 'ไม่ทราบสาเหตุ'})`);
+          console.warn(`[Drive Sync] AI re-scan warning for ${row.id}:`, aiErr?.message);
         }
 
         // Upload to Google Drive ZONE_00
-        // ชื่อไฟล์มาตรฐาน: ตัด LINE_ prefix ซ้ำออก, ใช้ messageId ท้าย 8 หลักถ้าไม่มีเลขที่เอกสาร
-        const rawDocId = updatedDocNo
-          || (row.line_message_id ? `MSG${String(row.line_message_id).slice(-8)}` : null)
-          || (row.id ? row.id.replace(/^LINE_(?:SIM_)?/, '') : `NOID_${Date.now()}`);
-        const safeDocNo = rawDocId.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
+        // Use the immutable inbox ID so retries reuse the same Drive file if OCR fails.
+        const safeInboxId = sanitizeDriveName(row.id).slice(-80);
         const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
-        const fileName = `LINE_${dateStr}_${safeDocNo}.jpg`;
+        const fileName = `LINE_${dateStr}_${safeInboxId}.jpg`;
 
         let driveResult: any = null;
 
@@ -4234,58 +4288,76 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
             base64Image
           });
         } else if (driveToken && zone00Id) {
-          driveResult = await uploadFileToDrive({
-            accessToken: driveToken,
-            folderId: zone00Id,
-            fileName,
-            base64Data: base64Image,
-            mimeType
-          });
+          driveResult = await findDriveFileByName(driveToken, zone00Id, fileName);
+          if (!driveResult) {
+            driveResult = await uploadFileToDrive({
+              accessToken: driveToken,
+              folderId: zone00Id,
+              fileName,
+              base64Data: base64Image,
+              mimeType
+            });
+          }
         }
 
-        if (driveResult && (driveResult.fileId || driveResult.success)) {
+        if (driveResult?.fileId) {
+          if (aiConfidence === undefined) {
+            failedIds.add(row.id);
+            continue;
+          }
           const fileId = driveResult.fileId;
           const webViewLink = driveResult.webViewLink || (fileId ? `https://drive.google.com/file/d/${fileId}/view` : null);
 
           // Update Supabase with Drive info and clear base64 from image_url
-          await client.from('line_inbox').update({
+          const { error: updateError } = await client.from('line_inbox').update({
             drive_file_id: fileId || null,
             drive_file_location: 'zone_00',
             drive_web_view_link: webViewLink,
             doc_number: updatedDocNo || null,
             detected_doc_type: updatedDocType,
             store_name: updatedStore || null,
+            ...(aiConfidence !== undefined ? { ai_confidence: aiConfidence } : {}),
+            is_bill_document: isBillDocument,
+            ...(isBillDocument ? {} : { status: 'ignored_non_bill' }),
             extracted_data: updatedExtractedData,
-            image_url: null // Never store base64 in Supabase! Keep it in Google Drive only.
+            image_url: aiConfidence !== undefined ? null : base64Image
           }).eq('id', row.id);
+          if (updateError) throw new Error(`บันทึกข้อมูล Drive ลง Supabase ไม่สำเร็จ: ${updateError.message}`);
 
           uploadedCount++;
           console.log(`[Drive Sync] Saved to Drive & updated Supabase: ${fileName} (${fileId})`);
         } else {
-          errors.push(`บิล ${row.id}: อัปโหลดขึ้น Drive ไม่สำเร็จ (${driveResult?.error || 'ไม่มีผลลัพธ์'})`);
+          failedIds.add(row.id);
+          errors.push(`บิล ${row.id}: อัปโหลดขึ้น Drive ไม่สำเร็จ (${driveResult?.error || 'ไม่มี fileId จาก Drive'})`);
         }
       } catch (itemErr: any) {
+        failedIds.add(row.id);
         errors.push(`บิล ${row.id}: ${itemErr?.message || 'เกิดข้อผิดพลาด'}`);
         console.warn(`[Drive Sync] Item error ${row.id}:`, itemErr?.message);
       }
     }
 
-    const remainingCount = Math.max(0, (totalPendingCount || pending.length) - uploadedCount);
-    const hasMore = remainingCount > 0 && uploadedCount > 0;
+    const remainingCount = Math.max(0, (totalPendingCount || 0) - pending.length);
+    const hasMore = pending.length === batchSize;
+    const nextCursorId = pending[pending.length - 1]?.id;
 
     return res.json({
       success: true,
       uploadedCount,
       aiRescanCount,
+      failedCount: failedIds.size,
       totalPending: totalPendingCount || pending.length,
       remainingCount,
       hasMore,
+      nextCursorId,
       errors: errors.slice(0, 5),
-      message: `ดึงรูปและอัปโหลดขึ้น Google Drive สำเร็จ ${uploadedCount} ใบ${remainingCount > 0 ? ` (เหลืออีก ${remainingCount} ใบ)` : ' (ครบทั้งหมดแล้ว)'}`
+      message: `ตรวจชุดนี้แล้ว: อัปโหลด/เชื่อม Drive ${uploadedCount} ใบ, สแกน AI ${aiRescanCount} ใบ, พบข้อผิดพลาด ${errors.length} รายการ`
     });
   } catch (err: any) {
     console.error('Drive Sync Error:', err);
     return res.status(500).json({ success: false, error: err?.message || 'การดึงรูปและซิงก์ Drive ขัดข้อง' });
+  } finally {
+    inboxDriveSyncInProgress = false;
   }
 });
 
@@ -4481,38 +4553,69 @@ async function runDailyLineInboxSync(): Promise<void> {
   console.log('[DailySync] Starting daily LINE inbox sync...');
   let totalUploaded = 0;
   let totalAiRescan = 0;
-  let batchRound = 0;
+  let totalFailed = 0;
+  let cursorId: string | undefined;
 
   try {
     let hasMore = true;
-    while (hasMore && batchRound < 40) { // max 40 batches × 5 = 200 bills/run
-      batchRound++;
+    while (hasMore) {
       // Reuse sync-inbox-images logic via internal HTTP call to self
       const port = Number(PORT);
       const resp = await fetch(`http://localhost:${port}/api/drive/sync-inbox-images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ force: true, rescanAi: true, batchSize: 5 })
+        body: JSON.stringify({ lookbackDays: 3, batchSize: 5, cursorId })
       });
-      if (!resp.ok) break;
+      if (resp.status === 409) {
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+      if (!resp.ok) throw new Error(`sync-inbox-images ตอบกลับ HTTP ${resp.status}: ${await resp.text()}`);
       const data = await resp.json();
-      if (!data.success) break;
+      if (!data.success) throw new Error(data.error || 'ซิงก์คิว LINE ไม่สำเร็จ');
       totalUploaded += data.uploadedCount || 0;
       totalAiRescan += data.aiRescanCount || 0;
-      hasMore = Boolean(data.hasMore) && (data.uploadedCount || 0) > 0;
-      if (hasMore) await new Promise(r => setTimeout(r, 2000)); // 2s pause between batches
+      totalFailed += data.failedCount || 0;
+      hasMore = Boolean(data.hasMore);
+      if (hasMore) {
+        if (!data.nextCursorId || data.nextCursorId === cursorId) {
+          throw new Error('ไม่ได้รับ cursor ของชุดถัดไป จึงหยุดเพื่อป้องกันการวนซ้ำ');
+        }
+        cursorId = data.nextCursorId;
+        await new Promise(r => setTimeout(r, 2000));
+      }
     }
-    console.log(`[DailySync] ✅ Done — uploaded: ${totalUploaded}, AI rescan: ${totalAiRescan}, batches: ${batchRound}`);
+    console.log(`[DailySync] ✅ Done — Drive linked: ${totalUploaded}, AI rescanned: ${totalAiRescan}, errors: ${totalFailed}`);
   } catch (err: any) {
     console.error('[DailySync] Error:', err?.message);
   }
 }
 
-// Schedule: ครั้งแรกรอ 5 นาทีหลัง startup แล้ว repeat ทุก 24 ชั่วโมง
-const DAILY_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
-setTimeout(() => {
-  runDailyLineInboxSync();
-  setInterval(runDailyLineInboxSync, DAILY_SYNC_INTERVAL_MS);
-}, 5 * 60 * 1000); // start after 5 minutes
-console.log('[DailySync] Scheduled: first run in 5 minutes, then every 24 hours');
+function millisecondsUntilNextBangkokSync(now = new Date()): number {
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(now);
+  const part = (type: string) => dateParts.find(value => value.type === type)?.value || '';
+  const year = Number(part('year'));
+  const month = Number(part('month'));
+  const day = Number(part('day'));
+  const todayAtSix = Date.UTC(year, month - 1, day, 6) - 7 * 60 * 60 * 1000;
+  const nextRun = todayAtSix > now.getTime()
+    ? todayAtSix
+    : Date.UTC(year, month - 1, day + 1, 6) - 7 * 60 * 60 * 1000;
+  return nextRun - now.getTime();
+}
 
+function scheduleNextDailyLineInboxSync(): void {
+  const delay = millisecondsUntilNextBangkokSync();
+  console.log(`[DailySync] Next run in ${Math.ceil(delay / 60000)} minutes (06:00 Asia/Bangkok)`);
+  setTimeout(async () => {
+    await runDailyLineInboxSync();
+    scheduleNextDailyLineInboxSync();
+  }, delay);
+}
+
+scheduleNextDailyLineInboxSync();

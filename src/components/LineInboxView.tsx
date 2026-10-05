@@ -125,21 +125,22 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
   };
 
-  const handleSyncImagesToDrive = async (force: boolean = false) => {
+  const handleSyncImagesToDrive = async () => {
     setIsSyncingDrive(true);
     let totalUploaded = 0;
+    let totalAiRescanned = 0;
+    let totalFailed = 0;
+    let cursorId: string | undefined;
+    const syncErrors: string[] = [];
     let hasMore = true;
-    let batchCount = 0;
     try {
-      while (hasMore && batchCount < 20) {
-        batchCount++;
+      while (hasMore) {
         const res = await fetch('/api/drive/sync-inbox-images', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            force: force && batchCount === 1,
-            rescanAi: false,
-            batchSize: 5
+            batchSize: 5,
+            cursorId
           })
         });
 
@@ -154,14 +155,28 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         }
 
         totalUploaded += data.uploadedCount || 0;
-        if (!data.hasMore || data.uploadedCount === 0) {
-          hasMore = false;
-          showToast(data.message || `ซิงก์รูปภาพขึ้น Google Drive สำเร็จ ${totalUploaded} รายการ!`);
-        } else {
+        totalAiRescanned += data.aiRescanCount || 0;
+        totalFailed += data.failedCount || 0;
+        syncErrors.push(...(Array.isArray(data.errors) ? data.errors : []));
+        hasMore = Boolean(data.hasMore);
+        if (hasMore) {
+          if (!data.nextCursorId || data.nextCursorId === cursorId) {
+            throw new Error('เซิร์ฟเวอร์ไม่ส่ง cursor สำหรับอ่านชุดถัดไป จึงหยุดเพื่อป้องกันการวนซ้ำ');
+          }
+          cursorId = data.nextCursorId;
           showToast(`กำลังซิงก์รูปภาพ... สำเร็จแล้ว ${totalUploaded} ใบ (เหลืออีก ${data.remainingCount} ใบ)`, 'info');
         }
       }
       await onSyncWebhookQueue();
+      if (totalFailed > 0) {
+        const errorSummary = syncErrors.slice(0, 3).join(' | ');
+        showToast(
+          `ตรวจคิวครบแล้ว: ขึ้น Drive ${totalUploaded} รายการ, สแกน AI ${totalAiRescanned} รายการ, ผิดพลาด ${totalFailed} รายการ${errorSummary ? ` — ${errorSummary}` : ''}`,
+          'info'
+        );
+      } else {
+        showToast(`ตรวจคิวครบแล้ว: ขึ้น Drive ${totalUploaded} รายการ และสแกน AI ${totalAiRescanned} รายการ`);
+      }
     } catch (err: any) {
       showToast(`การซิงก์รูปภาพขัดข้อง: ${err?.message}`, 'info');
     } finally {
@@ -416,10 +431,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
             <button
               type="button"
-              onClick={() => handleSyncImagesToDrive(true)}
+              onClick={handleSyncImagesToDrive}
               disabled={isSyncingDrive}
               className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
-              title="ดึงภาพทั้งหมดจาก LINE มาสแกน AI ใหม่และอัปโหลดขึ้น Google Drive ZONE_00 พร้อมผูก URL ลง Supabase ทั้งหมด"
+              title="ดึงรูปที่ยังไม่เคยซิงก์ทั้งหมดจาก LINE มาสแกน AI และอัปโหลดขึ้น Google Drive; ข้ามรายการที่มี Drive ID และรายการที่ตรวจรับแล้ว"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isSyncingDrive ? 'animate-spin' : ''}`} />
               <span>{isSyncingDrive ? 'กำลังดึงรูป & สแกนใหม่...' : '🔄 ดึงรูป LINE & สแกนใหม่ & ขึ้น Drive ทั้งหมด'}</span>

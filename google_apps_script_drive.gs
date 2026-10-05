@@ -151,20 +151,38 @@ function handleUploadFile(payload) {
     destFolder = getOrCreateSubfolder(destFolder, subfolderName);
   }
 
-  // ตัด Prefix data:image/...;base64, ออกหากมี
-  var cleanBase64 = base64Image.replace(/^data:image\/[a-zA-Z0-9+]+;base64,/, '');
-  var decodedBytes = Utilities.base64Decode(cleanBase64);
-  var blob = Utilities.newBlob(decodedBytes, 'image/jpeg', fileName);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var existingFiles = destFolder.getFilesByName(fileName);
+    if (existingFiles.hasNext()) {
+      var existingFile = existingFiles.next();
+      return jsonResponse({
+        success: true,
+        alreadyExists: true,
+        fileId: existingFile.getId(),
+        fileName: existingFile.getName(),
+        folderId: destFolder.getId(),
+        webViewLink: existingFile.getUrl()
+      });
+    }
 
-  var file = destFolder.createFile(blob);
+    // ตัด Prefix data:image/...;base64, ออกหากมี
+    var cleanBase64 = base64Image.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+    var decodedBytes = Utilities.base64Decode(cleanBase64);
+    var blob = Utilities.newBlob(decodedBytes, 'image/jpeg', fileName);
+    var file = destFolder.createFile(blob);
 
-  return jsonResponse({
-    success: true,
-    fileId: file.getId(),
-    fileName: file.getName(),
-    folderId: destFolder.getId(),
-    webViewLink: file.getUrl()
-  });
+    return jsonResponse({
+      success: true,
+      fileId: file.getId(),
+      fileName: file.getName(),
+      folderId: destFolder.getId(),
+      webViewLink: file.getUrl()
+    });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function handleMoveFile(payload) {
