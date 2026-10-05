@@ -36,7 +36,7 @@ import {
   BillingNoteRecord
 } from './types';
 import { exportAllDataToExcel } from './utils/excelExport';
-import { isDocNumberMatch, extractDocReferences, checkDuplicateOrder, checkDuplicatePO } from './utils/poReconciliation';
+import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
 import {
@@ -101,8 +101,7 @@ const syncStoreFinancials = (storesList: StoreMerchant[], ordersList: OrderRecor
   });
 };
 
-// Helper to ensure Gross >= Tare for Zone 3 (col13, col14, col15) and Zone 4 (col18, col19, col20)
-// and recover any missing Zone 4 fields on dest_weighbridge records from col13-15, rawAiSnapshot, or col22
+// Recover missing Zone 4 fields without rewriting implausible OCR weight values.
 const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
   const next = { ...ord };
   const snap: Record<string, any> = (next.rawAiSnapshot as Record<string, any>) || {};
@@ -112,7 +111,7 @@ const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
       next.col16 = next.col7 || snap.rawDate || snap.col16 || snap.col7 || '';
     }
     if (!next.col17) {
-      next.col17 = next.col6 || snap.rawDocNo || snap.col17 || snap.col6 || next.col1 || '';
+      next.col17 = next.col6 || snap.rawDocNo || snap.col17 || snap.col6 || '';
     }
     if (!Number(next.col18) && !Number(next.col20)) {
       const recoveredGross =
@@ -133,8 +132,8 @@ const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
         Number(snap.col20) ||
         Number(snap.col15) ||
         0;
-      if (!recoveredNet && Number(next.col22) > 0 && (next.col23 || '').includes('ตัน')) {
-        recoveredNet = Math.round(Number(next.col22) * 1000);
+      if (!recoveredNet && recoveredGross >= recoveredTare && recoveredGross > 0 && recoveredTare > 0) {
+        recoveredNet = recoveredGross - recoveredTare;
       }
       next.col18 = recoveredGross;
       next.col19 = recoveredTare;
@@ -147,21 +146,13 @@ const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
 
   const c13 = Number(next.col13) || 0;
   const c14 = Number(next.col14) || 0;
-  if (c13 > 0 && c14 > 0 && c13 < c14) {
-    next.col13 = c14;
-    next.col14 = c13;
-    next.col15 = c14 - c13;
-  } else if (c13 > 0 && c14 > 0 && !next.col15) {
+  if (c13 > 0 && c14 > 0 && c13 >= c14 && !next.col15) {
     next.col15 = c13 - c14;
   }
 
   const c18 = Number(next.col18) || 0;
   const c19 = Number(next.col19) || 0;
-  if (c18 > 0 && c19 > 0 && c18 < c19) {
-    next.col18 = c19;
-    next.col19 = c18;
-    next.col20 = c19 - c18;
-  } else if (c18 > 0 && c19 > 0 && !next.col20) {
+  if (c18 > 0 && c19 > 0 && c18 >= c19 && !next.col20) {
     next.col20 = c18 - c19;
   }
 
@@ -180,7 +171,7 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
     const ticket = list[i];
     if (ticket.docType !== 'dest_weighbridge') continue;
 
-    const ticketNo = ticket.col17 || ticket.col6 || ticket.col1;
+    const ticketNo = ticket.col17 || ticket.col6 || '';
     const textRefs = extractDocReferences(ticket.col38);
     const refCandidates = [ticket.referenceDocNo, ...textRefs.doNumbers].filter(Boolean) as string[];
 
@@ -188,10 +179,9 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
     const doIdx = list.findIndex(ord => {
       if (ord.id === ticket.id || ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return false;
       if (ord.matchedDestTicketId && ord.matchedDestTicketId === ticket.id) return true;
-      if (ticket.linkedViaDocNo && (isDocNumberMatch(ord.col6, ticket.linkedViaDocNo) || isDocNumberMatch(ord.col1, ticket.linkedViaDocNo))) return true;
-      if (ord.col17 && ticketNo && isDocNumberMatch(ord.col17, ticketNo)) return true;
-      if (ticketNo && ((ord.col38 || '').includes(ticketNo) || (ord.autoActionFlags || []).some(f => f.includes(ticketNo)))) return true;
-      if (!ticket.linkedViaDocNo && !ticket.autoFlagsVerified && ord.col6 && refCandidates.some(ref => isDocNumberMatch(ord.col6, ref))) return true;
+      if (ticket.linkedViaDocNo && isExactDocNumberReference(ord.col6, ticket.linkedViaDocNo)) return true;
+      if (ord.col17 && ticketNo && isExactDocNumberReference(ord.col17, ticketNo)) return true;
+      if (!ticket.linkedViaDocNo && !ticket.autoFlagsVerified && ord.col6 && refCandidates.some(ref => isExactDocNumberReference(ord.col6, ref))) return true;
       return false;
     });
 
@@ -202,7 +192,7 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
       const netD =
         Number(targetDO.col20) ||
         Number(ticket.col20) ||
-        (grossD > 0 && tareD > 0 ? Math.abs(grossD - tareD) : 0);
+        (grossD > 0 && tareD > 0 && grossD >= tareD ? grossD - tareD : 0);
       const netO = Number(targetDO.col15) || 0;
       const diff = netO > 0 && netD > 0 ? netO - netD : Number(targetDO.col21) || 0;
       const destDate = targetDO.col16 || ticket.col16 || ticket.col7 || targetDO.col7 || '';
@@ -222,7 +212,7 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
       if (!ticket.linkedViaDocNo) {
         list[i] = {
           ...ticket,
-          linkedViaDocNo: targetDO.col6 || targetDO.col1,
+          linkedViaDocNo: targetDO.col6 || '',
           destMatchStatus: ticket.destMatchStatus || targetDO.destMatchStatus || 'auto_flagged'
         };
       }
@@ -982,14 +972,12 @@ export default function App() {
     imageBase64: string,
     storeSuggestion?: Partial<StoreMerchant>
   ) => {
-    const poPrefix = systemSettings.poPrefix || `PO-${new Date().getFullYear()}-`;
     // If Gemini identified this as a Purchase Order (PO):
     if (data.docType === 'purchase_order') {
-      const today = new Date().toISOString().split('T')[0];
       const newPO: PurchaseOrder = {
         id: `po-${Date.now()}`,
-        poNumber: data.col4 || data.col6 || `${poPrefix}${Math.floor(1000 + Math.random() * 9000)}`,
-        orderDate: data.col7 || today,
+        poNumber: data.col4 || data.col6 || '',
+        orderDate: data.col7 || '',
         deliveryDueDate: '',
         projectId: data.col2 || '',
         storeName: data.col8 || '',
@@ -997,28 +985,28 @@ export default function App() {
         items: data.lineItems && data.lineItems.length > 0 
           ? data.lineItems.map((item, idx) => ({
               id: `item-${Date.now()}-${idx}`,
-              itemDescription: item.itemDescription,
+              itemDescription: item.itemDescription || '',
               specCode: item.specCode || '',
-              orderedQty: item.qty || 1,
-              unit: item.unit || 'ชิ้น',
+              orderedQty: Number(item.qty) || 0,
+              unit: item.unit || '',
               unitPrice: item.unitPrice || 0,
-              totalAmount: item.totalAmount || ((item.qty || 1) * (item.unitPrice || 0))
+              totalAmount: Number(item.totalAmount) || 0
             }))
-          : [{
+          : data.col11 ? [{
               id: `item-${Date.now()}-0`,
-              itemDescription: data.col11 || 'สินค้าจัดซื้อ',
+              itemDescription: data.col11,
               specCode: data.col12 || '',
-              orderedQty: Number(data.col22) || 1,
-              unit: data.col23 || 'ชิ้น',
+              orderedQty: Number(data.col22) || 0,
+              unit: data.col23 || '',
               unitPrice: Number(data.col24) || 0,
               totalAmount: Number(data.col25) || Number(data.col29) || 0
-            }],
-        totalQty: Number(data.col22) || (data.lineItems?.reduce((s, i) => s + (i.qty || 0), 0) || 1),
-        totalAmount: Number(data.col29) || Number(data.col25) || (data.lineItems?.reduce((s, i) => s + (i.totalAmount || 0), 0) || 0),
+            }] : [],
+        totalQty: Number(data.col22) || (data.lineItems?.reduce((s, i) => s + (Number(i.qty) || 0), 0) || 0),
+        totalAmount: Number(data.col29) || Number(data.col25) || 0,
         status: 'pending',
-        creditTerms: data.col30 || 'เครดิต 30 วัน',
+        creditTerms: data.col30 || '',
         deliveryLocation: data.col37 || '',
-        orderedBy: data.col9 || currentUser.fullName,
+        orderedBy: data.col9 || '',
         notes: data.col38 || '',
         image: imageBase64,
         createdAt: new Date().toISOString(),
@@ -1048,15 +1036,15 @@ export default function App() {
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
-  const handleSaveOrder = (order: OrderRecord, storeToSave?: StoreMerchant) => {
+  const handleSaveOrder = (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): boolean => {
     const isExistingRecord = orders.some(o => o.id === order.id);
     if (!isExistingRecord) {
       const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
         d => d.level === 'exact' || d.level === 'suspected'
       );
-      if (blockingDups.length > 0) {
-        showToast(`🚫 บล็อกการนำเข้าบิลซ้ำ: ตรงกับรายการ ${blockingDups[0].matchedOrder.col1} ในระบบ`);
-        return;
+      if (blockingDups.length > 0 && !allowDuplicate) {
+        showToast(`พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาตรวจสอบและยืนยันก่อนบันทึก`, 'info');
+        return false;
       }
     }
 
@@ -1091,9 +1079,6 @@ export default function App() {
 
       if (!isExistingRecord && orderToSave.aiExtracted) {
         autoFlagsSet.add('🤖 AI สแกนและสกัดข้อมูลจากรูปบิลอัตโนมัติ');
-        if (Number(orderToSave.col15) > 0 && (orderToSave.col23 || '').includes('ตัน')) {
-          autoFlagsSet.add(`📐 คำนวณปริมาณรับเข้า (${orderToSave.col22} ตัน) จากน้ำหนักสุทธิต้นทางอัตโนมัติ`);
-        }
       }
 
       // 1A. Case 1: Saving an unlinked Destination Weighbridge ticket -> Auto-match to Origin DO strictly by Reference DO Number
@@ -1109,7 +1094,7 @@ export default function App() {
             if (ord.id === orderToSave.id || ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return false;
             if (Number(ord.col18) > 0 || Number(ord.col20) > 0) return false;
             if (!ord.col6) return false;
-            return refCandidates.some(ref => isDocNumberMatch(ord.col6, ref));
+            return refCandidates.some(ref => isExactDocNumberReference(ord.col6, ref));
           });
 
           if (candIdx >= 0) {
@@ -1125,7 +1110,7 @@ export default function App() {
 
             workingList[candIdx] = {
               ...candidate,
-              col16: orderToSave.col16 || orderToSave.col7 || new Date().toISOString().split('T')[0],
+              col16: orderToSave.col16 || orderToSave.col7 || '',
               col17: destTicketNo,
               col18: grossD,
               col19: tareD,
@@ -1140,7 +1125,7 @@ export default function App() {
                 ? `${candidate.col38} | ชนตั๋วปลายทางอัตโนมัติ: ${destTicketNo}`
                 : `ชนตั๋วปลายทางอัตโนมัติ: ${destTicketNo}`
             };
-            orderToSave.linkedViaDocNo = candidate.col6 || candidate.col1;
+            orderToSave.linkedViaDocNo = candidate.col6;
             orderToSave.destMatchStatus = 'auto_flagged';
             autoFlagsSet.add(`⚖️ ชนเข้าใบส่งของ DO ${candidate.col6 || candidate.col1} อัตโนมัติ (ตามเลขอ้างอิง)`);
             orderToSave.autoActionFlags = Array.from(autoFlagsSet);
@@ -1158,9 +1143,9 @@ export default function App() {
             if (ticket.id === orderToSave.id || ticket.docType !== 'dest_weighbridge' || ticket.linkedViaDocNo) return false;
             const ticketTextRefs = extractDocReferences(ticket.col38);
             const ticketRefsToDO = [ticket.referenceDocNo, ...ticketTextRefs.doNumbers].filter(Boolean) as string[];
-            const matchesDO = ticketRefsToDO.some(ref => isDocNumberMatch(orderToSave.col6, ref));
+            const matchesDO = ticketRefsToDO.some(ref => isExactDocNumberReference(orderToSave.col6, ref));
             const doRefsToTicket = [orderToSave.col17, ...doTextRefs.doNumbers].filter(Boolean) as string[];
-            const matchesTicketNo = Boolean(ticket.col17 && doRefsToTicket.some(ref => isDocNumberMatch(ticket.col17, ref)));
+            const matchesTicketNo = Boolean(ticket.col17 && doRefsToTicket.some(ref => isExactDocNumberReference(ticket.col17, ref)));
             return matchesDO || matchesTicketNo;
           });
 
@@ -1191,7 +1176,7 @@ export default function App() {
             ticketFlags.add(`⚖️ ถูกดึงไปชนเข้า DO ${orderToSave.col6} อัตโนมัติ`);
             workingList[waitingDestIdx] = {
               ...waitingTicket,
-              linkedViaDocNo: orderToSave.col6 || orderToSave.col1,
+              linkedViaDocNo: orderToSave.col6,
               destMatchStatus: 'auto_flagged',
               autoActionFlags: Array.from(ticketFlags),
               autoFlagsVerified: false
@@ -1210,9 +1195,9 @@ export default function App() {
         ].filter(Boolean) as string[];
 
         if (poRefCandidates.length > 0) {
-          const matchedPO = pos.find(p => poRefCandidates.some(ref => isDocNumberMatch(p.poNumber, ref)));
+          const matchedPO = pos.find(p => poRefCandidates.some(ref => isExactDocNumberReference(p.poNumber, ref)));
           if (matchedPO) {
-            const wasAlreadyVerified = orderToSave.poMatchStatus === 'verified' && isDocNumberMatch(orderToSave.col4, matchedPO.poNumber);
+            const wasAlreadyVerified = orderToSave.poMatchStatus === 'verified' && isExactDocNumberReference(orderToSave.col4, matchedPO.poNumber);
             orderToSave.col4 = matchedPO.poNumber;
             if (!wasAlreadyVerified) {
               orderToSave.poMatchStatus = 'auto_flagged';
@@ -1229,7 +1214,7 @@ export default function App() {
         if (refCandidates.length > 0) {
           const candIdx = workingList.findIndex(ord => {
             if (ord.id === orderToSave.id || ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return false;
-            return Boolean(ord.col6 && refCandidates.some(ref => isDocNumberMatch(ord.col6, ref)));
+            return Boolean(ord.col6 && refCandidates.some(ref => isExactDocNumberReference(ord.col6, ref)));
           });
 
           if (candIdx >= 0) {
@@ -1244,7 +1229,7 @@ export default function App() {
               col25: hasExistingPrice ? candidateDO.col25 : (Number(orderToSave.col25) || candidateDO.col25),
               col28: hasExistingPrice ? candidateDO.col28 : (Number(orderToSave.col28) || candidateDO.col28),
               col29: hasExistingPrice ? candidateDO.col29 : (Number(orderToSave.col29) || candidateDO.col29),
-              col30: orderToSave.col30 || candidateDO.col30 || 'โอนเงิน',
+              col30: orderToSave.col30 || candidateDO.col30 || '',
               col31: Number(orderToSave.col31) || 0,
               col32: Number(orderToSave.col32) || 0,
               col33: Number(orderToSave.col33) || 0,
@@ -1258,7 +1243,7 @@ export default function App() {
                 ? `${candidateDO.col38} | ชนใบกำกับภาษี: ${invNo}`
                 : `ชนใบกำกับภาษี: ${invNo}`
             };
-            orderToSave.linkedViaDocNo = candidateDO.col6 || candidateDO.col1;
+            orderToSave.linkedViaDocNo = candidateDO.col6;
             autoFlagsSet.add(`🧾 ชนเข้า DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติ`);
             autoMatchedNote = `🚩 จับคู่ใบกำกับภาษีเข้ากับ DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติแล้ว (ติดธงรอตรวจสอบยืนยัน)`;
           }
@@ -1342,21 +1327,135 @@ export default function App() {
     // If this order was verified from the LINE OA Bot Inbox, mark the inbox item as verified
     if (order.lineInboxId) {
       setLineInbox(prev => {
-        const updatedInbox = prev.map(item =>
-          item.id === order.lineInboxId
-            ? {
-                ...item,
-                status: 'verified' as const,
-                verifiedOrderId: order.col1,
-                verifiedBy: currentUser.fullName,
-                verifiedAt: new Date().toISOString(),
-                extractedData: {
-                  ...item.extractedData,
-                  ...order
-                }
+        const updatedInbox = prev.map(item => {
+          if (item.id !== order.lineInboxId) return item;
+
+          const reviewedAt = new Date().toISOString();
+          const itemSnapshot = item.rawAiSnapshot || {};
+          const raw = (Object.keys(itemSnapshot).length ? itemSnapshot : order.rawAiSnapshot || {}) as Partial<OrderRecord> & {
+            rawDocNo?: string;
+            rawRefPoNo?: string;
+            rawRefDoNo?: string;
+            rawDate?: string;
+            rawStoreName?: string;
+            rawBuyerName?: string;
+            rawLicensePlate?: string;
+            rawItemDescription?: string;
+            rawSpecCode?: string;
+            rawGrossWeightKg?: number;
+            rawTareWeightKg?: number;
+            rawNetWeightKg?: number;
+            rawDestDate?: string;
+            rawDestDocNo?: string;
+            rawDestGrossWeightKg?: number;
+            rawDestTareWeightKg?: number;
+            rawDestNetWeightKg?: number;
+            rawQty?: number;
+            rawUnit?: string;
+            rawUnitPrice?: number;
+            rawGoodsAmount?: number;
+            rawGrandTotal?: number;
+            rawNotes?: string;
+          };
+          const originalAiValues: Partial<OrderRecord> = {
+            col4: order.docType === 'purchase_order' ? raw.rawDocNo || raw.col4 || '' : raw.rawRefPoNo || raw.col4 || '',
+            col6: order.docType === 'dest_weighbridge' ? raw.rawRefDoNo || raw.col6 || '' : raw.rawDocNo || raw.col6 || '',
+            col7: raw.rawDate || raw.col7 || '',
+            col8: raw.rawStoreName || raw.col8 || '',
+            col9: raw.rawBuyerName || raw.col9 || '',
+            col10: raw.rawLicensePlate || raw.col10 || '',
+            col11: raw.rawItemDescription || raw.col11 || '',
+            col12: raw.rawSpecCode || raw.col12 || '',
+            col13: raw.rawGrossWeightKg ?? raw.col13 ?? 0,
+            col14: raw.rawTareWeightKg ?? raw.col14 ?? 0,
+            col15: raw.rawNetWeightKg ?? raw.col15 ?? 0,
+            col16: raw.rawDestDate || raw.col16 || '',
+            col17: raw.rawDestDocNo || raw.col17 || '',
+            col18: raw.rawDestGrossWeightKg ?? raw.col18 ?? 0,
+            col19: raw.rawDestTareWeightKg ?? raw.col19 ?? 0,
+            col20: raw.rawDestNetWeightKg ?? raw.col20 ?? 0,
+            col22: raw.rawQty ?? raw.col22 ?? 0,
+            col23: raw.rawUnit || raw.col23 || '',
+            col24: raw.rawUnitPrice ?? raw.col24 ?? 0,
+            col25: raw.rawGoodsAmount ?? raw.col25 ?? 0,
+            col29: raw.rawGrandTotal ?? raw.col29 ?? 0,
+            col38: raw.rawNotes || raw.col38 || ''
+          };
+          const confirmedValues: Partial<OrderRecord> = {
+            col4: order.col4,
+            col6: order.col6,
+            col7: order.col7,
+            col8: order.col8,
+            col9: order.col9,
+            col10: order.col10,
+            col11: order.col11,
+            col12: order.col12,
+            col13: order.col13,
+            col14: order.col14,
+            col15: order.col15,
+            col16: order.col16,
+            col17: order.col17,
+            col18: order.col18,
+            col19: order.col19,
+            col20: order.col20,
+            col22: order.col22,
+            col23: order.col23,
+            col24: order.col24,
+            col25: order.col25,
+            col29: order.col29,
+            col38: order.col38
+          };
+          const comparedFields: Array<[keyof OrderRecord, unknown, unknown]> = [
+            ['col4', originalAiValues.col4, confirmedValues.col4],
+            ['col6', originalAiValues.col6, confirmedValues.col6],
+            ['col7', originalAiValues.col7, confirmedValues.col7],
+            ['col8', originalAiValues.col8, confirmedValues.col8],
+            ['col9', originalAiValues.col9, confirmedValues.col9],
+            ['col10', originalAiValues.col10, confirmedValues.col10],
+            ['col11', originalAiValues.col11, confirmedValues.col11],
+            ['col12', originalAiValues.col12, confirmedValues.col12],
+            ['col13', originalAiValues.col13, confirmedValues.col13],
+            ['col14', originalAiValues.col14, confirmedValues.col14],
+            ['col15', originalAiValues.col15, confirmedValues.col15],
+            ['col16', originalAiValues.col16, confirmedValues.col16],
+            ['col17', originalAiValues.col17, confirmedValues.col17],
+            ['col18', originalAiValues.col18, confirmedValues.col18],
+            ['col19', originalAiValues.col19, confirmedValues.col19],
+            ['col20', originalAiValues.col20, confirmedValues.col20],
+            ['col22', originalAiValues.col22, confirmedValues.col22],
+            ['col23', originalAiValues.col23, confirmedValues.col23],
+            ['col24', originalAiValues.col24, confirmedValues.col24],
+            ['col25', originalAiValues.col25, confirmedValues.col25],
+            ['col29', originalAiValues.col29, confirmedValues.col29],
+            ['col38', originalAiValues.col38, confirmedValues.col38]
+          ];
+          const correctedFields = comparedFields
+            .filter(([, original, confirmed]) => String(original ?? '').trim() !== String(confirmed ?? '').trim())
+            .map(([field]) => field);
+
+          return {
+            ...item,
+            status: 'verified' as const,
+            verifiedOrderId: order.col1,
+            verifiedBy: currentUser.fullName,
+            verifiedAt: reviewedAt,
+            reviewFeedbackHistory: [
+              ...(item.reviewFeedbackHistory || []),
+              {
+                rawAiSnapshot: item.rawAiSnapshot || order.rawAiSnapshot || {},
+                originalAiValues,
+                confirmedValues,
+                correctedFields,
+                reviewedBy: currentUser.fullName,
+                reviewedAt
               }
-            : item
-        );
+            ],
+            extractedData: {
+              ...item.extractedData,
+              ...order
+            }
+          };
+        });
 
         // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
         const inboxItem = prev.find(i => i.id === order.lineInboxId);
@@ -1405,6 +1504,7 @@ export default function App() {
     } else {
       showToast('บันทึกข้อมูลตั๋วชั่ง/คำสั่งซื้อเรียบร้อยแล้ว!');
     }
+    return true;
   };
 
   // Add new blank order tailored to the active menu
@@ -1585,8 +1685,8 @@ export default function App() {
             if (ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return ord;
             const isMatched =
               ord.matchedDestTicketId === target.id ||
-              (target.linkedViaDocNo && (isDocNumberMatch(ord.col6, target.linkedViaDocNo) || isDocNumberMatch(ord.col1, target.linkedViaDocNo))) ||
-              (ticketNo && ord.col17 && isDocNumberMatch(ord.col17, ticketNo));
+              (target.linkedViaDocNo && (isExactDocNumberReference(ord.col6, target.linkedViaDocNo) || isExactDocNumberReference(ord.col1, target.linkedViaDocNo))) ||
+              (ticketNo && ord.col17 && isExactDocNumberReference(ord.col17, ticketNo));
             if (!isMatched) return ord;
             return {
               ...ord,
@@ -1617,7 +1717,7 @@ export default function App() {
             if (ord.docType === 'dest_weighbridge') {
               const linkedToDeletedDO =
                 target.matchedDestTicketId === ord.id ||
-                (ord.linkedViaDocNo && doNo && (isDocNumberMatch(ord.linkedViaDocNo, target.col6) || isDocNumberMatch(ord.linkedViaDocNo, target.col1)));
+                (ord.linkedViaDocNo && doNo && (isExactDocNumberReference(ord.linkedViaDocNo, target.col6) || isExactDocNumberReference(ord.linkedViaDocNo, target.col1)));
               if (linkedToDeletedDO) {
                 // Reverse-Move: Move rescued dest ticket back to Zone 03 on Google Drive
                 if (ord.driveFileId) {
@@ -1638,7 +1738,7 @@ export default function App() {
               }
             } else if (ord.docType === 'tax_invoice' && ord.linkedViaDocNo && doNo) {
               const parts = ord.linkedViaDocNo.split(',').map(s => s.trim()).filter(Boolean);
-              const kept = parts.filter(p => !isDocNumberMatch(p, target.col6) && !isDocNumberMatch(p, target.col1));
+              const kept = parts.filter(p => !isExactDocNumberReference(p, target.col6) && !isExactDocNumberReference(p, target.col1));
               if (kept.length !== parts.length) {
                 return {
                   ...ord,
@@ -1785,9 +1885,9 @@ export default function App() {
         if (ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return ord;
         const textRefs = extractDocReferences(ord.col38);
         const matchesThisPO =
-          isDocNumberMatch(ord.col4, savedPO.poNumber) ||
-          isDocNumberMatch(ord.referenceDocNo, savedPO.poNumber) ||
-          textRefs.poNumbers.some(p => isDocNumberMatch(p, savedPO.poNumber));
+          isExactDocNumberReference(ord.col4, savedPO.poNumber) ||
+          isExactDocNumberReference(ord.referenceDocNo, savedPO.poNumber) ||
+          textRefs.poNumbers.some(p => isExactDocNumberReference(p, savedPO.poNumber));
 
         if (matchesThisPO) {
           const alreadyVerified = ord.poMatchStatus === 'verified' && ord.col4 === savedPO.poNumber;
@@ -1831,7 +1931,7 @@ export default function App() {
     if (targetPO?.poNumber) {
       setOrders(prev =>
         prev.map(ord => {
-          if (ord.col4 && isDocNumberMatch(ord.col4, targetPO.poNumber)) {
+          if (ord.col4 && isExactDocNumberReference(ord.col4, targetPO.poNumber)) {
             return {
               ...ord,
               col4: '',
@@ -1860,12 +1960,10 @@ export default function App() {
   };
 
   const handlePOScanComplete = (poData: Partial<PurchaseOrder>, imageBase64: string) => {
-    const today = new Date().toISOString().split('T')[0];
-    const poPrefix = systemSettings.poPrefix || `PO-${new Date().getFullYear()}-`;
     const newPO: PurchaseOrder = {
       id: `po-${Date.now()}`,
-      poNumber: poData.poNumber || `${poPrefix}${Math.floor(1000 + Math.random() * 9000)}`,
-      orderDate: poData.orderDate || today,
+      poNumber: poData.poNumber || '',
+      orderDate: poData.orderDate || '',
       deliveryDueDate: poData.deliveryDueDate || '',
       projectId: poData.projectId || '',
       storeName: poData.storeName || '',
@@ -1874,9 +1972,9 @@ export default function App() {
       totalQty: poData.totalQty || 0,
       totalAmount: poData.totalAmount || 0,
       status: 'pending',
-      creditTerms: poData.creditTerms || 'เครดิต 30 วัน',
+      creditTerms: poData.creditTerms || '',
       deliveryLocation: poData.deliveryLocation || '',
-      orderedBy: poData.orderedBy || currentUser.fullName,
+      orderedBy: poData.orderedBy || '',
       approvedBy: poData.approvedBy || '',
       notes: poData.notes || '',
       image: imageBase64,
@@ -1987,12 +2085,12 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const target = orders.find(o => o.id === orderId);
     const linkedDestId = target?.matchedDestTicketId;
-    const targetDONo = target?.col6 || target?.col1;
+    const targetDONo = target?.col6 || '';
 
     // Trigger Google Drive Verified Move if confirming destination weighbridge match
     if (scope === 'all' || scope === 'dest') {
       const pairedTicket = orders.find(
-        o => (linkedDestId && o.id === linkedDestId) || (targetDONo && o.linkedViaDocNo && isDocNumberMatch(o.linkedViaDocNo, targetDONo))
+        o => (linkedDestId && o.id === linkedDestId) || (targetDONo && o.linkedViaDocNo && isExactDocNumberReference(o.linkedViaDocNo, targetDONo))
       );
       if (pairedTicket && pairedTicket.driveFileId) {
         triggerDriveVerifiedMove({
@@ -2031,7 +2129,7 @@ export default function App() {
         if (
           (scope === 'all' || scope === 'dest') &&
           ord.docType === 'dest_weighbridge' &&
-          ((linkedDestId && ord.id === linkedDestId) || (targetDONo && ord.linkedViaDocNo && isDocNumberMatch(ord.linkedViaDocNo, targetDONo)))
+          ((linkedDestId && ord.id === linkedDestId) || (targetDONo && ord.linkedViaDocNo && isExactDocNumberReference(ord.linkedViaDocNo, targetDONo)))
         ) {
           return {
             ...ord,
@@ -2766,6 +2864,7 @@ export default function App() {
         projects={projects}
         pos={pos}
         existingOrders={orders}
+        lineInboxItems={lineInbox}
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}

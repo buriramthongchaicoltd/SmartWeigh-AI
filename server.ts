@@ -383,9 +383,11 @@ const OCR_DOCUMENT_TYPES: DocumentType[] = [
 
 const SHARED_OCR_POLICY = `มาตรฐาน OCR กลางของระบบ (ใช้กับทุกช่องทาง):
 - จำแนกประเภทเอกสารให้ตรงหลักฐานบนภาพ: delivery_order, weighbridge (ตั๋วชั่งต้นทาง), dest_weighbridge (ตั๋วชั่งปลายทาง), concrete, tax_invoice, purchase_order หรือ full_logistics
-- ห้ามเดา: ข้อมูลที่อ่านไม่ชัดหรือไม่มีบนภาพให้เว้นว่าง/ใส่ 0 ตามชนิดข้อมูล และอย่าอนุมานชื่อโครงการจากชื่อกลุ่มหรือบริบทภายนอก
+- ห้ามเดาหรือเติมค่า: ข้อมูลที่อ่านไม่ชัดหรือไม่มีบนภาพให้เว้นว่าง/ใส่ 0 ตามชนิดข้อมูล; ห้ามใช้วันที่ปัจจุบัน, จำนวน 1, ชื่อสินค้าทั่วไป หรือการคำนวณจากช่องอื่นแทนค่าที่อ่านไม่ได้
 - เลขเอกสารที่มีทั้งเล่มที่และเลขที่ให้เรียงเป็น เล่มที่/เลขที่ เช่น 02/0045; เก็บเล่มที่ใน bookNo แยกด้วย
-- น้ำหนักรถหนัก (Gross) ต้องไม่น้อยกว่าน้ำหนักรถเปล่า (Tare); Net = Gross - Tare เมื่อทั้งคู่มีข้อมูล
+- สำหรับ PO ให้แยกผู้ขาย (Vendor) ออกจากผู้ซื้อ/บริษัทผู้ออก PO (Buyer/Issuer): ชื่อหัวกระดาษหรือชื่อบริษัทผู้ออก PO ไม่ใช่ผู้ขาย; ใส่ col8 เฉพาะชื่อที่ระบุว่าเป็นผู้ขาย/ผู้จำหน่าย และถ้าแยกไม่ได้ให้เว้นว่าง ห้ามย้ายชื่อ Buyer มาเป็น Vendor
+- เก็บตัวเลขน้ำหนักตามช่องและป้ายกำกับที่อ่านได้ ห้ามสลับ Gross/Tare หรือคำนวณทับค่าที่อ่านมา; ถ้าค่าไม่สมเหตุสมผลให้คงค่าตามภาพเพื่อให้ผู้ใช้ตรวจ
+- ยอดเงิน ปริมาณ และราคาให้ใส่เฉพาะค่าที่อ่านได้จากเอกสาร ห้ามคำนวณเติมยอดที่ไม่ได้พิมพ์หรือเขียนไว้
 - แยกชื่อสินค้าออกจากหมายเหตุ เงื่อนไขส่งของ และข้อความติดต่อ; ให้รายการจริงอยู่ใน lineItems/items และข้อความอื่นอยู่ใน notes
 - วันที่ใช้ YYYY-MM-DD เมื่ออ่านได้; รายการสินค้าเก็บชื่อ, สเปก, ปริมาณ, หน่วย, ราคาต่อหน่วย และยอดตามที่พิมพ์จริง
 - หากช่องทางหรือผู้ใช้ระบุประเภทเอกสารไว้ชัดเจน ให้คงประเภทนั้นและจัดข้อมูลลงฟิลด์เฉพาะของประเภทนั้น โดยไม่คัดลอกน้ำหนักไปคนละโซน`;
@@ -433,14 +435,21 @@ function getLineInboxPrimaryDocumentNumber(
 }
 
 function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValue: unknown = 0) {
-  let gross = Number(grossValue) || 0;
-  let tare = Number(tareValue) || 0;
-  if (gross > 0 && tare > 0 && gross < tare) [gross, tare] = [tare, gross];
+  const gross = Number(grossValue) || 0;
+  const tare = Number(tareValue) || 0;
   return {
     gross,
     tare,
-    net: gross > 0 && tare > 0 ? gross - tare : Number(netValue) || 0
+    net: gross > 0 && tare > 0 && gross >= tare ? gross - tare : Number(netValue) || 0
   };
+}
+
+function normalizeOcrPartyName(value: unknown): string {
+  return (value || '').toString().trim().toLowerCase().replace(/[\s()（）.,\-]/g, '');
+}
+
+function isInternalBuyerCompanyName(value: unknown): boolean {
+  return normalizeOcrPartyName(value).includes('บุรีรัมย์ธงชัยก่อสร้าง');
 }
 
 /**
@@ -620,12 +629,14 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
         specificTargetInstructions = `
 [คำสั่งพิเศษจากผู้ใช้งาน]: ผู้ใช้ระบุอย่างชัดเจนว่านี่คือ "ใบสั่งซื้อสินค้า (purchase_order / PO)":
 - บังคับเด็ดขาดให้ตั้งค่า docType = 'purchase_order'
+- col8 เป็นผู้ขาย/ผู้จำหน่ายที่ระบุชัดในเอกสารเท่านั้น; ชื่อบริษัทหรือโลโก้หัวกระดาษของผู้ออก PO คือ Buyer/Issuer ไม่ใช่ Vendor ห้ามคัดลอกมาใส่ col8
+- col9 เป็นผู้ซื้อ/บริษัทผู้ออก PO หรือโครงการ หากระบุไม่ได้ว่าใครเป็นผู้ขายอย่างชัดเจน ให้เว้น col8 ว่าง ห้ามเดาจากชื่อหัวเอกสาร
 - โฟกัสสูงสุดที่:
   * col4: เลขที่ใบสั่งซื้อ (PO No.) **หากในเอกสารมีทั้ง "เล่มที่" และ "เลขที่" ให้รวมเป็นรูปแบบ "เล่มที่/เลขที่" เสมอ (เช่น เล่มที่ 02 เลขที่ 0045 -> 02/0045)**
   * bookNo: เล่มที่ของเอกสาร (หากมีระบุบนบิล เช่น 02)
   * col7: วันที่ออก PO (YYYY-MM-DD)
-  * col8: ชื่อร้านค้า / ผู้จำหน่าย (Vendor)
-  * col9: ผู้สั่งซื้อ / โครงการ (Buyer)
+  * col8: ชื่อผู้ขาย/ผู้จำหน่าย (Vendor) จากช่องผู้ขาย/ผู้รับเงิน/ผู้จัดจำหน่าย
+  * col9: ผู้ซื้อ/บริษัทผู้ออก PO หรือโครงการ (Buyer/Issuer)
   * col11: รายการสินค้าหลัก
   * col12: สเปก / Code
   * col22: จำนวนสั่งซื้อ
@@ -641,13 +652,13 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
 [คำสั่งพิเศษจากผู้ใช้งาน]: ผู้ใช้ระบุว่านี่คือ "ตั๋วชั่งน้ำหนักรถบรรทุก (weighbridge)":
 - บังคับให้ตั้งค่า docType = 'weighbridge'
 - โฟกัสสูงสุดที่:
-  * col13: น้ำหนักหนักต้นทาง / รถรวมสินค้า (Gross Weight กก.) **ต้องเป็นตัวเลขที่มากกว่าเสมอ (ระวัง: โรงโม่ต้นทางมักพิมพ์บรรทัดแรกว่า "น้ำหนักเข้า" ซึ่งเป็นรถเปล่า ห้ามนำน้ำหนักรถเปล่ามาใส่ col13 เด็ดขาด)**
-  * col14: น้ำหนักเบาต้นทาง / รถเปล่า (Tare Weight กก.) **ต้องเป็นตัวเลขที่น้อยกว่าเสมอ**
-  * col15: น้ำหนักสุทธิ (Net = col13 หนัก - col14 เบา) กก.
+  * col13: น้ำหนัก Gross ตามช่อง/ป้ายกำกับบนบิล
+  * col14: น้ำหนัก Tare ตามช่อง/ป้ายกำกับบนบิล
+  * col15: น้ำหนัก Net ตามที่ระบุ หรือคำนวณเมื่อ Gross/Tare อ่านได้ชัดและ Gross >= Tare; ห้ามสลับ/แก้ตัวเลข
   * col10: ทะเบียนรถบรรทุก (เช่น 70-1234, 82-5678)
   * col8: โรงโม่หิน / ลานทราย / ผู้จำหน่าย
   * col11: รายการสินค้า (เช่น หินคลุก, หิน 1, หิน 2, ทรายหยาบ, ดินถม)
-  * col22: ปริมาณเป็นตัน (แปลงจาก col15 กก. / 1000)
+  * col22: ปริมาณเป็นตันเฉพาะเมื่อมีระบุบนเอกสาร; ห้ามแปลงจาก col15 เอง
   * col23: หน่วย 'ตัน'
   * col6: เลขที่ตั๋วชั่ง
   * referenceDocNo: เลขที่ใบส่งของ (DO) ที่ตั๋วชั่งนี้อ้างอิงถึง (ตรวจหาอย่างละเอียด ไม่ว่าจะเป็นตัวพิมพ์ในช่องฟอร์ม เช่น เลขที่ DO/บิลส่งของ, บันทึกไว้ในช่องหมายเหตุ, หรือเขียนด้วยลายมือปากกาตรงไหนสักที่บนตั๋วชั่ง)
@@ -698,11 +709,9 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
   * โซน 3 (น้ำหนักชั่งต้นทางจากร้านค้า col13, col14, col15):
     - หากเป็นสินค้าทั่วไปที่ไม่ชั่งน้ำหนักรถบรรทุก ให้ใส่ 0
     - หากในใบส่งของ/ตั๋วต้นทางจากร้านค้านี้มีตัวเลขชั่งน้ำหนักรถบรรทุกพิมพ์อยู่ ให้สกัดลง col13, col14, col15 ทันทีโดยยึดกฎเหล็กว่า:
-      * col13 = น้ำหนักหนัก / น้ำหนักรถรวมสินค้า (Gross กก. — ตัวเลขที่มากกว่าเสมอ! แม้ในบิลโรงโม่ต้นทางจะพิมพ์ว่า "ชั่งออก/น้ำหนักออก" ก็ต้องนำมาใส่ col13)
-      * col14 = น้ำหนักเบา / น้ำหนักรถเปล่า (Tare กก. — ตัวเลขที่น้อยกว่าเสมอ! แม้ในบิลโรงโม่ต้นทางจะพิมพ์ว่า "ชั่งเข้า/น้ำหนักเข้า" เพราะรถวิ่งเข้าโรงโม่ตัวเปล่า ก็ต้องนำมาใส่ col14)
-      * col15 = น้ำหนักสุทธิ (Net กก. = col13 - col14)
-      * และหากเป็นบิลชั่งน้ำหนักหิน/ดิน/ทราย ให้แปลงน้ำหนักสุทธิเป็นตัน (col15 / 1000) ใส่ใน col22 และใส่หน่วย col23 = 'ตัน'
-  * col22: ปริมาณสินค้า (เช่น จำนวนตันจากน้ำหนักสุทธิ / 1000, หรือจำนวนเส้น, ถุง, คิว m3)
+      * col13/col14 = ค่าที่อ่านได้จากช่อง Gross/Tare ตามป้ายกำกับ ห้ามสลับตัวเลขเพื่อทำให้สมเหตุสมผล
+      * col15 = Net ตามที่พิมพ์/เขียน หรือคำนวณเมื่อ Gross/Tare อ่านได้ชัดและ Gross >= Tare; มิฉะนั้นเว้นว่าง
+  * col22: ปริมาณสินค้าเฉพาะจำนวนที่พิมพ์/เขียนระบุจริง ห้ามแปลงจากน้ำหนักเอง
   * col23: หน่วยนับจริง (ตัน, คิว, เส้น, ถุง, ถัง, แผ่น, กล่อง, ม้วน, ชุด)
   * col24: ราคาต่อหน่วย (หากมีพิมพ์ในบิลส่งของ)
   * col25: รวมค่าสินค้า (หากมี)
@@ -767,9 +776,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
 - กรณีเอกสารมีทั้ง "เล่มที่ (Book No. / Vol.)" และ "เลขที่ (No.)" แยกกันบนหัวบิล ให้สกัดและจัดเก็บเป็นรูปแบบ 'เล่มที่/เลขที่' เสมอ (เช่น บนบิลพิมพ์ 'เล่มที่ 02 เลขที่ 0045' ให้บันทึกเป็น '02/0045' โดยนำ เล่มที่ ไว้หน้า '/' และนำ เลขที่ ไว้หลัง '/' พร้อมระบุค่าเล่มที่ลงในฟิลด์ bookNo)
 - กรณีเอกสารไม่มี "เล่มที่" (มีเฉพาะเลขที่เอกสารอย่างเดียว เช่น 'PO-2026-001' หรือ 'DO-8891') ให้อ่านตามที่ปรากฏตรงๆ ห้ามเติมหรือสลับ '/' เองเด็ดขาด
 โซน 2: วันที่ คู่ค้า & สินค้า (col7: วันที่ส่งของ YYYY-MM-DD, col8: ผู้จำหน่าย/ร้านค้า, col9: ผู้รับสินค้า/โครงการ, col10: ทะเบียนรถ (หากมี), col11: รายการสินค้าหลัก (หรือสรุปรายการทั้งหมด), col12: สเปก/Code)
-โซน 3: น้ำหนักต้นทาง (col13: น้ำหนักหนักต้นทาง/รถรวมสินค้า Gross กก. [ค่าที่มากกว่าเสมอ], col14: น้ำหนักเบาต้นทาง/รถเปล่า Tare กก. [ค่าที่น้อยกว่าเสมอ], col15: สุทธิต้นทาง กก. = col13 - col14) **ระวัง: บิลโรงโม่ต้นทางมักชั่งรถเปล่าตอนขาเข้า ("น้ำหนักเข้า" = เบา Tare -> ใส่ col14) และชั่งรถที่มีของตอนขาออก ("น้ำหนักออก" = หนัก Gross -> ใส่ col13) ห้ามใส่สลับกันเด็ดขาด**
+โซน 3: น้ำหนักต้นทาง (col13: Gross, col14: Tare, col15: Net) ให้อ่านตามช่องและป้ายกำกับบนภาพ ห้ามสลับ/แก้ตัวเลข; คำนวณ Net เฉพาะเมื่อ Gross และ Tare อ่านชัดและ Gross >= Tare
 โซน 4: ปลายทาง & ผลต่าง (col16: วันที่ปลายทาง, col17: ตั๋วปลายทาง, col18: หนักเข้าปลายทาง Gross กก. [ค่าที่มากกว่าเสมอ], col19: เบาออกปลายทาง Tare กก. [ค่าที่น้อยกว่าเสมอ], col20: สุทธิปลายทาง กก. = col18 - col19, col21: ผลต่าง กก.) **สำหรับตั๋วชั่งปลายทาง (dest_weighbridge) ให้ใส่ข้อมูลน้ำหนักลงใน col18, col19, col20 เสมอ**
-โซน 5: คิดเงิน & ปริมาณ (col22: ปริมาณสินค้าที่ส่งมอบ, col23: หน่วยนับจริง เช่น เส้น, ท่อน, ถุง, ถัง, แผ่น, กล่อง, ม้วน, ชุด, คิว, ตัน, col24: ราคาต่อหน่วย, col25: รวมค่าสินค้า = ปริมาณ * ราคา, col26: ประเภทรถ, col27: ค่าบรรทุก/หน่วย, col28: รวมค่าขนส่ง, col29: รวมทั้งสิ้น = ค่าสินค้า + ค่าขนส่ง)
+โซน 5: คิดเงิน & ปริมาณ (col22: ปริมาณที่ระบุบนเอกสาร, col23: หน่วยนับจริง, col24: ราคาต่อหน่วย, col25: รวมค่าสินค้าตามเอกสาร, col26: ประเภทรถ, col27: ค่าบรรทุก/หน่วย, col28: รวมค่าขนส่งตามเอกสาร, col29: รวมทั้งสิ้นตามเอกสาร; ห้ามคำนวณเติมค่าที่ไม่มีหลักฐาน)
 โซน 6: การชำระเงิน (col30: รูปแบบจ่าย เช่น โอนเงิน/เงินสด/เครดิต 30 วัน, col31: จ่ายแล้ว, col32: ค้างผู้ขาย, col33: จ่ายขนส่งแล้ว, col34: ค้างขนส่ง, col35: ชำระแล้วรวม, col36: ยอดค้างรวม)
 โซน 7: สถานที่ & หมายเหตุ (col37: สถานที่ส่ง/หน้างาน, col38: หมายเหตุ)
 
@@ -880,7 +889,6 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
               }
             }
           },
-          required: ["col8", "col11"]
         }
       }
     });
@@ -903,19 +911,6 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
     parsedData.col14 = originWeights.tare;
     parsedData.col15 = originWeights.net;
 
-    // If DO has origin net weight (col15 > 0) and col22 is missing or still in raw kg (> 500 when unit is tons), convert to tons automatically
-    if (Number(parsedData.col15) > 0 && parsedData.docType !== 'dest_weighbridge') {
-      if (!parsedData.col23 || parsedData.col23 === 'รายการ' || parsedData.col23 === 'กก.' || parsedData.col23 === 'กิโลกรัม') {
-        parsedData.col23 = 'ตัน';
-      }
-      if ((parsedData.col23 || '').includes('ตัน')) {
-        const currentQty = Number(parsedData.col22) || 0;
-        if (currentQty === 0 || currentQty === Number(parsedData.col15)) {
-          parsedData.col22 = Number((Number(parsedData.col15) / 1000).toFixed(2));
-        }
-      }
-    }
-
     const destinationWeights = normalizeOcrWeightPair(parsedData.col18, parsedData.col19, parsedData.col20);
     parsedData.col18 = destinationWeights.gross;
     parsedData.col19 = destinationWeights.tare;
@@ -924,22 +919,21 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
       parsedData.col21 = Number(parsedData.col15) - Number(parsedData.col20);
     }
 
-    const qty = Number(parsedData.col22) || 0;
-    const price = Number(parsedData.col24) || 0;
-    if (!parsedData.col25 && qty && price) {
-      parsedData.col25 = qty * price;
-    }
-    const freightRate = Number(parsedData.col27) || 0;
-    if (!parsedData.col28 && qty && freightRate) {
-      parsedData.col28 = qty * freightRate;
-    }
-    if (!parsedData.col29) {
-      parsedData.col29 = (Number(parsedData.col25) || 0) + (Number(parsedData.col28) || 0);
-    }
-
     parsedData.docType = targetDocType && targetDocType !== 'auto'
       ? normalizeOcrDocumentType(targetDocType, normalizeOcrDocumentType(parsedData.docType))
       : normalizeOcrDocumentType(parsedData.docType);
+
+    if (
+      parsedData.docType === 'purchase_order' &&
+      parsedData.col8 &&
+      (
+        isInternalBuyerCompanyName(parsedData.col8) ||
+        (parsedData.col9 && normalizeOcrPartyName(parsedData.col8) === normalizeOcrPartyName(parsedData.col9))
+      )
+    ) {
+      parsedData.col8 = '';
+      if (parsedData.storeSuggestion) parsedData.storeSuggestion.name = '';
+    }
 
     // Capture rawAiSnapshot BEFORE clearing Zone 3 or Zone 4 so switching docType in VerifyModal never loses scale weights
     const rawGrossSnapshot = Number(parsedData.col13) || Number(parsedData.col18) || 0;
@@ -947,7 +941,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
     const rawNetSnapshot =
       Number(parsedData.col15) ||
       Number(parsedData.col20) ||
-      (rawGrossSnapshot > 0 && rawTareSnapshot > 0 ? Math.abs(rawGrossSnapshot - rawTareSnapshot) : 0);
+      (rawGrossSnapshot > 0 && rawTareSnapshot > 0 && rawGrossSnapshot >= rawTareSnapshot
+        ? rawGrossSnapshot - rawTareSnapshot
+        : 0);
 
     parsedData.rawAiSnapshot = {
       rawDocNo: parsedData.col17 || parsedData.col6 || '',
@@ -982,19 +978,11 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
     } else if (parsedData.docType === 'dest_weighbridge') {
       // Fallback: if AI placed destination weights into col13-15 by mistake, shift them to col18-20
       if ((!Number(parsedData.col18) && !Number(parsedData.col20)) && (Number(parsedData.col13) > 0 || Number(parsedData.col15) > 0)) {
-        let g = Number(parsedData.col13) || 0;
-        let t = Number(parsedData.col14) || 0;
-        if (g > 0 && t > 0 && g < t) {
-          const tmp = g;
-          g = t;
-          t = tmp;
-        }
+        const g = Number(parsedData.col13) || 0;
+        const t = Number(parsedData.col14) || 0;
         parsedData.col18 = g;
         parsedData.col19 = t;
-        parsedData.col20 = (g > 0 && t > 0) ? (g - t) : (Number(parsedData.col15) || 0);
-      }
-      if (!Number(parsedData.col20) && Number(parsedData.col22) > 0 && (parsedData.col23 || '').includes('ตัน')) {
-        parsedData.col20 = Math.round(Number(parsedData.col22) * 1000);
+        parsedData.col20 = (g > 0 && t > 0 && g >= t) ? (g - t) : (Number(parsedData.col15) || 0);
       }
       if (!parsedData.col16 && parsedData.col7) parsedData.col16 = parsedData.col7;
       if (!parsedData.col17 && parsedData.col6) parsedData.col17 = parsedData.col6;
@@ -1061,7 +1049,7 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
         let desc = (li.itemDescription || '').toString().trim();
         const q = Number(li.qty) || 0;
         const p = Number(li.unitPrice) || 0;
-        const tot = Number(li.totalAmount) || (q * p);
+        const tot = Number(li.totalAmount) || 0;
         if (!desc) continue;
 
         if (pureRemarkRowRegex.test(desc) || (p === 0 && tot === 0 && unpaidRemarkKeywordsRegex.test(desc))) {
@@ -1149,21 +1137,22 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
 3. orderDate: วันที่สั่งซื้อ (รูปแบบ YYYY-MM-DD)
 4. deliveryDueDate: กำหนดส่งมอบของ (รูปแบบ YYYY-MM-DD หากมี)
 5. projectId: ชื่อโครงการ หรือหน่วยงานที่สั่งซื้อ
-6. storeName: ชื่อผู้จำหน่าย / ผู้ขาย / ร้านค้า
-7. category: หมวดหมู่วัสดุ (เช่น งานหิน/ทราย, งานเหล็ก, งานคอนกรีต, วัสดุก่อสร้างทั่วไป)
-8. items: รายการสินค้าในตารางสั่งซื้อ (เฉพาะตัวสินค้า/วัสดุจริงที่มีการสั่งซื้อเท่านั้น) ประกอบด้วย:
+6. storeName: ชื่อผู้ขาย/ผู้จำหน่ายที่ระบุชัดในเอกสารเท่านั้น; ชื่อบริษัท/โลโก้หัวกระดาษคือ Buyer/Issuer ไม่ใช่ผู้ขาย ห้ามคัดลอกมาใส่ storeName
+7. buyerName: ชื่อผู้ซื้อหรือบริษัทผู้ออก PO จากช่อง Buyer/ผู้ซื้อ (หากมี); ถ้าแยกผู้ขายไม่ได้ให้เว้น storeName ว่าง ห้ามเดาจากหัวกระดาษ
+8. category: หมวดหมู่วัสดุ (เช่น งานหิน/ทราย, งานเหล็ก, งานคอนกรีต, วัสดุก่อสร้างทั่วไป)
+9. items: รายการสินค้าในตารางสั่งซื้อ (เฉพาะตัวสินค้า/วัสดุจริงที่มีการสั่งซื้อเท่านั้น) ประกอบด้วย:
    - itemDescription: ชื่อรายการสินค้า/วัสดุเพียวๆ เท่านั้น (เช่น "หินคลุก", "ทรายหยาบ", "ปูนซีเมนต์ปอร์ตแลนด์", "เหล็กข้ออ้อย DB16") **กฎเหล็กสำคัญมาก: ในใบสั่งซื้อ (PO) มักมีการเขียนหมายเหตุ เงื่อนไขการส่ง สถานที่จัดส่ง ชื่อผู้ติดต่อ เบอร์โทร หรือเงื่อนไขราคา ไว้ในบรรทัดว่างของตารางสินค้า หรือเขียนต่อท้ายชื่อสินค้า ห้ามนำข้อความหมายเหตุเหล่านั้นมารวมไว้ใน itemDescription หรือสร้างเป็นแถวสินค้าใน items เด็ดขาด! ให้แยกเฉพาะชื่อสินค้าไว้ใน itemDescription และย้ายข้อความหมายเหตุ/เงื่อนไขทั้งหมดไปใส่ในช่อง notes หรือ deliveryLocation เสมอ**
    - specCode: สเปก หรือรหัสสินค้า
    - orderedQty: ปริมาณที่สั่งซื้อ (ตัวเลข)
    - unit: หน่วยนับ (เช่น ตัน, คิว, เส้น, แผ่น, ชุด)
    - unitPrice: ราคาต่อหน่วย (บาท)
-   - totalAmount: รวมเงินรายการนี้ (orderedQty * unitPrice)
-9. totalAmount: ยอดเงินรวมทั้งสิ้นตามใบสั่งซื้อ
-10. creditTerms: เงื่อนไขการชำระเงิน (เช่น เครดิต 30 วัน, เงินสด, โอนเงิน)
-11. deliveryLocation: สถานที่จัดส่งสินค้า / ไซต์งาน
-12. orderedBy: ผู้เปิดใบสั่งซื้อ / ผู้สั่ง
-13. approvedBy: ผู้อนุมัติใบสั่งซื้อ
-14. notes: เงื่อนไขหรือหมายเหตุเพิ่มเติม (รวมถึงข้อความหมายเหตุที่เขียนแทรกอยู่ในตารางรายการสินค้าด้วย)`;
+   - totalAmount: ยอดเงินตามที่พิมพ์/เขียนไว้ในแถวนั้นเท่านั้น; ห้ามคำนวณแทนค่าที่อ่านไม่ชัด
+10. totalAmount: ยอดเงินรวมทั้งสิ้นตามที่พิมพ์/เขียนไว้ในเอกสารเท่านั้น
+11. creditTerms: เงื่อนไขการชำระเงิน (เช่น เครดิต 30 วัน, เงินสด, โอนเงิน)
+12. deliveryLocation: สถานที่จัดส่งสินค้า / ไซต์งาน
+13. orderedBy: ผู้เปิดใบสั่งซื้อ / ผู้สั่ง
+14. approvedBy: ผู้อนุมัติใบสั่งซื้อ
+15. notes: เงื่อนไขหรือหมายเหตุเพิ่มเติม (รวมถึงข้อความหมายเหตุที่เขียนแทรกอยู่ในตารางรายการสินค้าด้วย)`;
 
     const { data: parsedPO, usedModel } = await requestOcrWithSharedPolicy(ai, {
       contents: {
@@ -1189,7 +1178,8 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
             orderDate: { type: Type.STRING, description: "วันที่สั่งซื้อ YYYY-MM-DD" },
             deliveryDueDate: { type: Type.STRING, description: "กำหนดส่งมอบ" },
             projectId: { type: Type.STRING, description: "โครงการ" },
-            storeName: { type: Type.STRING, description: "ชื่อผู้จำหน่าย / ร้านค้า" },
+            storeName: { type: Type.STRING, description: "ชื่อผู้ขาย/ผู้จำหน่ายเท่านั้น ห้ามใช้ชื่อ Buyer/ผู้ออก PO จากหัวกระดาษ" },
+            buyerName: { type: Type.STRING, description: "ชื่อผู้ซื้อ/ผู้ออก PO หากมีระบุชัด" },
             category: { type: Type.STRING, description: "หมวดหมู่วัสดุ" },
             items: {
               type: Type.ARRAY,
@@ -1203,7 +1193,6 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
                   unitPrice: { type: Type.NUMBER },
                   totalAmount: { type: Type.NUMBER }
                 },
-                required: ["itemDescription", "orderedQty"]
               }
             },
             totalAmount: { type: Type.NUMBER, description: "ยอดเงินรวมทั้งสิ้น" },
@@ -1213,7 +1202,6 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
             approvedBy: { type: Type.STRING, description: "ผู้อนุมัติ" },
             notes: { type: Type.STRING, description: "หมายเหตุ" }
           },
-          required: ["poNumber", "storeName"]
         }
       }
     });
@@ -1221,11 +1209,19 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
     if (parsedPO.bookNo || /เล่ม/i.test(parsedPO.poNumber || '')) {
       parsedPO.poNumber = normalizeOcrDocumentNumber(parsedPO.poNumber, parsedPO.bookNo);
     }
+    if (
+      parsedPO.storeName &&
+      (
+        isInternalBuyerCompanyName(parsedPO.storeName) ||
+        (parsedPO.buyerName && normalizeOcrPartyName(parsedPO.storeName) === normalizeOcrPartyName(parsedPO.buyerName))
+      )
+    ) {
+      parsedPO.storeName = '';
+    }
     parsedPO.docType = 'purchase_order';
 
     // Sanitize items: Separate any remarks/notes mixed into item rows or appended to itemDescription
     let totalQty = 0;
-    let sumAmount = 0;
     const extractedNotesFromItems: string[] = [];
     const cleanedItems: any[] = [];
 
@@ -1237,7 +1233,7 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
       let desc = (rawIt.itemDescription || '').toString().trim();
       const q = Number(rawIt.orderedQty) || 0;
       const p = Number(rawIt.unitPrice) || 0;
-      const tot = rawIt.totalAmount ? Number(rawIt.totalAmount) : (q * p);
+      const tot = Number(rawIt.totalAmount) || 0;
 
       if (!desc) continue;
 
@@ -1259,13 +1255,12 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
       }
 
       totalQty += q;
-      sumAmount += tot;
       cleanedItems.push({
         id: `poi-${Date.now()}-${cleanedItems.length}`,
         itemDescription: desc || 'รายการสินค้า',
         specCode: rawIt.specCode || '',
         orderedQty: q,
-        unit: rawIt.unit || 'หน่วย',
+        unit: rawIt.unit || '',
         unitPrice: p,
         totalAmount: tot
       });
@@ -1281,10 +1276,6 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
 
     parsedPO.items = cleanedItems;
     parsedPO.totalQty = totalQty;
-    if (!parsedPO.totalAmount || parsedPO.totalAmount === 0) {
-      parsedPO.totalAmount = sumAmount;
-    }
-
     return res.json({
       success: true,
       data: parsedPO,
@@ -1623,7 +1614,6 @@ async function analyzeLineBillWithGemini(
     throw new Error('ยังไม่ได้ตั้งค่า GEMINI_API_KEY สำหรับวิเคราะห์เอกสาร');
   }
   const cleanBase64 = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
-  const today = new Date().toISOString().split('T')[0];
 
   const prompt = `คุณคือผู้เชี่ยวชาญระดับสูงในการอ่านและสกัดข้อมูลเอกสารงานจัดซื้อและก่อสร้างของไทยทุกประเภท ทั้งสินค้าทั่วไปและสินค้าชั่งน้ำหนัก
 งานของคุณคือวิเคราะห์ภาพที่ส่งเข้ามาในกลุ่ม LINE:
@@ -1642,10 +1632,10 @@ async function analyzeLineBillWithGemini(
      * กรณีเอกสารมีทั้ง "เล่มที่ (Book No. / Vol.)" และ "เลขที่ (No.)" แยกกันบนหัวบิล ให้สกัดและจัดเก็บเป็นรูปแบบ 'เล่มที่/เลขที่' เสมอ (เช่น บนบิลพิมพ์ 'เล่มที่ 02 เลขที่ 0045' ให้บันทึกเป็น '02/0045' พร้อมระบุเล่มที่ใน bookNo)
      * กรณีไม่มีเล่มที่ ให้อ่านตามที่ปรากฏตรงๆ
      * ให้คะแนน docNumberConfidence แยกเฉพาะการอ่านเลขที่เอกสารหลักเป็น 0–100 ตามความชัดของตัวอักษรในภาพ ไม่ใช่ความมั่นใจภาพรวม
+   - สำหรับ purchase_order: storeName ต้องเป็นผู้ขาย/ผู้จำหน่ายที่ระบุชัด ไม่ใช่ผู้ซื้อหรือบริษัทผู้ออก PO ที่อยู่หัวกระดาษ; ส่งชื่อผู้ซื้อแยกใน buyerName และเว้น storeName ว่างหากแยกไม่ได้
    - กฎเหล็กน้ำหนักชั่งรถบรรทุก (Gross / Tare / Net):
-     * GrossWeightKg = น้ำหนักหนัก / รถรวมสินค้า (ค่าที่มากกว่าเสมอ แม้บิลโรงโม่ต้นทางพิมพ์ว่าน้ำหนักออก)
-     * TareWeightKg = น้ำหนักเบา / รถเปล่า (ค่าที่น้อยกว่าเสมอ แม้บิลโรงโม่ต้นทางพิมพ์ว่าน้ำหนักเข้า)
-     * NetWeightKg = GrossWeightKg - TareWeightKg
+     * อ่าน GrossWeightKg และ TareWeightKg จากช่อง/ป้ายกำกับที่พิมพ์บนเอกสาร โดยไม่สลับหรือแก้ค่าตามความคาดหมาย
+     * NetWeightKg ให้อ่านค่าที่ระบุ หรือคำนวณเมื่อ Gross/Tare อ่านชัดและ Gross >= Tare; หากไม่แน่ใจให้เว้นว่าง
    - จัดหมวดหมู่วัสดุ (category) ตามมาตรฐานงานโยธา/ทล./ทช. เช่น 'หิน/ดิน/ทราย (ชั้นทาง & พื้นทาง)', 'ยางมะตอย & ผิวทางลาดยาง (ทล./ทช.)', 'คอนกรีตผสมเสร็จ & ผิวทางคอนกรีต', 'งานสะพาน & คอนกรีตอัดแรง', 'เหล็กเส้น & เหล็กโครงสร้างสะพาน/ถนน', 'งานท่อระบายน้ำ & รางระบายน้ำ', 'งานอำนวยความปลอดภัย & จราจร (ทล./ทช.)', 'งานป้องกันการกัดเซาะ & กำแพงกันดิน', 'ปูนซีเมนต์ & เคมีภัณฑ์ก่อสร้าง', 'ไม้แบบ นั่งร้าน & วัสดุสิ้นเปลือง', 'เครื่องจักรกลหนัก & น้ำมันเชื้อเพลิง', 'งานขนส่ง & โลจิสติกส์', 'ระบบไฟฟ้า & ประปาสนาม', หรือ 'วัสดุก่อสร้างทั่วไป'
    - ห้ามเดาชื่อโครงการ (col2) จากชื่อกลุ่ม LINE เด็ดขาด และแยกข้อความหมายเหตุออกจากชื่อสินค้าหลักเสมอ`;
 
@@ -1677,6 +1667,7 @@ async function analyzeLineBillWithGemini(
           referenceSource: { type: Type.STRING, enum: ['form_field', 'notes', 'handwritten'] },
           docDate: { type: Type.STRING, description: 'วันที่ในเอกสาร YYYY-MM-DD' },
           storeName: { type: Type.STRING, description: 'ชื่อร้านค้า / ผู้จำหน่าย / โรงโม่' },
+          buyerName: { type: Type.STRING, description: 'ชื่อผู้ซื้อ/บริษัทผู้ออก PO หากเอกสารเป็นใบสั่งซื้อ' },
           storeTaxId: { type: Type.STRING },
           storePhone: { type: Type.STRING },
           storeAddress: { type: Type.STRING },
@@ -1815,6 +1806,12 @@ async function analyzeLineBillWithGemini(
   const detectedDocType = normalizeOcrDocumentType(raw.docType);
   const formattedDocNo = normalizeOcrDocumentNumber(raw.docNumber, raw.bookNo);
   const formattedDestDocNo = normalizeOcrDocumentNumber(raw.destDocNumber, raw.destBookNo);
+  const rawBuyerName = (raw.buyerName || '').toString().trim();
+  const rawStoreCandidate = (raw.storeName || '').toString().trim();
+  const rawStoreName = detectedDocType === 'purchase_order' && (
+    isInternalBuyerCompanyName(rawStoreCandidate) ||
+    (rawBuyerName && normalizeOcrPartyName(rawStoreCandidate) === normalizeOcrPartyName(rawBuyerName))
+  ) ? '' : rawStoreCandidate;
 
   const rawBook = (raw.bookNo || '')
     .toString()
@@ -1832,14 +1829,12 @@ async function analyzeLineBillWithGemini(
     raw.DestNetWeightKg
   );
 
-  const unitStr = (raw.unit || (netKg > 0 ? 'ตัน' : 'รายการ')).toString().trim();
-  const effectiveQty = Number(raw.qty) > 0
-    ? Number(raw.qty)
-    : (netKg > 0 && unitStr.includes('ตัน') ? Number((netKg / 1000).toFixed(2)) : 1);
+  const unitStr = (raw.unit || '').toString().trim();
+  const effectiveQty = Number(raw.qty) || 0;
 
   const unitPrice = Number(raw.unitPrice) || 0;
-  const goodsAmount = Number(raw.goodsAmount) || Number((effectiveQty * unitPrice).toFixed(2));
-  const grandTotal = Number(raw.grandTotal) || goodsAmount;
+  const goodsAmount = Number(raw.goodsAmount) || 0;
+  const grandTotal = Number(raw.grandTotal) || 0;
 
   // Build comprehensive rawAiSnapshot (keeps all fields across all zones for 0-second document type switching)
   const rawAiSnapshot: Record<string, any> = {
@@ -1852,12 +1847,13 @@ async function analyzeLineBillWithGemini(
     rawRefPoNo: (raw.referencePoNo || '').toString().trim(),
     rawRefDoNo: (raw.referenceDoNo || '').toString().trim(),
     referenceSource: raw.referenceSource || 'form_field',
-    rawDate: raw.docDate || today,
-    rawStoreName: (raw.storeName || '').toString().trim(),
+    rawDate: (raw.docDate || '').toString().trim(),
+    rawStoreName,
+    rawBuyerName,
     rawCategory: (raw.category || 'วัสดุก่อสร้างทั่วไป').toString().trim(),
     rawLicensePlate: (raw.licensePlate || '').toString().trim(),
     rawVehicleType: (raw.vehicleType || '').toString().trim(),
-    rawItemDescription: (raw.itemDescription || 'วัสดุก่อสร้าง').toString().trim(),
+    rawItemDescription: (raw.itemDescription || '').toString().trim(),
     rawSpecCode: (raw.specCode || '').toString().trim(),
     rawGrossWeightKg: grossKg,
     rawTareWeightKg: tareKg,
@@ -1891,7 +1887,7 @@ async function analyzeLineBillWithGemini(
     col6: isDestWB ? rawAiSnapshot.rawRefDoNo : formattedDocNo,
     col7: rawAiSnapshot.rawDate,
     col8: rawAiSnapshot.rawStoreName,
-    col9: '',
+    col9: detectedDocType === 'purchase_order' ? rawBuyerName : '',
     col10: rawAiSnapshot.rawLicensePlate,
     col11: rawAiSnapshot.rawItemDescription,
     col12: rawAiSnapshot.rawSpecCode,
@@ -1912,13 +1908,13 @@ async function analyzeLineBillWithGemini(
     col27: 0,
     col28: 0,
     col29: grandTotal,
-    col30: rawAiSnapshot.rawPaymentTerms || (detectedDocType === 'tax_invoice' ? 'โอนเงิน' : 'รอตรวจรับ / RR'),
+    col30: rawAiSnapshot.rawPaymentTerms || '',
     col31: 0,
-    col32: goodsAmount,
+    col32: 0,
     col33: 0,
     col34: 0,
     col35: 0,
-    col36: grandTotal,
+    col36: 0,
     col37: rawAiSnapshot.rawDeliveryLocation,
     col38: rawAiSnapshot.rawNotes,
     referenceDocNo: isDestWB ? rawAiSnapshot.rawRefDoNo : rawAiSnapshot.rawRefPoNo,
@@ -2648,9 +2644,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         status: 'scan_failed',
         detectedDocType: 'delivery_order',
         extractedData: {
-          col1: `TR-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
           col2: '',
-          col7: new Date().toISOString().split('T')[0],
           lineInboxId: inboxId,
           lineMessageId: messageId,
           lineSenderName: senderName,

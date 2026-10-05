@@ -35,34 +35,26 @@ export function remapLineBillToDocType(
   const refDoNo = snap.rawRefDoNo || currentData.referenceDocNo || '';
 
   // Determine the primary scale weights on the paper (from snapshot or current Zone 3 / Zone 4)
-  let grossKg =
+  const grossKg =
     Number(snap.rawGrossWeightKg) ||
     Number(currentData.col13) ||
     Number(currentData.col18) ||
     0;
-  let tareKg =
+  const tareKg =
     Number(snap.rawTareWeightKg) ||
     Number(currentData.col14) ||
     Number(currentData.col19) ||
     0;
-  if (grossKg > 0 && tareKg > 0 && grossKg < tareKg) {
-    const tmp = grossKg;
-    grossKg = tareKg;
-    tareKg = tmp;
-  }
   const netKg =
-    grossKg > 0 && tareKg > 0
+    grossKg > 0 && tareKg > 0 && grossKg >= tareKg
       ? grossKg - tareKg
       : Number(snap.rawNetWeightKg) || Number(currentData.col15) || Number(currentData.col20) || 0;
-  let destGrossKg =
+  const destGrossKg =
     Number(snap.rawDestGrossWeightKg) || Number(currentData.col18) || 0;
-  let destTareKg =
+  const destTareKg =
     Number(snap.rawDestTareWeightKg) || Number(currentData.col19) || 0;
-  if (destGrossKg > 0 && destTareKg > 0 && destGrossKg < destTareKg) {
-    [destGrossKg, destTareKg] = [destTareKg, destGrossKg];
-  }
   const destNetKg =
-    destGrossKg > 0 && destTareKg > 0
+    destGrossKg > 0 && destTareKg > 0 && destGrossKg >= destTareKg
       ? destGrossKg - destTareKg
       : Number(snap.rawDestNetWeightKg) || Number(currentData.col20) || 0;
 
@@ -70,7 +62,7 @@ export function remapLineBillToDocType(
     snap.rawDate ||
     currentData.col7 ||
     currentData.col16 ||
-    new Date().toISOString().split('T')[0];
+    '';
 
   if (targetDocType === 'dest_weighbridge') {
     // Destination Weighbridge Ticket -> Store ticket number in col17, weights in Zone 4 (col18-20)
@@ -86,10 +78,6 @@ export function remapLineBillToDocType(
     next.col14 = 0;
     next.col15 = 0;
     next.col21 = 0;
-    if (netKg > 0) {
-      next.col22 = Number((netKg / 1000).toFixed(2));
-      next.col23 = 'ตัน';
-    }
   } else if (targetDocType === 'delivery_order' || targetDocType === 'weighbridge' || targetDocType === 'concrete') {
     // Delivery Order (DO) -> Store DO number in col6, weights in Zone 3 (col13-15)
     next.col6 = primaryBillNo;
@@ -105,10 +93,6 @@ export function remapLineBillToDocType(
     next.col19 = 0;
     next.col20 = 0;
     next.col21 = 0;
-    if (netKg > 0 && (!next.col23 || next.col23.includes('ตัน'))) {
-      next.col22 = Number((netKg / 1000).toFixed(2));
-      next.col23 = 'ตัน';
-    }
   } else if (targetDocType === 'tax_invoice') {
     // Tax Invoice / Receipt -> Store Invoice number in col6, clear scale weights
     next.col6 = primaryBillNo;
@@ -123,9 +107,6 @@ export function remapLineBillToDocType(
     next.col19 = 0;
     next.col20 = 0;
     next.col21 = 0;
-    if (!next.col30 || next.col30 === 'รอตรวจรับ / RR') {
-      next.col30 = 'โอนเงิน';
-    }
   } else if (targetDocType === 'purchase_order') {
     next.col4 = primaryBillNo || refPoNo;
     next.col6 = primaryBillNo;
@@ -159,54 +140,54 @@ export function convertOrderDraftToPODraft(
   data: Partial<OrderRecord>,
   imageOverride?: string | null
 ): PurchaseOrder {
-  const today = new Date().toISOString().split('T')[0];
   const snap: Record<string, any> = (data.rawAiSnapshot as Record<string, any>) || {};
   const poNum =
     snap.rawDocNo ||
     data.col4 ||
     data.col6 ||
     data.col17 ||
-    `PO-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    '';
 
   const items =
     data.lineItems && data.lineItems.length > 0
       ? data.lineItems.map((item, idx) => ({
           id: `item-${Date.now()}-${idx}`,
-          itemDescription: item.itemDescription || 'รายการสินค้า',
+          itemDescription: item.itemDescription || '',
           specCode: item.specCode || '',
-          orderedQty: Number(item.qty) || 1,
-          unit: item.unit || 'ชิ้น',
+          orderedQty: Number(item.qty) || 0,
+          unit: item.unit || '',
           unitPrice: Number(item.unitPrice) || 0,
-          totalAmount: Number(item.totalAmount) || (Number(item.qty) || 1) * (Number(item.unitPrice) || 0)
+          totalAmount: Number(item.totalAmount) || 0
         }))
-      : [
+      : data.col11 || snap.rawItemDescription
+      ? [
           {
             id: `item-${Date.now()}-0`,
-            itemDescription: data.col11 || snap.rawItemDescription || 'สินค้าจัดซื้อ',
+            itemDescription: data.col11 || snap.rawItemDescription || '',
             specCode: data.col12 || snap.rawSpecCode || '',
-            orderedQty: Number(data.col22) || 1,
-            unit: data.col23 || 'ชิ้น',
+            orderedQty: Number(data.col22) || 0,
+            unit: data.col23 || '',
             unitPrice: Number(data.col24) || 0,
             totalAmount: Number(data.col25) || Number(data.col29) || 0
           }
-        ];
+        ]
+      : [];
 
   const totalQty = items.reduce((s, i) => s + (Number(i.orderedQty) || 0), 0);
-  const sumAmount = items.reduce((s, i) => s + (Number(i.totalAmount) || 0), 0);
 
   return {
     id: `po-${Date.now()}`,
     poNumber: poNum,
-    orderDate: data.col7 || snap.rawDate || today,
+    orderDate: data.col7 || snap.rawDate || '',
     deliveryDueDate: '',
     projectId: (data.col2 || '').trim(), // Strictly empty unless verifier already selected a project!
     storeName: data.col8 || snap.rawStoreName || '',
     category: data.col3 || snap.rawCategory || 'งานจัดซื้อทั่วไป',
     items,
-    totalQty: totalQty || 1,
-    totalAmount: Number(data.col29) || Number(data.col25) || sumAmount,
+    totalQty,
+    totalAmount: Number(data.col29) || Number(data.col25) || 0,
     status: 'pending',
-    creditTerms: data.col30 || 'เครดิต 30 วัน',
+    creditTerms: data.col30 || '',
     deliveryLocation: data.col37 || '',
     orderedBy: data.col9 || '',
     notes: data.col38 || '',
@@ -259,24 +240,24 @@ export async function rescanBillForTargetDocType(
       col3: poRaw.category || preserveMetadata?.col3 || 'งานจัดซื้อทั่วไป',
       col4: poRaw.poNumber || '',
       col6: poRaw.poNumber || '',
-      col7: poRaw.orderDate || new Date().toISOString().split('T')[0],
+      col7: poRaw.orderDate || '',
       col8: poRaw.storeName || '',
       col9: poRaw.orderedBy || '',
-      col11: poRaw.items?.[0]?.itemDescription || 'รายการสั่งซื้อตาม PO',
+      col11: poRaw.items?.[0]?.itemDescription || '',
       col12: poRaw.items?.[0]?.specCode || '',
-      col22: Number(poRaw.totalQty) || 1,
-      col23: poRaw.items?.[0]?.unit || 'รายการ',
+      col22: Number(poRaw.totalQty) || 0,
+      col23: poRaw.items?.[0]?.unit || '',
       col24: Number(poRaw.items?.[0]?.unitPrice) || 0,
       col25: Number(poRaw.totalAmount) || 0,
       col29: Number(poRaw.totalAmount) || 0,
-      col30: poRaw.creditTerms || 'เครดิต 30 วัน',
+      col30: poRaw.creditTerms || '',
       col37: poRaw.deliveryLocation || '',
       col38: poRaw.notes || '',
       lineItems: (poRaw.items || []).map((it: any) => ({
         itemDescription: it.itemDescription,
         specCode: it.specCode || '',
-        qty: Number(it.orderedQty) || 1,
-        unit: it.unit || 'หน่วย',
+        qty: Number(it.orderedQty) || 0,
+        unit: it.unit || '',
         unitPrice: Number(it.unitPrice) || 0,
         totalAmount: Number(it.totalAmount) || 0
       }))

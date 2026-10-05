@@ -619,7 +619,8 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     driveFileLocation: item.driveFileLocation || (item.driveFileId ? 'zone_00' : undefined),
     driveWebViewLink: item.driveWebViewLink,
     imageHash: item.imageHash,
-    rawAiSnapshot: item.rawAiSnapshot || {}
+    rawAiSnapshot: item.rawAiSnapshot || {},
+    reviewFeedbackHistory: item.reviewFeedbackHistory || []
   };
 
   const row: any = {
@@ -710,6 +711,7 @@ export function mapSupabaseToLineInbox(row: any): LineBillInboxItem {
     } : undefined,
     verifiedOrderId: extData.verifiedOrderId || undefined,
     verifiedBy: extData.verifiedBy || undefined,
-    verifiedAt: extData.verifiedAt || undefined
+    verifiedAt: extData.verifiedAt || undefined,
+    reviewFeedbackHistory: Array.isArray(extData.reviewFeedbackHistory) ? extData.reviewFeedbackHistory : []
   };
 }

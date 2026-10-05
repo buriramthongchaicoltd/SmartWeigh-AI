@@ -1219,7 +1219,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                               </div>
                             ) : (
                               <div className="font-bold text-slate-800">
-                                {item.extractedData?.col22 || 1} {item.extractedData?.col23 || 'รายการ'}
+                                {item.extractedData?.col22 || '—'} {item.extractedData?.col23 || ''}
                               </div>
                             )}
                             {totalAmount > 0 && (

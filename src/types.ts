@@ -380,6 +380,14 @@ export interface LineBillInboxItem {
   verifiedOrderId?: string;        // รหัสบิลที่บันทึกจริงเมื่อตรวจเสร็จ
   verifiedBy?: string;
   verifiedAt?: string;
+  reviewFeedbackHistory?: {
+    rawAiSnapshot: Partial<OrderRecord>;
+    originalAiValues: Partial<OrderRecord>;
+    confirmedValues: Partial<OrderRecord>;
+    correctedFields: string[];
+    reviewedBy: string;
+    reviewedAt: string;
+  }[];
 
   // Google Drive Cloud Storage Tracking (00_กล่องพักบิล_LINE)
   driveFileId?: string;
@@ -533,5 +541,3 @@ export interface DatabaseConnectionStatus {
     billing_notes: boolean;
   };
 }
-
-

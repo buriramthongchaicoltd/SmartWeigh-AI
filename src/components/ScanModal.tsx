@@ -261,35 +261,37 @@ export const ScanModal: React.FC<ScanModalProps> = ({
           const mappedItems = Array.isArray(d.lineItems) && d.lineItems.length > 0
             ? d.lineItems.map((li: any, idx: number) => ({
                 id: `poi-${Date.now()}-${idx}`,
-                itemDescription: li.itemDescription || d.col11 || 'รายการสินค้า',
+                itemDescription: li.itemDescription || d.col11 || '',
                 specCode: li.specCode || '',
-                orderedQty: Number(li.qty) || 1,
-                unit: li.unit || d.col23 || 'หน่วย',
+                orderedQty: Number(li.qty) || 0,
+                unit: li.unit || d.col23 || '',
                 unitPrice: Number(li.unitPrice) || 0,
-                totalAmount: Number(li.totalAmount) || ((Number(li.qty) || 1) * (Number(li.unitPrice) || 0))
+                totalAmount: Number(li.totalAmount) || 0
               }))
-            : [{
+            : (d.col11 || d.col12 || d.col22 || d.col23 || d.col24 || d.col25)
+              ? [{
                 id: `poi-${Date.now()}-0`,
-                itemDescription: d.col11 || 'รายการสินค้า',
+                itemDescription: d.col11 || '',
                 specCode: d.col12 || '',
-                orderedQty: Number(d.col22) || 1,
-                unit: d.col23 || 'หน่วย',
+                orderedQty: Number(d.col22) || 0,
+                unit: d.col23 || '',
                 unitPrice: Number(d.col24) || 0,
-                totalAmount: Number(d.col29) || Number(d.col25) || 0
-              }];
+                totalAmount: Number(d.col25) || 0
+              }]
+              : [];
 
           onPOScanComplete({
             poNumber: d.col4 || d.col6 || '',
-            orderDate: d.col7 || new Date().toISOString().split('T')[0],
+            orderDate: d.col7 || '',
             storeName: d.col8 || '',
-            projectId: d.col2 || d.col9 || '',
-            category: d.col3 || 'งานวัสดุก่อสร้าง',
+            projectId: d.col2 || '',
+            category: d.col3 || '',
             items: mappedItems,
             totalQty: mappedItems.reduce((s: number, i: any) => s + (Number(i.orderedQty) || 0), 0),
-            totalAmount: Number(d.col29) || Number(d.col25) || mappedItems.reduce((s: number, i: any) => s + (Number(i.totalAmount) || 0), 0),
-            creditTerms: d.col30 || 'เครดิต 30 วัน',
+            totalAmount: Number(d.col29) || Number(d.col25) || 0,
+            creditTerms: d.col30 || '',
             deliveryLocation: d.col37 || '',
-            orderedBy: d.col9 || '',
+            orderedBy: '',
             notes: d.col38 || ''
           }, previewImage);
           return;

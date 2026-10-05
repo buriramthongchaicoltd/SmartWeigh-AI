@@ -122,6 +122,33 @@ export function isDocNumberMatch(docA?: string | null, docB?: string | null): bo
 }
 
 /**
+ * Matches complete document references only. Prefix and whitespace differences
+ * are tolerated; separators, book numbers, and leading zeroes remain significant.
+ */
+export function isExactDocNumberReference(docA?: string | null, docB?: string | null): boolean {
+  const normalize = (value?: string | null) => {
+    if (!value) return { prefix: '', reference: '' };
+    const prefixMatch = value.trim().toUpperCase().match(/^(P\.?O\.?|D\.?O\.?|T\.?R\.?|R\.?R\.?|I\.?N\.?V\.?|TAX)\s*(?:NO\.?)?\s*[-:#]?\s*/i);
+    return {
+      prefix: prefixMatch?.[1].replace(/\./g, '') || '',
+      reference: value
+        .trim()
+        .toUpperCase()
+        .replace(/^(?:P\.?O\.?|D\.?O\.?|T\.?R\.?|R\.?R\.?|I\.?N\.?V\.?|TAX)\s*(?:NO\.?)?\s*[-:#]?\s*/i, '')
+        .replace(/\s+/g, '')
+    };
+  };
+  const normalizedA = normalize(docA);
+  const normalizedB = normalize(docB);
+  return Boolean(
+    normalizedA.reference &&
+    normalizedB.reference &&
+    normalizedA.reference === normalizedB.reference &&
+    (!normalizedA.prefix || !normalizedB.prefix || normalizedA.prefix === normalizedB.prefix)
+  );
+}
+
+/**
  * Normalizes unit strings to canonical forms for accurate reconciliation
  */
 export function normalizeUnit(unit?: string | null): string {
@@ -222,17 +249,17 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
     const textRefs = extractDocReferences(ord.col38);
 
     const matchesDirectPO = 
-      isDocNumberMatch(col4Val, po.poNumber) ||
-      isDocNumberMatch(refVal, po.poNumber) ||
-      textRefs.poNumbers.some(p => isDocNumberMatch(p, po.poNumber));
+      isExactDocNumberReference(col4Val, po.poNumber) ||
+      isExactDocNumberReference(refVal, po.poNumber) ||
+      textRefs.poNumbers.some(p => isExactDocNumberReference(p, po.poNumber));
 
     if (matchesDirectPO) {
       directLinkedOrders.push(ord);
 
       let source = ord.referenceSource || 'form_field';
-      if (!isDocNumberMatch(col4Val, po.poNumber) && isDocNumberMatch(refVal, po.poNumber)) {
+      if (!isExactDocNumberReference(col4Val, po.poNumber) && isExactDocNumberReference(refVal, po.poNumber)) {
         source = ord.referenceSource || 'handwritten';
-      } else if (!isDocNumberMatch(col4Val, po.poNumber) && !isDocNumberMatch(refVal, po.poNumber) && textRefs.poNumbers.some(p => isDocNumberMatch(p, po.poNumber))) {
+      } else if (!isExactDocNumberReference(col4Val, po.poNumber) && !isExactDocNumberReference(refVal, po.poNumber) && textRefs.poNumbers.some(p => isExactDocNumberReference(p, po.poNumber))) {
         source = 'notes';
       }
 
@@ -243,7 +270,7 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
       };
 
       // If this direct order is a Delivery Order (DO), record its DO number
-      const doNum = normalizeDocNumber(ord.col6 || ord.col1);
+      const doNum = normalizeDocNumber(ord.col6);
       if (doNum) {
         knownDONumbers.set(doNum, ord);
       }
@@ -268,13 +295,12 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
       let matchedDONum = '';
 
       for (const [doNum, doOrd] of knownDONumbers.entries()) {
-        const directDONum = doOrd.col6 || doOrd.col1;
+        const directDONum = doOrd.col6;
         if (
-          isDocNumberMatch(refVal, directDONum) || 
-          isDocNumberMatch(col6Val, directDONum) || 
-          isDocNumberMatch(linkedViaVal, directDONum) ||
-          isDocNumberMatch(refVal, doNum) ||
-          textRefs.doNumbers.some(d => isDocNumberMatch(d, directDONum) || isDocNumberMatch(d, doNum))
+          isExactDocNumberReference(refVal, directDONum) ||
+          isExactDocNumberReference(col6Val, directDONum) ||
+          isExactDocNumberReference(linkedViaVal, directDONum) ||
+          textRefs.doNumbers.some(d => isExactDocNumberReference(d, directDONum))
         ) {
           matchedDOOrder = doOrd;
           matchedDONum = directDONum;
@@ -323,8 +349,8 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
     if (processedOrderIds.has(ord.id)) return;
 
     const isDO = ord.docType === 'delivery_order' || ord.docType === 'concrete' || (!ord.docType && Number(ord.col13) === 0);
-    const doNum = normalizeDocNumber(ord.col6 || ord.col1);
-    const directDONum = ord.col6 || ord.col1;
+    const doNum = normalizeDocNumber(ord.col6);
+    const directDONum = ord.col6;
 
     if (isDO && doNum) {
       // Look for ALL weighbridge tickets referencing this DO (1-to-N Split Shipments or paired Dest Weighbridge)
@@ -333,12 +359,10 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
         o.id !== ord.id &&
         (o.docType === 'weighbridge' || o.docType === 'dest_weighbridge' || Number(o.col13) > 0 || Number(o.col15) > 0 || Number(o.col18) > 0 || Number(o.col20) > 0) &&
         (
-          isDocNumberMatch(o.referenceDocNo, doNum) ||
-          isDocNumberMatch(o.referenceDocNo, directDONum) ||
-          isDocNumberMatch(o.linkedViaDocNo, doNum) ||
-          isDocNumberMatch(o.linkedViaDocNo, directDONum) ||
-          isDocNumberMatch(o.col6, doNum) ||
-          extractDocReferences(o.col38).doNumbers.some(d => isDocNumberMatch(d, doNum) || isDocNumberMatch(d, directDONum))
+          isExactDocNumberReference(o.referenceDocNo, directDONum) ||
+          isExactDocNumberReference(o.linkedViaDocNo, directDONum) ||
+          isExactDocNumberReference(o.col6, directDONum) ||
+          extractDocReferences(o.col38).doNumbers.some(d => isExactDocNumberReference(d, directDONum))
         )
       );
 
@@ -563,13 +587,15 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
       });
     }
 
-    const itemOrderedQty = Number(poItem.orderedQty) || 1;
-    const itemPercentage = Math.min(100, Math.round((itemDeliveredQty / itemOrderedQty) * 100));
+    const itemOrderedQty = Number(poItem.orderedQty) || 0;
+    const itemPercentage = itemOrderedQty > 0
+      ? Math.min(100, Math.round((itemDeliveredQty / itemOrderedQty) * 100))
+      : 0;
     const itemRemainingQty = Math.max(0, Number((poItem.orderedQty - itemDeliveredQty).toFixed(2)));
     const itemRemainingAmt = Math.max(0, (poItem.totalAmount || (poItem.orderedQty * poItem.unitPrice)) - itemDeliveredAmt);
 
     let itemStatus: POStatus = 'pending';
-    if (itemDeliveredQty >= itemOrderedQty) {
+    if (itemOrderedQty > 0 && itemDeliveredQty >= itemOrderedQty) {
       itemStatus = 'completed';
     } else if (itemDeliveredQty > 0) {
       itemStatus = 'partially_delivered';
@@ -587,8 +613,10 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
     };
   });
 
-  const totalOrderedQty = po.totalQty || 1;
-  const quantityPercentageDelivered = Math.min(100, Math.round((deliveredQty / totalOrderedQty) * 100));
+  const totalOrderedQty = Number(po.totalQty) || 0;
+  const quantityPercentageDelivered = totalOrderedQty > 0
+    ? Math.min(100, Math.round((deliveredQty / totalOrderedQty) * 100))
+    : 0;
   const financialPercentageDelivered = po.totalAmount > 0 
     ? Math.min(100, Math.round((deliveredAmount / po.totalAmount) * 100))
     : quantityPercentageDelivered;
@@ -598,15 +626,19 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
 
   const remainingQty = Math.max(0, po.totalQty - deliveredQty);
   const remainingAmount = Math.max(0, po.totalAmount - deliveredAmount);
-  const isOverDelivered = deliveredAmount > po.totalAmount || (!isMultiItem && deliveredQty > po.totalQty);
+  const isOverDelivered =
+    (po.totalAmount > 0 && deliveredAmount > po.totalAmount) ||
+    (!isMultiItem && po.totalQty > 0 && deliveredQty > po.totalQty);
 
   // Derive status
   let status: POStatus = po.status;
   if (po.status !== 'cancelled') {
     if (isMultiItem) {
-      const allCompleted = itemReconciliations.every(ir => ir.status === 'completed');
+      const allCompleted = itemReconciliations.length > 0 &&
+        itemReconciliations.every(ir => ir.status === 'completed');
+      const amountComplete = po.totalAmount > 0 && deliveredAmount >= po.totalAmount;
       const anyDelivered = itemReconciliations.some(ir => ir.deliveredQty > 0) || deliveredAmount > 0;
-      if (allCompleted || deliveredAmount >= po.totalAmount) {
+      if (allCompleted || amountComplete) {
         status = 'completed';
       } else if (anyDelivered) {
         status = 'partially_delivered';
@@ -616,7 +648,10 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
     } else {
       if (deliveredQty <= 0) {
         status = 'pending';
-      } else if (deliveredQty >= po.totalQty) {
+      } else if (
+        (po.totalQty > 0 && deliveredQty >= po.totalQty) ||
+        (po.totalQty <= 0 && po.totalAmount > 0 && deliveredAmount >= po.totalAmount)
+      ) {
         status = 'completed';
       } else {
         status = 'partially_delivered';
@@ -648,15 +683,10 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
 }
 
 /**
- * Finds candidate orders that could be manually linked to this PO by the user:
- * 1. Orders with an explicit PO reference in col4, referenceDocNo, or col38 remarks (sorted first)
- * 2. Orders with NO PO assigned at all (col4 is blank) for manual user matching
- * 3. Orders belonging to the same store/vendor that are not yet linked to this PO
+ * Finds orders that explicitly reference this PO in col4, referenceDocNo, or col38.
+ * Store/vendor similarity and missing PO references are not candidate-link evidence.
  */
 export function findCandidateUnlinkedOrders(po: PurchaseOrder, orders: OrderRecord[]): OrderRecord[] {
-  const normalizedPoNum = normalizeDocNumber(po.poNumber);
-  const targetStore = (po.storeName || '').trim().toLowerCase();
-
   return orders
     .filter(ord => {
       // Exclude secondary documents that have already been merged into a primary DO
@@ -664,28 +694,21 @@ export function findCandidateUnlinkedOrders(po: PurchaseOrder, orders: OrderReco
         return false;
       }
 
-      const ordPo = normalizeDocNumber(ord.col4);
       // Already linked to this PO
-      if (isDocNumberMatch(ord.col4, po.poNumber)) return false;
+      if (isExactDocNumberReference(ord.col4, po.poNumber)) return false;
 
-      // Condition A: Order has no PO assigned
-      const hasNoPO = !ordPo;
-      // Condition B: Order belongs to the same vendor
-      const orderStore = (ord.col8 || '').trim().toLowerCase();
-      const isSameStore = Boolean(targetStore && orderStore && (orderStore.includes(targetStore) || targetStore.includes(orderStore)));
-      // Condition C: Order has remarks/notes or references matching this PO
       const textRefs = extractDocReferences(ord.col38);
       const mentionsPO =
-        isDocNumberMatch(ord.referenceDocNo, po.poNumber) ||
-        textRefs.poNumbers.some(p => isDocNumberMatch(p, po.poNumber) || normalizeDocNumber(p) === normalizedPoNum);
+        isExactDocNumberReference(ord.referenceDocNo, po.poNumber) ||
+        textRefs.poNumbers.some(p => isExactDocNumberReference(p, po.poNumber));
 
-      return hasNoPO || isSameStore || mentionsPO;
+      return mentionsPO;
     })
     .sort((a, b) => {
       const aRefs = extractDocReferences(a.col38);
       const bRefs = extractDocReferences(b.col38);
-      const aHasRef = isDocNumberMatch(a.referenceDocNo, po.poNumber) || aRefs.poNumbers.some(p => isDocNumberMatch(p, po.poNumber));
-      const bHasRef = isDocNumberMatch(b.referenceDocNo, po.poNumber) || bRefs.poNumbers.some(p => isDocNumberMatch(p, po.poNumber));
+      const aHasRef = isExactDocNumberReference(a.referenceDocNo, po.poNumber) || aRefs.poNumbers.some(p => isExactDocNumberReference(p, po.poNumber));
+      const bHasRef = isExactDocNumberReference(b.referenceDocNo, po.poNumber) || bRefs.poNumbers.some(p => isExactDocNumberReference(p, po.poNumber));
       if (aHasRef && !bHasRef) return -1;
       if (!aHasRef && bHasRef) return 1;
       return 0;
@@ -1016,5 +1039,3 @@ export function getDuplicateOrderMap(
 
   return map;
 }
-
-

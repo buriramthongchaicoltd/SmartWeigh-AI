@@ -21,9 +21,9 @@ import {
   SlidersHorizontal,
   Upload
 } from 'lucide-react';
-import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord } from '../types';
+import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
-import { checkDuplicateOrder, isDocNumberMatch } from '../utils/poReconciliation';
+import { checkDuplicateOrder, DuplicateCheckMatch, isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
 import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
@@ -38,8 +38,9 @@ interface VerifyModalProps {
   projects?: ProjectRecord[];
   pos?: PurchaseOrder[];
   existingOrders?: OrderRecord[];
+  lineInboxItems?: LineBillInboxItem[];
   onClose: () => void;
-  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant) => void;
+  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
 }
 
@@ -52,6 +53,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   projects = [],
   pos = [],
   existingOrders = [],
+  lineInboxItems = [],
   onClose,
   onSaveOrder,
   onSwitchToPO
@@ -63,6 +65,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [showAllCols, setShowAllCols] = useState(false);
   const [showDocTypeSwitcher, setShowDocTypeSwitcher] = useState(false);
   const [confirmDuplicateOverride, setConfirmDuplicateOverride] = useState(false);
+  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateCheckMatch[]>([]);
+  const [duplicateInboxMatches, setDuplicateInboxMatches] = useState<LineBillInboxItem[]>([]);
   const [enableDestScale, setEnableDestScale] = useState(false);
   const [enableWeighbridgePricing, setEnableWeighbridgePricing] = useState(false);
   const [enableDOWeighing, setEnableDOWeighing] = useState(false);
@@ -76,25 +80,15 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   useEffect(() => {
     if (orderData) {
       const normalized = { ...orderData };
-      // Physical invariant: Gross (col13) must be >= Tare (col14)
       const c13 = Number(normalized.col13) || 0;
       const c14 = Number(normalized.col14) || 0;
-      if (c13 > 0 && c14 > 0 && c13 < c14) {
-        normalized.col13 = c14;
-        normalized.col14 = c13;
-        normalized.col15 = c14 - c13;
-      } else if (c13 > 0 && c14 > 0 && !normalized.col15) {
+      if (c13 > 0 && c14 > 0 && c13 >= c14 && !normalized.col15) {
         normalized.col15 = c13 - c14;
       }
 
-      // Physical invariant: Dest Gross (col18) must be >= Dest Tare (col19)
       const c18 = Number(normalized.col18) || 0;
       const c19 = Number(normalized.col19) || 0;
-      if (c18 > 0 && c19 > 0 && c18 < c19) {
-        normalized.col18 = c19;
-        normalized.col19 = c18;
-        normalized.col20 = c19 - c18;
-      } else if (c18 > 0 && c19 > 0 && !normalized.col20) {
+      if (c18 > 0 && c19 > 0 && c18 >= c19 && !normalized.col20) {
         normalized.col20 = c18 - c19;
       }
 
@@ -112,7 +106,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
       // Auto-infer Column 3 (หมวดหมู่วัสดุ) if empty or generic
       const matchedPOForCat = normalized.col4
-        ? pos.find(p => isDocNumberMatch(p.poNumber, normalized.col4))
+        ? pos.find(p => isExactDocNumberReference(p.poNumber, normalized.col4))
         : undefined;
       const matchedStoreForCat = normalized.col8
         ? stores.find(s => s.name.trim().toLowerCase() === normalized.col8!.trim().toLowerCase())
@@ -128,6 +122,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setForm(normalized);
       setCurrentImage(billImage || normalized.image || null);
       setConfirmDuplicateOverride(false);
+      setDuplicateMatches([]);
+      setDuplicateInboxMatches([]);
       setProjectMissingError(false);
       setRemappedNotice(null);
       setHasAttachedImage(false);
@@ -174,11 +170,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
   }, [billImage]);
 
-  // Real-time duplicate bill detection against existingOrders (Must be called before any conditional return)
-  const duplicateMatches = React.useMemo(() => {
-    if (!isOpen || !orderData) return [];
-    return checkDuplicateOrder({ ...form, docType: selectedDocType }, existingOrders, currentImage);
-  }, [isOpen, orderData, form, selectedDocType, existingOrders, currentImage]);
+  useEffect(() => {
+    setConfirmDuplicateOverride(false);
+    setDuplicateMatches([]);
+    setDuplicateInboxMatches([]);
+  }, [form, selectedDocType, currentImage]);
 
   const dbCatalog = React.useMemo(
     () => buildDatabaseCatalog(stores, projects, pos, existingOrders),
@@ -187,7 +183,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   // Prioritize items from the currently linked PO (if col4 matches a PO) at the top of the item options list
   const poAwareItemOptions = React.useMemo<CatalogOption[]>(() => {
-    const matchedPO = form.col4 ? pos.find(p => isDocNumberMatch(p.poNumber, form.col4)) : undefined;
+    const matchedPO = form.col4 ? pos.find(p => isExactDocNumberReference(p.poNumber, form.col4)) : undefined;
     if (!matchedPO || !matchedPO.items || matchedPO.items.length === 0) {
       return dbCatalog.items;
     }
@@ -211,11 +207,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     return [...poOpts, ...rest];
   }, [form.col4, pos, dbCatalog.items]);
 
-  const blockingDuplicates = duplicateMatches.filter(m => m.level === 'exact' || m.level === 'suspected');
-  const primaryDuplicate = duplicateMatches[0];
-
-  if (!isOpen || !orderData) return null;
-
   // Document type flags keep the OCR classification aligned with the selected form.
   const isWeighbridge = selectedDocType === 'weighbridge';
   const isDestWeighbridge = selectedDocType === 'dest_weighbridge';
@@ -223,6 +214,83 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isTaxInvoice = selectedDocType === 'tax_invoice';
   const isPO = selectedDocType === 'purchase_order';
   const isFullLogistics = selectedDocType === 'full_logistics';
+
+  const blockingDuplicates = duplicateMatches.filter(m => m.level === 'exact' || m.level === 'suspected');
+  const primaryDuplicate = duplicateMatches[0];
+  const hasPotentialDuplicates = blockingDuplicates.length > 0 || duplicateInboxMatches.length > 0;
+  const validationWarnings = React.useMemo(() => {
+    const warnings: string[] = [];
+    const isValidDate = (value?: string) => {
+      if (!value) return false;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    };
+
+    if (!isValidDate(form.col7)) {
+      warnings.push(form.col7 ? 'วันที่เอกสาร (ช่อง 7) ไม่อยู่ในรูปแบบ YYYY-MM-DD หรือไม่มีวันที่จริง' : 'ยังไม่มีวันที่เอกสาร (ช่อง 7)');
+    }
+    if (isDestWeighbridge && !isValidDate(form.col16)) {
+      warnings.push(form.col16 ? 'วันที่ชั่งปลายทาง (ช่อง 16) ไม่ถูกต้อง' : 'ยังไม่มีวันที่ชั่งปลายทาง (ช่อง 16)');
+    }
+
+    const primaryDocNumber = isPO ? form.col4 : isDestWeighbridge ? form.col17 || form.col6 : form.col6;
+    if (!primaryDocNumber?.trim()) {
+      warnings.push(isPO ? 'ยังไม่มีเลขที่ใบสั่งซื้อ (ช่อง 4)' : 'ยังไม่มีเลขที่เอกสารหลัก');
+    }
+    if (isPO && !form.col8?.trim()) {
+      warnings.push('ยังระบุผู้ขาย/ร้านค้า (ช่อง 8) ไม่ได้ — ตรวจจากช่องผู้ขายในใบสั่งซื้อก่อนยืนยัน');
+    }
+
+    const numericFields: Array<[keyof OrderRecord, string]> = [
+      ['col13', 'น้ำหนัก Gross ต้นทาง'],
+      ['col14', 'น้ำหนัก Tare ต้นทาง'],
+      ['col15', 'น้ำหนักสุทธิต้นทาง'],
+      ['col18', 'น้ำหนัก Gross ปลายทาง'],
+      ['col19', 'น้ำหนัก Tare ปลายทาง'],
+      ['col20', 'น้ำหนักสุทธิปลายทาง'],
+      ['col22', 'ปริมาณ'],
+      ['col24', 'ราคาต่อหน่วย'],
+      ['col25', 'ยอดค่าสินค้า'],
+      ['col27', 'ค่าขนส่งต่อหน่วย'],
+      ['col28', 'ยอดค่าขนส่ง'],
+      ['col29', 'ยอดรวม'],
+      ['col31', 'ยอดชำระผู้ขาย'],
+      ['col32', 'ยอดค้างผู้ขาย'],
+      ['col33', 'ยอดชำระขนส่ง'],
+      ['col34', 'ยอดค้างขนส่ง'],
+      ['col35', 'ยอดชำระรวม'],
+      ['col36', 'ยอดค้างรวม']
+    ];
+    for (const [field, label] of numericFields) {
+      const value = form[field];
+      if (value !== undefined && value !== null && value !== '' && !Number.isFinite(Number(value))) {
+        warnings.push(`${label} ต้องเป็นตัวเลข`);
+      } else if (field !== 'col21' && Number(value) < 0) {
+        warnings.push(`${label} ต้องไม่ติดลบ`);
+      }
+    }
+
+    const weightChecks: Array<[keyof OrderRecord, keyof OrderRecord, keyof OrderRecord, string]> = [
+      ['col13', 'col14', 'col15', 'ต้นทาง'],
+      ['col18', 'col19', 'col20', 'ปลายทาง']
+    ];
+    for (const [grossField, tareField, netField, label] of weightChecks) {
+      const gross = Number(form[grossField]) || 0;
+      const tare = Number(form[tareField]) || 0;
+      const net = Number(form[netField]) || 0;
+      if (gross > 0 && tare > 0 && gross < tare) {
+        warnings.push(`น้ำหนัก Gross ${label} น้อยกว่า Tare — ระบบคงตัวเลขตามที่อ่านได้และไม่สลับให้`);
+      } else if (gross > 0 && tare > 0 && net > gross) {
+        warnings.push(`น้ำหนักสุทธิ ${label} มากกว่า Gross`);
+      } else if (gross > 0 && tare > 0 && net > 0 && gross >= tare && net !== gross - tare) {
+        warnings.push(`น้ำหนักสุทธิ ${label} ไม่เท่ากับ Gross ลบ Tare`);
+      }
+    }
+    return warnings;
+  }, [form, isDestWeighbridge, isPO]);
+
+  if (!isOpen || !orderData) return null;
 
   // Determine which zones are relevant for the current document type
   const showWeightsOrigin = showAllCols || isWeighbridge || isFullLogistics || enableDOWeighing || Number(form.col13) > 0 || Number(form.col15) > 0;
@@ -235,25 +303,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     // Zone 3: Net Origin = Gross - Tare
     const grossO = Number(field === 'col13' ? value : nextForm.col13) || 0;
     const tareO = Number(field === 'col14' ? value : nextForm.col14) || 0;
-    const netO = Math.max(0, grossO - tareO);
+    const netO = grossO >= tareO ? grossO - tareO : Number(nextForm.col15) || 0;
     nextForm.col15 = netO;
 
     // Zone 4: Net Dest = Dest Gross - Dest Tare
     const grossD = Number(field === 'col18' ? value : nextForm.col18) || 0;
     const tareD = Number(field === 'col19' ? value : nextForm.col19) || 0;
-    const netD = Math.max(0, grossD - tareD);
+    const netD = grossD >= tareD ? grossD - tareD : Number(nextForm.col20) || 0;
     nextForm.col20 = netD;
 
     // Weight Diff
     if (netO > 0 && netD > 0) {
       nextForm.col21 = netO - netD;
-    }
-
-    // Auto-update quantity if unit is tons
-    const unit = nextForm.col23 || 'ตัน';
-    const effectiveNet = netO > 0 ? netO : netD;
-    if (unit.includes('ตัน') && effectiveNet > 0 && (!nextForm.col22 || nextForm.col22 === 0 || isDestWeighbridge || isWeighbridge)) {
-      nextForm.col22 = Number((effectiveNet / 1000).toFixed(2));
     }
 
     setForm(nextForm);
@@ -432,11 +493,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       col4: form.col4 || '',
       col5: form.col5 || '',
       col6: form.col6 || '',
-      col7: form.col7 || new Date().toISOString().split('T')[0],
-      col8: form.col8 || 'ผู้จำหน่ายไม่ระบุชื่อ',
+      col7: form.col7 || '',
+      col8: form.col8 || '',
       col9: form.col9 || '',
       col10: form.col10 || '',
-      col11: form.col11 || 'วัสดุก่อสร้าง',
+      col11: form.col11 || '',
       col12: form.col12 || '',
       col13: showWeightsOrigin ? (Number(form.col13) || 0) : 0,
       col14: showWeightsOrigin ? (Number(form.col14) || 0) : 0,
@@ -447,15 +508,15 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       col19: showWeightsDest ? (Number(form.col19) || 0) : 0,
       col20: showWeightsDest ? (Number(form.col20) || 0) : 0,
       col21: showWeightsDest ? (Number(form.col21) || 0) : 0,
-      col22: Number(form.col22) || 1,
-      col23: form.col23 || (selectedDocType === 'concrete' ? 'คิว' : 'ตัน'),
+      col22: Number(form.col22) || 0,
+      col23: form.col23 || '',
       col24: (isWeighbridge && !enableWeighbridgePricing && !showAllCols) ? 0 : (Number(form.col24) || 0),
       col25: (isWeighbridge && !enableWeighbridgePricing && !showAllCols) ? 0 : (Number(form.col25) || 0),
       col26: form.col26 || '',
       col27: (isWeighbridge && !enableWeighbridgePricing && !showAllCols) ? 0 : (Number(form.col27) || 0),
       col28: (isWeighbridge && !enableWeighbridgePricing && !showAllCols) ? 0 : (Number(form.col28) || 0),
       col29: (isWeighbridge && !enableWeighbridgePricing && !showAllCols) ? 0 : (Number(form.col29) || 0),
-      col30: form.col30 || (isWeighbridge ? '-' : isDeliveryOrder ? 'เครดิต / รอวางบิล (RR)' : 'โอนเงิน'),
+      col30: form.col30 || '',
       col31: (showAllCols || selectedDocType === 'tax_invoice') ? (Number(form.col31) || 0) : 0,
       col32: (showAllCols || selectedDocType === 'tax_invoice') ? (Number(form.col32) || 0) : 0,
       col33: (showAllCols || selectedDocType === 'tax_invoice') ? (Number(form.col33) || 0) : 0,
@@ -523,8 +584,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   const handleOverwriteExistingDuplicate = (existingOrder: OrderRecord) => {
     const { finalizedOrder, storeToSave } = buildFinalizedOrder(existingOrder);
-    onSaveOrder(finalizedOrder, storeToSave);
-    onClose();
+    if (onSaveOrder(finalizedOrder, storeToSave, true)) onClose();
   };
 
   const handleInspectExistingDuplicate = (existingOrder: OrderRecord) => {
@@ -539,20 +599,44 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Strict Hard Block: Never allow saving a duplicate bill as a new record
-    if (blockingDuplicates.length > 0) {
-      return;
-    }
-
     // Strict Mandatory Check: "ชื่อโครงการ (ช่อง 2)" must be present before confirming save
     if (!form.col2 || !form.col2.trim()) {
       setProjectMissingError(true);
       return;
     }
 
+    const matches = checkDuplicateOrder({ ...form, docType: selectedDocType }, existingOrders, currentImage);
+    const blocking = matches.filter(m => m.level === 'exact' || m.level === 'suspected');
+    const candidateInboxItem = lineInboxItems.find(item => item.id === form.lineInboxId);
+    const candidateDocNo = selectedDocType === 'purchase_order'
+      ? form.col4
+      : selectedDocType === 'dest_weighbridge'
+        ? form.col17 || form.col6
+        : form.col6;
+    const inboxMatches = lineInboxItems.filter(item => {
+      if (item.id === form.lineInboxId) return false;
+      const otherDocNo = item.detectedDocType === 'purchase_order'
+        ? item.extractedData.col4 || item.rawAiSnapshot.col4
+        : item.detectedDocType === 'dest_weighbridge'
+          ? item.extractedData.col17 || item.rawAiSnapshot.col17
+          : item.extractedData.col6 || item.rawAiSnapshot.col6;
+      const sameImage = Boolean(
+        candidateInboxItem?.imageHash &&
+        item.imageHash &&
+        candidateInboxItem.imageHash === item.imageHash
+      );
+      const sameDocumentNumber = isExactDocNumberReference(candidateDocNo, otherDocNo);
+      return sameImage || sameDocumentNumber;
+    });
+    setDuplicateMatches(matches);
+    setDuplicateInboxMatches(inboxMatches);
+    if ((blocking.length > 0 || inboxMatches.length > 0) && !confirmDuplicateOverride) {
+      setConfirmDuplicateOverride(true);
+      return;
+    }
+
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
-    onSaveOrder(finalizedOrder, storeToSave);
-    onClose();
+    if (onSaveOrder(finalizedOrder, storeToSave, blocking.length > 0 || inboxMatches.length > 0)) onClose();
   };
 
   return (
@@ -857,6 +941,54 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                 </div>
               )}
 
+              {validationWarnings.length > 0 && (
+                <div
+                  role="alert"
+                  aria-live="polite"
+                  className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950"
+                >
+                  <div className="flex items-center gap-2 font-bold text-xs sm:text-sm">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>พบข้อมูลที่ควรตรวจสอบก่อนยืนยัน (ระบบไม่แก้ค่าให้เอง)</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 list-disc space-y-0.5 text-[11px]">
+                    {validationWarnings.map(warning => <li key={warning}>{warning}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {duplicateInboxMatches.length > 0 && (
+                <div
+                  role="alert"
+                  aria-live="polite"
+                  className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950"
+                >
+                  <div className="flex items-center gap-2 font-bold text-xs sm:text-sm">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>พบรายการ LINE ที่มีรูปหรือเลขเอกสารเดียวกัน — ตรวจสอบก่อนบันทึก</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 list-disc space-y-0.5 text-[11px]">
+                    {duplicateInboxMatches.slice(0, 5).map(item => (
+                      <li key={item.id}>
+                        <strong>
+                          {item.detectedDocType === 'purchase_order'
+                            ? item.extractedData.col4 || item.rawAiSnapshot.col4
+                            : item.detectedDocType === 'dest_weighbridge'
+                              ? item.extractedData.col17 || item.rawAiSnapshot.col17
+                              : item.extractedData.col6 || item.rawAiSnapshot.col6 || item.id}
+                        </strong>
+                        {' • '}{item.lineGroupName || item.lineSenderName || 'LINE'}
+                        {' • '}{item.status === 'verified' ? `ตรวจรับแล้ว (${item.verifiedOrderId || '-'})` : 'ยังอยู่ในกล่องพัก'}
+                      </li>
+                    ))}
+                    {duplicateInboxMatches.length > 5 && <li>และอีก {duplicateInboxMatches.length - 5} รายการ</li>}
+                  </ul>
+                  <p className="mt-1 text-[11px] font-semibold">
+                    ระบบไม่ลบหรือปฏิเสธรายการให้อัตโนมัติ; หากตรวจแล้วว่าเป็นคนละเอกสาร ให้กดยืนยันอีกครั้งเพื่อบันทึก
+                  </p>
+                </div>
+              )}
+
               {/* ==================== DUPLICATE BILL DETECTION ALERT BANNER ==================== */}
               {primaryDuplicate && (
                 <div className={`p-3.5 rounded-xl border-2 space-y-2.5 animate-fadeIn ${
@@ -892,9 +1024,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         : 'bg-emerald-600 text-white'
                     }`}>
                       {primaryDuplicate.level === 'exact'
-                        ? '🚫 บล็อกบิลซ้ำ (ร้านเดียวกัน)'
+                        ? '⚠️ เลขเอกสาร/รูปอาจซ้ำ'
                         : primaryDuplicate.level === 'suspected'
-                        ? '🚫 บล็อกข้อมูลซ้ำ (ร้านเดียวกัน)'
+                        ? '⚠️ ข้อมูลอาจซ้ำ'
                         : '✅ คนละร้านค้า — บันทึกได้ปกติ'}
                     </span>
                   </div>
@@ -936,10 +1068,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Action Buttons: Only show Duplicate Block actions when level is exact or suspected */}
                   {primaryDuplicate.level === 'cross_vendor' ? (
                     <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px] text-emerald-900 font-semibold">
-                      <span>💡 เนื่องจากเป็นบิลคนละร้านค้ากัน ระบบจึงไม่ตัดออก สามารถกดปุ่ม "บันทึกข้อมูลเอกสาร" ด้านล่างได้ตามปกติ</span>
+                      <span>💡 เลขเอกสารนี้อยู่กับร้านอื่นด้วย จึงแจ้งไว้เพื่อให้ตรวจสอบ แต่อนุญาตให้บันทึกได้</span>
                     </div>
                   ) : (
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
@@ -969,8 +1100,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         </button>
                       </div>
 
-                      <span className="text-[11px] font-bold text-rose-800 bg-rose-100/90 px-2.5 py-1 rounded-lg border border-rose-300">
-                        🔒 ระบบล็อกปุ่มบันทึกแล้ว (ร้านเดียวกัน + เลขบิลซ้ำ)
+                      <span className="text-[11px] font-bold text-amber-900 bg-amber-100/90 px-2.5 py-1 rounded-lg border border-amber-300">
+                        {confirmDuplicateOverride
+                          ? 'ตรวจแล้ว: กดยืนยันด้านล่างเพื่อบันทึกเป็นเอกสารแยก'
+                          : 'ระบบจะแจ้งเตือนเท่านั้น ไม่ลบหรือปฏิเสธบิลอัตโนมัติ'}
                       </span>
                     </div>
                   )}
@@ -1147,7 +1280,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         />
                         {pos && pos.length > 0 && (() => {
                           const matchedPO = form.col4
-                            ? pos.find(p => isDocNumberMatch(p.poNumber, form.col4))
+                            ? pos.find(p => isExactDocNumberReference(p.poNumber, form.col4))
                             : undefined;
                           return (
                             <div className="mt-1 space-y-1">
@@ -2588,10 +2721,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       <div>
                         <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">30. รูปแบบการชำระ</label>
                         <select
-                          value={form.col30 || 'โอนเงิน'}
+                          value={form.col30 || ''}
                           onChange={(e) => handleTextChange('col30', e.target.value)}
                           className="w-full p-2 border border-slate-300 rounded-lg bg-white text-xs"
                         >
+                          <option value="">ยังไม่ระบุ</option>
                           <option value="โอนเงิน">โอนเงินธนาคาร</option>
                           <option value="เงินสด">เงินสด</option>
                           <option value="เช็ค">เช็คสั่งจ่าย</option>
@@ -3023,10 +3157,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       <div>
                         <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">30. รูปแบบการชำระ</label>
                         <select
-                          value={form.col30 || 'โอนเงิน'}
+                          value={form.col30 || ''}
                           onChange={(e) => handleTextChange('col30', e.target.value)}
                           className="w-full p-2 border border-slate-300 rounded-lg bg-white"
                         >
+                          <option value="">ยังไม่ระบุ</option>
                           <option value="โอนเงิน">โอนเงินธนาคาร</option>
                           <option value="เครดิต 30 วัน">เครดิต 30 วัน</option>
                           <option value="เครดิต 15 วัน">เครดิต 15 วัน</option>
@@ -3114,42 +3249,27 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                 </button>
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {blockingDuplicates.length > 0 ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={onClose}
-                        className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer text-xs"
-                      >
-                        <X className="w-4 h-4" />
-                        <span>ยกเลิกการนำเข้าบิลซ้ำ (ปิดหน้าต่าง)</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled
-                        className="px-5 py-2.5 bg-slate-200 text-slate-500 border border-slate-300 rounded-xl font-bold flex items-center gap-2 cursor-not-allowed text-xs"
-                      >
-                        <AlertTriangle className="w-4 h-4 text-rose-600" />
-                        <span>🚫 บล็อกการบันทึก: บิลซ้ำกับ {blockingDuplicates[0].matchedOrder.col1}</span>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      {!form.col2?.trim() && (
-                        <span className="text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                          <span>ต้องระบุ "2. ชื่อโครงการ (ช่อง 2)" ก่อนกดยืนยันบันทึก</span>
-                        </span>
-                      )}
-                      <button
-                        type="submit"
-                        className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold transition flex items-center gap-2 shadow-md shadow-emerald-200 cursor-pointer active:scale-95 text-xs md:text-sm"
-                      >
-                        <Save className="w-4 h-4" />
-                        <span>ยืนยันบันทึกข้อมูลเอกสาร</span>
-                      </button>
-                    </>
+                  {!form.col2?.trim() && (
+                    <span className="text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span>ต้องระบุ "2. ชื่อโครงการ (ช่อง 2)" ก่อนกดยืนยันบันทึก</span>
+                    </span>
                   )}
+                  <button
+                    type="submit"
+                    className={`px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm ${
+                      hasPotentialDuplicates && confirmDuplicateOverride
+                        ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-200'
+                        : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200'
+                    }`}
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>
+                      {hasPotentialDuplicates && confirmDuplicateOverride
+                        ? 'ยืนยันบันทึกเป็นเอกสารแยก'
+                        : 'ยืนยันบันทึกข้อมูลเอกสาร'}
+                    </span>
+                  </button>
                 </div>
               </div>
 
