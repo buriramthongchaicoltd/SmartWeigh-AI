@@ -2298,31 +2298,29 @@ export default function App() {
       image: item.image
     };
 
-    // Resolve image: ใช้ item.image ถ้ามี ถ้าไม่มีให้ fetch จาก server on-demand
+    // Resolve image: fetch จาก server on-demand เสมอเมื่อไม่มี item.image (ไม่เปิด tab ใหม่)
     let resolvedImage = item.image || '';
     if (!resolvedImage || resolvedImage.length < 50) {
-      // Try Drive link first (open in new tab as preview)
-      if (item.driveWebViewLink) {
-        // Open drive in new tab so user can see the bill
-        window.open(item.driveWebViewLink, '_blank', 'noopener');
-        // Continue to open verify modal without image
-      } else {
-        // Fetch from server (which will fallback to LINE API or Drive link)
-        try {
-          showToast('กำลังโหลดรูปภาพบิล...', 'info');
-          const resp = await fetch(`/api/line/inbox/image/${item.id}`);
-          const data = await resp.json();
-          if (data.success && data.image) {
-            resolvedImage = data.image;
-          } else if (data.canOpenInDrive && data.driveWebViewLink) {
-            // Image is in Drive, open it in new tab
-            window.open(data.driveWebViewLink, '_blank', 'noopener');
-            showToast('เปิดรูปภาพจาก Google Drive ในแท็บใหม่แล้ว', 'info');
-          }
-        } catch {
-          // Silent fallback — open verify without image
+      try {
+        showToast('กำลังโหลดรูปภาพบิล...', 'info');
+        const resp = await fetch(`/api/line/inbox/image/${item.id}`);
+        const data = await resp.json();
+        if (data.success && data.image && data.image.length > 50) {
+          // Got base64 from LINE API — use directly in modal
+          resolvedImage = data.image;
+        } else if (data.driveWebViewLink) {
+          // Convert Drive view link to direct img URL (shows in <img> tag)
+          const match = (data.driveWebViewLink as string).match(/\/d\/([a-zA-Z0-9_-]+)/);
+          if (match) resolvedImage = `https://drive.google.com/uc?export=view&id=${match[1]}`;
         }
+      } catch {
+        // silent fallback
       }
+    }
+    // Last resort: convert item.driveWebViewLink to direct img URL
+    if ((!resolvedImage || resolvedImage.length < 10) && item.driveWebViewLink) {
+      const match = item.driveWebViewLink.match(/\/d\/([a-zA-Z0-9_-]+)/);
+      if (match) resolvedImage = `https://drive.google.com/uc?export=view&id=${match[1]}`;
     }
 
     if (item.detectedDocType === 'purchase_order') {
