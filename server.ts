@@ -1422,42 +1422,24 @@ function buildLineQuoteReplyText(params: {
 }): string {
   const {
     billNo,
-    docType,
-    storeName,
     senderName,
-    isDuplicate,
-    duplicateMatchedCode,
     scanFailed
   } = params;
 
   const cleanBillNo = (billNo || '').trim();
-  const cleanStore = (storeName || '').trim() || 'ไม่ระบุร้านค้า';
-  const docLabel = getDocTypeThaiLabel(docType);
-
-  if (isDuplicate && cleanBillNo) {
-    return [
-      `⚠️ แจ้งเตือนบิลซ้ำ!`,
-      `• บิลเลขที่: ${cleanBillNo}`,
-      `• ร้านค้า: ${cleanStore}`,
-      `• สถานะ: เคยส่งเข้าระบบแล้ว${duplicateMatchedCode ? ` (${duplicateMatchedCode})` : ''} ไม่ต้องส่งซ้ำครับ`
-    ].join('\n');
-  }
+  const cleanSenderName = (senderName || '').trim() || 'ไม่ระบุ';
 
   if (scanFailed || !cleanBillNo) {
-    // Collect-First Mode: เก็บบิลไว้แล้ว แม้อ่านเลขที่ไม่ได้ — เจ้าหน้าที่จะตรวจสอบเองในระบบ
     return [
-      `📥 รับบิลไว้แล้วครับ คุณ ${senderName}`,
-      `• สถานะ: บันทึกรอเจ้าหน้าที่ตรวจสอบ`,
-      `• หมายเหตุ: อ่านเลขที่บิลไม่ชัด — เจ้าหน้าที่จะกรอกข้อมูลให้เองในระบบ`,
-      `✅ ไม่ต้องถ่ายซ้ำ บิลถูกเก็บเรียบร้อยแล้ว`
+      `ผู้ส่ง: ${cleanSenderName}`,
+      `รับบิลเข้าระบบรอตรวจสอบแล้ว`,
+      `หมายเหตุ: อ่านเลขที่บิลไม่ชัด รอตรวจสอบ`
     ].join('\n');
   }
 
   return [
-    `✅ บิลเลขที่ ${cleanBillNo} เก็บเข้าระบบรอตรวจสอบแล้ว`,
-    `• ประเภท: ${docLabel}`,
-    `• ร้านค้า: ${cleanStore}`,
-    `• ผู้ส่ง: ${senderName}`
+    `ผู้ส่ง: ${cleanSenderName}`,
+    `บิลเลขที่ ${cleanBillNo} เก็บเข้าระบบรอตรวจสอบแล้ว`
   ].join('\n');
 }
 
