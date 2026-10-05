@@ -38,6 +38,226 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+type AuthenticatedAppUser = {
+  id: string;
+  username: string;
+  fullName: string;
+  position: string;
+  phone?: string;
+  role: 'admin' | 'manager' | 'user';
+  assignedProjects: string[];
+  status: 'active' | 'suspended';
+  isSystemMaster?: boolean;
+  createdAt: string;
+};
+
+const AUTH_COOKIE_NAME = 'smartweigh_session';
+const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
+const authSessions = new Map<string, { user: AuthenticatedAppUser; expiresAt: number }>();
+const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
+
+function publicAppUser(row: Record<string, any>): AuthenticatedAppUser {
+  return {
+    id: String(row.id),
+    username: String(row.username || ''),
+    fullName: String(row.full_name || row.fullName || row.username || ''),
+    position: String(row.position || row.department || ''),
+    phone: row.phone || undefined,
+    role: row.role === 'admin' || row.role === 'manager' ? row.role : 'user',
+    assignedProjects: Array.isArray(row.assigned_projects) ? row.assigned_projects : Array.isArray(row.assignedProjects) ? row.assignedProjects : [],
+    status: row.status === 'suspended' ? 'suspended' : 'active',
+    isSystemMaster: row.id === 'SYSTEM-MASTER-ADMIN' || Boolean(row.is_system_master || row.isSystemMaster),
+    createdAt: String(row.created_at || row.createdAt || new Date().toISOString())
+  };
+}
+
+function getSessionToken(req: Request): string | null {
+  const cookieHeader = req.headers.cookie || '';
+  const sessionCookie = cookieHeader.split(';').map(part => part.trim()).find(part => part.startsWith(`${AUTH_COOKIE_NAME}=`));
+  return sessionCookie ? decodeURIComponent(sessionCookie.slice(AUTH_COOKIE_NAME.length + 1)) : null;
+}
+
+function getAuthenticatedUser(req: Request): AuthenticatedAppUser | null {
+  const token = getSessionToken(req);
+  if (!token) return null;
+  const session = authSessions.get(token);
+  if (!session || session.expiresAt <= Date.now()) {
+    authSessions.delete(token);
+    return null;
+  }
+  return session.user;
+}
+
+function setSessionCookie(res: Response, token: string, maxAgeSeconds: number) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure}`
+  );
+}
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16);
+  const derived = crypto.scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString('hex')}$${derived.toString('hex')}`;
+}
+
+function verifyPassword(password: string, stored: string): { valid: boolean; needsUpgrade: boolean } {
+  const [scheme, saltHex, hashHex] = stored.split('$');
+  if (scheme === 'scrypt' && saltHex && hashHex) {
+    const salt = Buffer.from(saltHex, 'hex');
+    const expected = Buffer.from(hashHex, 'hex');
+    const actual = crypto.scryptSync(password, salt, expected.length);
+    return {
+      valid: expected.length === actual.length && crypto.timingSafeEqual(expected, actual),
+      needsUpgrade: false
+    };
+  }
+  const attempted = Buffer.from(password);
+  const legacy = Buffer.from(stored);
+  return {
+    valid: attempted.length === legacy.length && crypto.timingSafeEqual(attempted, legacy),
+    needsUpgrade: true
+  };
+}
+
+function invalidateUserSessions(userId: string) {
+  for (const [token, session] of authSessions) {
+    if (session.user.id === userId) authSessions.delete(token);
+  }
+}
+
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const limit = loginRateLimits.get(ip);
+  if (limit && limit.resetAt > now && limit.attempts >= 10) {
+    return res.status(429).json({ success: false, error: 'พยายามเข้าสู่ระบบหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่' });
+  }
+  if (!limit || limit.resetAt <= now) loginRateLimits.set(ip, { attempts: 1, resetAt: now + 5 * 60 * 1000 });
+  else limit.attempts++;
+
+  try {
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!username || !password) return res.status(400).json({ success: false, error: 'กรุณากรอก Username และ Password' });
+    if (username.length > 100 || password.length > 1024) {
+      return res.status(400).json({ success: false, error: 'Username หรือ Password ยาวเกินกำหนด' });
+    }
+
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
+    const { data, error } = await client.from('app_users').select('id,username,status');
+    if (error) throw error;
+    if ((data || []).length === 0 && !process.env.INITIAL_ADMIN_PASSWORD) {
+      return res.status(503).json({
+        success: false,
+        error: 'ยังไม่มีบัญชี Admin เริ่มต้น กรุณาตั้ง INITIAL_ADMIN_PASSWORD ใน Environment ของเซิร์ฟเวอร์ก่อน'
+      });
+    }
+    const matchingUser = (data || []).find((user: Record<string, any>) => String(user.username || '').trim().toLowerCase() === username.toLowerCase());
+    let row: Record<string, any> | null = null;
+    let checked: { valid: boolean; needsUpgrade: boolean } | null = null;
+    if (matchingUser) {
+      const { data: account, error: accountError } = await client.from('app_users').select('*').eq('id', matchingUser.id).single();
+      if (accountError) throw accountError;
+      row = account;
+    } else if ((data || []).length === 0 && username.toLowerCase() === 'admin' && process.env.INITIAL_ADMIN_PASSWORD) {
+      const initialPassword = process.env.INITIAL_ADMIN_PASSWORD;
+      const expected = Buffer.from(initialPassword);
+      const attempted = Buffer.from(password);
+      if (expected.length === attempted.length && crypto.timingSafeEqual(expected, attempted)) {
+        const { data: created, error: createError } = await client.from('app_users').insert({
+          id: 'SYSTEM-MASTER-ADMIN',
+          username: 'Admin',
+          password: hashPassword(password),
+          full_name: 'Admin',
+          role: 'admin',
+          department: '',
+          status: 'active'
+        }).select('*').single();
+        if (createError) throw createError;
+        row = created;
+        checked = { valid: true, needsUpgrade: false };
+        delete process.env.INITIAL_ADMIN_PASSWORD;
+      }
+    }
+    if (!row || row.status === 'suspended' || typeof row.password !== 'string') {
+      return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+    }
+
+    checked ||= verifyPassword(password, row.password);
+    if (!checked.valid) return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+    if (checked.needsUpgrade) {
+      const { error: upgradeError } = await client.from('app_users').update({ password: hashPassword(password) }).eq('id', row.id);
+      if (upgradeError) throw upgradeError;
+    }
+
+    const user = publicAppUser(row);
+    const token = crypto.randomBytes(32).toString('base64url');
+    authSessions.set(token, { user, expiresAt: now + AUTH_SESSION_TTL_MS });
+    loginRateLimits.delete(ip);
+    setSessionCookie(res, token, Math.floor(AUTH_SESSION_TTL_MS / 1000));
+    return res.json({ success: true, user });
+  } catch (err: any) {
+    console.error('[Auth] Login failed:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'เข้าสู่ระบบไม่สำเร็จเนื่องจากระบบยืนยันตัวตนขัดข้อง' });
+  }
+});
+
+app.get('/api/auth/me', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const user = getAuthenticatedUser(req);
+  return user
+    ? res.json({ success: true, user })
+    : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const token = getSessionToken(req);
+  if (token) authSessions.delete(token);
+  setSessionCookie(res, '', 0);
+  return res.json({ success: true });
+});
+
+app.use('/api', (req: Request, res: Response, next) => {
+  const internalToken = req.headers['x-internal-api-token'];
+  if (typeof internalToken === 'string' && internalToken.length === INTERNAL_API_TOKEN.length &&
+      crypto.timingSafeEqual(Buffer.from(internalToken), Buffer.from(INTERNAL_API_TOKEN))) {
+    return next();
+  }
+  const publicPaths = new Set(['/auth/login', '/auth/me', '/auth/logout', '/status', '/line/webhook']);
+  if (publicPaths.has(req.path)) return next();
+
+  const user = getAuthenticatedUser(req);
+  if (!user) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
+
+  const adminOnlyPaths = new Set([
+    '/auth/users',
+    '/system/config',
+    '/database/config',
+    '/database/init-schema',
+    '/database/migrate-local-to-cloud',
+    '/database/test',
+    '/drive/config',
+    '/drive/test',
+    '/line/config',
+    '/startup/retest'
+  ]);
+  const isUserManagementWrite =
+    (req.path === '/database/save-record' && ['app_users', 'system_config'].includes(req.body?.table)) ||
+    (req.path === '/database/save-batch' && ['app_users', 'system_config'].includes(req.body?.table));
+  if (req.path === '/database/delete-record' && ['app_users', 'system_config'].includes(req.body?.table)) {
+    return res.status(403).json({ success: false, error: 'ไม่อนุญาตให้ลบข้อมูลบัญชีหรือการตั้งค่าผ่าน API นี้' });
+  }
+  if ((adminOnlyPaths.has(req.path) || isUserManagementWrite) && user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'ต้องใช้บัญชี Admin เพื่อทำรายการนี้' });
+  }
+  return next();
+});
+
 // In-memory rate limiting to prevent Denial-of-Service and Gemini API quota exhaustion
 const scanRateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const SCAN_WINDOW_MS = 60 * 1000; // 1-minute sliding window
@@ -50,6 +270,12 @@ setInterval(() => {
     if (now > record.resetTime) {
       scanRateLimitMap.delete(ip);
     }
+  }
+  for (const [token, session] of authSessions.entries()) {
+    if (now > session.expiresAt) authSessions.delete(token);
+  }
+  for (const [ip, record] of loginRateLimits.entries()) {
+    if (now > record.resetAt) loginRateLimits.delete(ip);
   }
 }, 5 * 60 * 1000);
 
@@ -2985,7 +3211,7 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
       client.from('projects').select('*').order('name', { ascending: true }),
       client.from('billing_notes').select('*').order('created_at', { ascending: false }),
       client.from('line_inbox').select(LINE_INBOX_COLUMNS).order('received_at', { ascending: false }).limit(500),
-      client.from('app_users').select('*').order('created_at', { ascending: true }),
+      client.from('app_users').select('id,username,full_name,department,phone,role,status,created_at').order('created_at', { ascending: true }),
       client.from('system_config').select('*')
     ]);
 
@@ -3045,7 +3271,7 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
         projects: mappedProjects,
         billingNotes: mappedBillingNotes,
         lineInbox: mappedLineInbox,
-        users: usersRes.data || [],
+        users: (usersRes.data || []).map((row: Record<string, any>) => publicAppUser(row)),
         systemSettings
       },
       counts: {
@@ -3065,6 +3291,69 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/auth/users', async (req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
+
+    const input = req.body?.user;
+    if (!input || typeof input !== 'object') return res.status(400).json({ success: false, error: 'ข้อมูลผู้ใช้ไม่ถูกต้อง' });
+    const id = typeof input.id === 'string' ? input.id.trim() : '';
+    const username = typeof input.username === 'string' ? input.username.trim() : '';
+    const password = typeof input.password === 'string' ? input.password : '';
+    const fullName = typeof input.fullName === 'string' ? input.fullName.trim() : '';
+    if (!['admin', 'manager', 'user'].includes(input.role)) {
+      return res.status(400).json({ success: false, error: 'บทบาทผู้ใช้ไม่ถูกต้อง' });
+    }
+    const role = input.role;
+    if (!id || !username || !fullName) {
+      return res.status(400).json({ success: false, error: 'กรุณากรอก Username และชื่อที่แสดง' });
+    }
+    if (username.length > 100 || fullName.length > 200 || password.length > 1024) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลบัญชีมีความยาวเกินกำหนด' });
+    }
+
+    const [{ data: existing, error: existingError }, { data: knownUsers, error: usersError }] = await Promise.all([
+      client.from('app_users').select('id,username,password,full_name,department,phone,role,status,created_at').eq('id', id).maybeSingle(),
+      client.from('app_users').select('id,username')
+    ]);
+    if (existingError) throw existingError;
+    if (usersError) throw usersError;
+    if (!existing && !password.trim()) return res.status(400).json({ success: false, error: 'กรุณากำหนดรหัสผ่านสำหรับบัญชีใหม่' });
+    const duplicate = (knownUsers || []).find((row: Record<string, any>) =>
+      String(row.username || '').trim().toLowerCase() === username.toLowerCase() && String(row.id) !== id
+    );
+    if (duplicate) return res.status(409).json({ success: false, error: 'Username นี้มีผู้ใช้งานแล้ว' });
+
+    const isSystemMaster = existing?.id === 'SYSTEM-MASTER-ADMIN';
+    const row: Record<string, any> = {
+      id,
+      username: isSystemMaster ? 'Admin' : username,
+      full_name: fullName,
+      department: typeof input.position === 'string' ? input.position.trim() : (existing?.department || ''),
+      phone: typeof input.phone === 'string' ? input.phone.trim() : null,
+      role: isSystemMaster ? 'admin' : role,
+      status: isSystemMaster ? 'active' : (input.status === 'suspended' ? 'suspended' : 'active'),
+      created_at: existing?.created_at || new Date().toISOString()
+    };
+    if (password.trim()) row.password = hashPassword(password);
+    else if (existing?.password) row.password = existing.password;
+
+    const { data: saved, error: saveError } = await client.from('app_users')
+      .upsert(row, { onConflict: 'id' })
+      .select('id,username,full_name,department,phone,role,status,created_at')
+      .single();
+    if (saveError) throw saveError;
+    if (password.trim() || row.status === 'suspended' || existing?.role !== row.role || existing?.username !== row.username) {
+      invalidateUserSessions(id);
+    }
+    return res.json({ success: true, user: publicAppUser(saved) });
+  } catch (err: any) {
+    console.error('[Auth] User save failed:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'บันทึกบัญชีผู้ใช้ไม่สำเร็จ' });
+  }
+});
+
 // 7. Save Single Record Directly to Supabase (100% Real Database Persistence)
 app.post('/api/database/save-record', async (req: Request, res: Response) => {
   try {
@@ -3076,6 +3365,9 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
     const { table, record } = req.body;
     if (!table || !record) {
       return res.status(400).json({ success: false, error: 'Missing table or record' });
+    }
+    if (!['orders', 'purchase_orders', 'pos', 'stores', 'projects', 'line_inbox', 'billing_notes', 'system_config'].includes(table)) {
+      return res.status(400).json({ success: false, error: 'Unsupported database table' });
     }
 
     let targetTable = table;
@@ -3122,6 +3414,9 @@ app.post('/api/database/delete-record', async (req: Request, res: Response) => {
     if (!table || !id) {
       return res.status(400).json({ success: false, error: 'Missing table or id' });
     }
+    if (!['orders', 'purchase_orders', 'pos', 'stores', 'projects', 'line_inbox', 'billing_notes'].includes(table)) {
+      return res.status(400).json({ success: false, error: 'Unsupported database table' });
+    }
 
     let targetTable = table;
     if (table === 'pos') targetTable = 'purchase_orders';
@@ -3149,6 +3444,9 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     const { table, records } = req.body;
     if (!table || !Array.isArray(records)) {
       return res.status(400).json({ success: false, error: 'Missing table or records array' });
+    }
+    if (!['orders', 'purchase_orders', 'pos', 'stores', 'projects', 'line_inbox', 'billing_notes'].includes(table)) {
+      return res.status(400).json({ success: false, error: 'Unsupported database table' });
     }
 
     let targetTable = table;
@@ -5105,7 +5403,7 @@ async function runDailyLineInboxSync(): Promise<void> {
       const port = Number(PORT);
       const resp = await fetch(`http://localhost:${port}/api/drive/sync-inbox-images`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-internal-api-token': INTERNAL_API_TOKEN },
         body: JSON.stringify({ lookbackDays: 3, batchSize: 5, cursorId })
       });
       if (resp.status === 409) {

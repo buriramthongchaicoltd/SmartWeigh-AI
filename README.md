@@ -89,12 +89,10 @@
 
 ---
 
-## 3. ข้อมูลระบบพื้นฐาน & บัญชีหลักมาสเตอร์
+## 3. ข้อมูลระบบพื้นฐาน & การเข้าสู่ระบบ
 
-- **บัญชีหลักมาสเตอร์ติดระบบถาวร (`SYSTEM_MASTER_ADMIN`)**:
-  - **Username:** `Admin`
-  - **Password:** `123456`
-  - ฝังอยู่ใน `src/utils/systemConfig.ts` ห้ามลบและห้ามระงับสิทธิ์
+- เข้าสู่ระบบด้วย Username/Password ของบัญชีในตาราง `app_users`; Admin และผู้ใช้อื่นต้องยืนยันรหัสผ่านทุกครั้งหลังหมด session.
+- หากฐานข้อมูลไม่มีบัญชีผู้ใช้ ให้กำหนด `INITIAL_ADMIN_PASSWORD` ใน environment ของ server ชั่วคราว แล้วล็อกอินด้วย Username `Admin`; server จะสร้างบัญชี Admin แรกและเก็บรหัสผ่านเป็น hash. หลัง bootstrap ให้นำ environment variable นี้ออกจาก hosting settings.
 - **โมเดล AI ที่ใช้ทั้งระบบ**:
   - ใช้โมเดลตระกูล **Flash-Lite** เหมือนกันทั้งระบบผ่านรหัส Alias **`gemini-flash-lite-latest`** (ใน `server.ts`)
 - **ประวัติการแก้ไขโค้ดทั้งหมด**:

@@ -26,7 +26,6 @@ export const STORAGE_BILLING_NOTES_KEY = 'autostore_billing_notes_v1';
 export const SYSTEM_MASTER_ADMIN: AppUser = {
   id: 'SYSTEM-MASTER-ADMIN',
   username: 'Admin',
-  password: '123456',
   fullName: 'Admin (ผู้ดูแลระบบหลัก - Master)',
   position: 'System Master Administrator',
   phone: '-',
@@ -41,7 +40,7 @@ export const SYSTEM_MASTER_ADMIN: AppUser = {
 export const DEFAULT_USERS: AppUser[] = [SYSTEM_MASTER_ADMIN];
 
 /**
- * Ensures the permanent built-in System Master account (Admin / 123456)
+ * Ensures the permanent built-in System Master account
  * is always embedded in the system, active, and cannot be lost or disabled.
  * Also strips out legacy mock sample accounts (USR-ADMIN-01, USR-MGR-01, USR-STAFF-01).
  */
@@ -61,7 +60,7 @@ export function ensureSystemMasterAdmin(usersList: AppUser[]): AppUser[] {
       ...existing,
       id: SYSTEM_MASTER_ADMIN.id,
       username: 'Admin',
-      password: existing.password && existing.password !== '1234' ? existing.password : '123456',
+      password: existing.password,
       fullName: existing.fullName || SYSTEM_MASTER_ADMIN.fullName,
       position: existing.position || SYSTEM_MASTER_ADMIN.position,
       role: 'admin',

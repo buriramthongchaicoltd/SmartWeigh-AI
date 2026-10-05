@@ -40,10 +40,7 @@ import { isDocNumberMatch, extractDocReferences, checkDuplicateOrder, checkDupli
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
 import {
-  STORAGE_USERS_KEY,
-  STORAGE_ROLES_KEY,
   STORAGE_SETTINGS_KEY,
-  STORAGE_CURRENT_USER_KEY,
   STORAGE_DISMISSED_NOTIFS_KEY,
   STORAGE_BILLING_NOTES_KEY,
   SYSTEM_MASTER_ADMIN,
@@ -51,7 +48,6 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   DEFAULT_SYSTEM_SETTINGS,
   normalizeSystemSettings,
-  ensureSystemMasterAdmin,
   computeSystemNotifications
 } from './utils/systemConfig';
 import { CheckCircle2, RefreshCw, AlertTriangle, Database } from 'lucide-react';
@@ -243,12 +239,13 @@ export default function App() {
   const [pos, setPos] = useState<PurchaseOrder[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [lineInbox, setLineInbox] = useState<LineBillInboxItem[]>([]);
-  const [users, setUsers] = useState<AppUser[]>(DEFAULT_USERS);
+  const [users, setUsers] = useState<AppUser[]>([]);
   const [rolePermissions, setRolePermissions] = useState<Record<UserRole, RolePermissions>>(DEFAULT_ROLE_PERMISSIONS);
   const [billingNotes, setBillingNotes] = useState<BillingNoteRecord[]>([]);
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(DEFAULT_SYSTEM_SETTINGS);
-  const [currentUserId, setCurrentUserId] = useState<string>(SYSTEM_MASTER_ADMIN.id);
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
+  const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [authenticatedUser, setAuthenticatedUser] = useState<AppUser | null>(null);
+  const [isAuthChecked, setIsAuthChecked] = useState<boolean>(false);
   const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
 
   // Database Connection & Synchronization Status (100% Real Database Mode)
@@ -280,7 +277,7 @@ export default function App() {
         if (Array.isArray(d.projects)) setProjects(d.projects);
         if (Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
         if (Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
-        if (Array.isArray(d.users) && d.users.length > 0) setUsers(ensureSystemMasterAdmin(d.users));
+        if (Array.isArray(d.users)) setUsers(d.users);
         if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
 
         const hasDbOrdersOrStores = (d.orders?.length || 0) > 0 || (d.stores?.length || 0) > 0 || (d.pos?.length || 0) > 0;
@@ -344,17 +341,51 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchDatabaseData();
+    let cancelled = false;
+    const restoreSession = async () => {
+      try {
+        const response = await fetch('/api/auth/me');
+        if (!response.ok) {
+          if (!cancelled) setIsAuthChecked(true);
+          return;
+        }
+        const result = await response.json();
+        if (!cancelled && result.success && result.user) {
+          setAuthenticatedUser(result.user);
+          setCurrentUserId(result.user.id);
+          await fetchDatabaseData();
+        }
+      } catch (error) {
+        console.warn('[Auth] Could not restore login session:', error);
+      } finally {
+        if (!cancelled) setIsAuthChecked(true);
+      }
+    };
+    restoreSession();
+    return () => { cancelled = true; };
   }, [fetchDatabaseData]);
+
+  useEffect(() => {
+    if (!authenticatedUser) return;
+    const timer = setInterval(async () => {
+      try {
+        const response = await fetch('/api/auth/me');
+        if (response.status === 401) await handleLogout();
+      } catch (error) {
+        console.warn('[Auth] Session check failed:', error);
+      }
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [authenticatedUser]);
 
   // Active User & Current Role Permissions
   const currentUser = useMemo(() => {
     return (
+      authenticatedUser ||
       users.find(u => u.id === currentUserId && u.status === 'active') ||
-      users.find(u => u.status === 'active') ||
       DEFAULT_USERS[0]
     );
-  }, [users, currentUserId]);
+  }, [authenticatedUser, users, currentUserId]);
 
   const currentPermissions = useMemo(() => {
     return rolePermissions[currentUser.role] || DEFAULT_ROLE_PERMISSIONS.admin;
@@ -483,10 +514,6 @@ export default function App() {
   }, [systemSettings, isDbLoaded]);
 
   useEffect(() => {
-    safeSaveToLocalStorage(STORAGE_CURRENT_USER_KEY, currentUserId);
-  }, [currentUserId]);
-
-  useEffect(() => {
     safeSaveToLocalStorage(STORAGE_DISMISSED_NOTIFS_KEY, dismissedNotifIds);
   }, [dismissedNotifIds]);
 
@@ -506,10 +533,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!authenticatedUser) return;
     syncWebhookQueueToLocal();
     const timer = setInterval(syncWebhookQueueToLocal, 8000);
     return () => clearInterval(timer);
-  }, [syncWebhookQueueToLocal]);
+  }, [authenticatedUser, syncWebhookQueueToLocal]);
 
   const showToast = (message: string, type: 'success' | 'info' = 'success') => {
     setToast({ message, type });
@@ -562,25 +590,50 @@ export default function App() {
   };
 
   // User Auth & Management Handlers
-  const handleLoginSuccess = (loggedInUser: AppUser) => {
-    const nowIso = new Date().toISOString();
+  const handleLoginSuccess = async (loggedInUser: AppUser) => {
+    setAuthenticatedUser(loggedInUser);
     setCurrentUserId(loggedInUser.id);
-    setUsers(prev =>
-      prev.map(u => (u.id === loggedInUser.id ? { ...u, lastLoginAt: nowIso } : u))
-    );
-    setIsLoginModalOpen(false);
+    await fetchDatabaseData();
     showToast(`เข้าใช้งานในชื่อ "${loggedInUser.fullName}" (${rolePermissions[loggedInUser.role]?.label || loggedInUser.role})`);
   };
 
-  const handleSaveUser = (userToSave: AppUser, isNew: boolean) => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (error) {
+      console.warn('[Auth] Logout request failed:', error);
+    } finally {
+      setAuthenticatedUser(null);
+      setCurrentUserId('');
+      setUsers([]);
+      setIsDbLoaded(false);
+      setOrders([]);
+      setPos([]);
+      setStores([]);
+      setProjects([]);
+      setLineInbox([]);
+      setBillingNotes([]);
+      setIsAuthChecked(true);
+    }
+  };
+
+  const handleSaveUser = async (userToSave: AppUser, isNew: boolean) => {
+    const response = await fetch('/api/auth/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: userToSave })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) throw new Error(result.error || 'บันทึกบัญชีผู้ใช้ไม่สำเร็จ');
+    const savedUser: AppUser = result.user;
     setUsers(prev => {
-      if (isNew) return [...prev, userToSave];
-      return prev.map(u => (u.id === userToSave.id ? userToSave : u));
+      if (isNew) return [...prev, savedUser];
+      return prev.map(u => (u.id === savedUser.id ? savedUser : u));
     });
     showToast(
       isNew
-        ? `เพิ่มผู้ใช้งาน "${userToSave.fullName}" เรียบร้อยแล้ว`
-        : `อัปเดตข้อมูลผู้ใช้ "${userToSave.fullName}" เรียบร้อยแล้ว`
+        ? `เพิ่มผู้ใช้งาน "${savedUser.fullName}" เรียบร้อยแล้ว`
+        : `อัปเดตข้อมูลผู้ใช้ "${savedUser.fullName}" เรียบร้อยแล้ว`
     );
   };
 
@@ -601,14 +654,13 @@ export default function App() {
     }
 
     const nextStatus = target.status === 'active' ? 'suspended' : 'active';
-    setUsers(prev =>
-      prev.map(u => (u.id === userId ? { ...u, status: nextStatus } : u))
-    );
-    showToast(
-      nextStatus === 'suspended'
-        ? `ระงับการใช้งานบัญชี "${target.fullName}" ชั่วคราวแล้ว`
-        : `เปิดใช้งานบัญชี "${target.fullName}" ตามปกติแล้ว`
-    );
+    void handleSaveUser({ ...target, status: nextStatus, password: '' }, false).then(() => {
+      showToast(
+        nextStatus === 'suspended'
+          ? `ระงับการใช้งานบัญชี "${target.fullName}" ชั่วคราวแล้ว`
+          : `เปิดใช้งานบัญชี "${target.fullName}" ตามปกติแล้ว`
+      );
+    }).catch(error => showToast(error.message || 'อัปเดตสถานะผู้ใช้ไม่สำเร็จ', 'info'));
   };
 
   // Restore Backup Handler (Merge or Overwrite)
@@ -624,7 +676,7 @@ export default function App() {
       setStores(nextStores);
       setProjects(d.projects || []);
       setLineInbox(d.lineInbox || []);
-      setUsers(ensureSystemMasterAdmin(d.users || []));
+      setUsers(d.users || []);
       if (d.rolePermissions) setRolePermissions(d.rolePermissions);
       if (d.systemSettings) setSystemSettings(d.systemSettings);
       if (d.billingNotes) setBillingNotes(d.billingNotes);
@@ -2354,7 +2406,7 @@ export default function App() {
     if (cloudData.projects && Array.isArray(cloudData.projects)) setProjects(cloudData.projects);
     if (cloudData.billingNotes && Array.isArray(cloudData.billingNotes)) setBillingNotes(cloudData.billingNotes);
     if (cloudData.lineInbox && Array.isArray(cloudData.lineInbox)) setLineInbox(cloudData.lineInbox);
-    if (cloudData.users && Array.isArray(cloudData.users) && cloudData.users.length > 0) setUsers(ensureSystemMasterAdmin(cloudData.users));
+    if (cloudData.users && Array.isArray(cloudData.users)) setUsers(cloudData.users);
     if (cloudData.systemSettings) setSystemSettings(normalizeSystemSettings(cloudData.systemSettings));
     setIsDbConnected(true);
     setDbSyncTimestamp(new Date().toLocaleTimeString('th-TH'));
@@ -2369,6 +2421,20 @@ export default function App() {
 
   // Project count strictly from registered projects in `projects`
   const totalUniqueProjectsCount = projects.length;
+
+  if (!isAuthChecked) {
+    return <div className="min-h-screen flex items-center justify-center text-sm text-slate-500">กำลังตรวจสอบการเข้าสู่ระบบ...</div>;
+  }
+  if (!authenticatedUser) {
+    return (
+      <LoginModal
+        isOpen
+        companyName={systemSettings.companyName}
+        companyLogoUrl={systemSettings.companyLogoUrl}
+        onLoginSuccess={handleLoginSuccess}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex font-sans">
@@ -2394,7 +2460,7 @@ export default function App() {
         onCloseMobile={() => setIsMobileMenuOpen(false)}
         currentUser={currentUser}
         currentPermissions={currentPermissions}
-        onOpenLoginModal={() => setIsLoginModalOpen(true)}
+        onLogout={handleLogout}
         companyName={systemSettings.companyName}
         companyLogoUrl={systemSettings.companyLogoUrl}
       />
@@ -2435,7 +2501,7 @@ export default function App() {
           dismissedNotifIds={dismissedNotifIds}
           onDismissNotification={(id) => setDismissedNotifIds(prev => [...prev, id])}
           onClearDismissedNotifications={() => setDismissedNotifIds([])}
-          onOpenLoginModal={() => setIsLoginModalOpen(true)}
+          onLogout={handleLogout}
           isDbConnected={isDbConnected}
           dbSyncTimestamp={dbSyncTimestamp}
           onSyncDb={fetchDatabaseData}
@@ -2638,7 +2704,6 @@ export default function App() {
               pos={pos}
               onSaveUser={handleSaveUser}
               onToggleUserStatus={handleToggleUserStatus}
-              onSwitchCurrentUser={handleLoginSuccess}
               onUpdateRolePermissions={(updated) => {
                 setRolePermissions(updated);
                 showToast('บันทึกตารางกำหนดสิทธิ์ (Role & Permission) เรียบร้อยแล้ว');
@@ -2669,19 +2734,6 @@ export default function App() {
           )}
         </main>
       </div>
-
-      {/* Login & Quick User Role Switcher Modal */}
-      <LoginModal
-        isOpen={isLoginModalOpen}
-        canClose={true}
-        users={users}
-        currentUser={currentUser}
-        rolePermissions={rolePermissions}
-        companyName={systemSettings.companyName}
-        companyLogoUrl={systemSettings.companyLogoUrl}
-        onLoginSuccess={handleLoginSuccess}
-        onClose={() => setIsLoginModalOpen(false)}
-      />
 
       {/* Unified AI Scan Modal for All Document Types (DO, PO, Dest Weighbridge, Tax Invoice) */}
       <ScanModal

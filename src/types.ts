@@ -410,7 +410,7 @@ export type UserRole = 'admin' | 'manager' | 'user';
 export interface AppUser {
   id: string;
   username: string;
-  password: string;
+  password?: string;
   fullName: string;
   position: string;
   phone?: string;
@@ -533,6 +533,5 @@ export interface DatabaseConnectionStatus {
     billing_notes: boolean;
   };
 }
-
 
 

@@ -4,6 +4,27 @@
 
 ---
 
+## [2026-10-05] System Review and Operations Documentation Refresh
+
+### ทบทวนและบันทึกสถานะ
+- ทวน architecture handover, database/storage blueprint, checkpoints และ commits ล่าสุดของ LINE OCR recovery, AI re-scan, การแนบรูปในฟอร์มเพิ่ม DO และ Drive audit
+- บันทึกผล audit Production ที่ผู้ใช้รายงานเวลา 13:23 น.: LINE 92 rows, Zone 00 115 files, มี Drive ID 86 rows/86 unique IDs, ไม่มี Drive ID 6 rows, ไม่มี database reference 29 files, duplicate IDs 0, missing non-verified files 0 และ verified ค้างใน Zone 00 จำนวน 0
+- ย้ำว่ารายงาน audit อิง database IDs ไม่ได้ตรวจเนื้อหาภาพ; 29 ไฟล์ยังไม่ยืนยันว่าเป็นขยะ และ snapshot ไม่ใช่ยอดปัจจุบันถาวร
+- บันทึกว่าเคยพบ timeout/HTML response ระหว่าง audit แต่ภายหลังมีผล audit สำเร็จ; สาเหตุของ failure เดิมยังไม่ได้ยืนยันจาก Render logs
+- ปรับ handover ไม่ให้อ้างว่าระบบตรวจสอบครบ 100% หรือออนไลน์ 100%; เพิ่ม snapshot พร้อมข้อจำกัดของการจับคู่ด้วย ID
+- เพิ่มใน database blueprint ว่า audit ไม่ได้ตรวจรูปด้วย hash, ผล Production เป็น snapshot, การเปลี่ยน GAS ต้อง deploy แยก และสาเหตุของ audit failure เดิมยังไม่ยืนยัน; คงข้อเท็จจริงเดิมเรื่อง scheduler แบบ best-effort ไว้
+- ทวนเส้นทางล็อกอิน, account switcher, Supabase client และ API ฝั่ง server; พบ service-role credential ในไฟล์ config ที่ track และ API ไม่มี server-side auth ก่อนแก้งานในรอบนี้
+- เพิ่ม Username/Password authentication ฝั่ง server, scrypt password hash/legacy upgrade, HttpOnly session cookie, route guard, Admin-only user/config routes และ one-time Admin bootstrap ผ่าน `INITIAL_ADMIN_PASSWORD` เมื่อ `app_users` ว่าง
+- นำการแสดงรหัสผ่าน/ปุ่มสลับบัญชีออกจาก UI; หน้าจัดการบัญชีเหลือ Username, Password, ชื่อที่แสดง และ Role พร้อมอัปเดต/เปลี่ยนรหัสผ่านผ่าน API ที่ต้องเป็น Admin
+- แก้ handover, blueprint และ README ให้ระบุการ login/session และข้อจำกัดที่ยังเปิด: role policy บาง action ต้องทบทวน และ service-role credential ยังไม่ได้หมุน
+- ไม่มีการแก้ข้อมูล Production หรือหมุน secret; ทดสอบ `npm run lint`, `npm run build` และ `git diff --check` ผ่าน
+
+### การเปลี่ยนแปลง
+- อัปเดต `HANDOVER_DOCUMENTATION.md`, `DATABASE_STORAGE_BLUEPRINT.md` และบันทึกงานนี้
+- เพิ่มเติมรอบนี้มีการเปลี่ยนโค้ด authentication และ UI บัญชีผู้ใช้ตามที่ผู้ใช้แจ้ง
+
+---
+
 ## [2026-10-05] Reduce Timeout Risk in LINE Drive Audit Listing
 
 ### ปัญหา

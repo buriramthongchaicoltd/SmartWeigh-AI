@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
   AppUser,
   UserRole,
@@ -16,7 +16,6 @@ import {
   Ban,
   CheckCircle2,
   RefreshCw,
-  LogIn,
   KeyRound,
   Building2,
   Lock,
@@ -32,9 +31,8 @@ interface UsersRolesViewProps {
   projects: ProjectRecord[];
   orders: OrderRecord[];
   pos: PurchaseOrder[];
-  onSaveUser: (user: AppUser, isNew: boolean) => void;
+  onSaveUser: (user: AppUser, isNew: boolean) => Promise<void>;
   onToggleUserStatus: (userId: string) => void;
-  onSwitchCurrentUser: (user: AppUser) => void;
   onUpdateRolePermissions: (updated: Record<UserRole, RolePermissions>) => void;
   showToast: (msg: string, type?: 'success' | 'info') => void;
 }
@@ -120,7 +118,6 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
   pos,
   onSaveUser,
   onToggleUserStatus,
-  onSwitchCurrentUser,
   onUpdateRolePermissions,
   showToast
 }) => {
@@ -132,30 +129,15 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
-  const [position, setPosition] = useState('');
-  const [phone, setPhone] = useState('');
   const [role, setRole] = useState<UserRole>('user');
-  const [assignedProjects, setAssignedProjects] = useState<string[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
-
-  // Collect all unique project names across system
-  const allProjectNames = useMemo(() => {
-    const set = new Set<string>();
-    projects.forEach(p => { if (p.name?.trim()) set.add(p.name.trim()); });
-    orders.forEach(o => { if (o.col2?.trim()) set.add(o.col2.trim()); });
-    pos.forEach(p => { if (p.projectId?.trim()) set.add(p.projectId.trim()); });
-    return Array.from(set);
-  }, [projects, orders, pos]);
 
   const openAddUserModal = () => {
     setEditingUser(null);
     setUsername('');
-    setPassword('123456');
+    setPassword('');
     setFullName('');
-    setPosition('เจ้าหน้าที่ตรวจรับบิลหน้างาน');
-    setPhone('');
     setRole('user');
-    setAssignedProjects([]);
     setFormError(null);
     setIsUserModalOpen(true);
   };
@@ -163,24 +145,21 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
   const openEditUserModal = (u: AppUser) => {
     setEditingUser(u);
     setUsername(u.username);
-    setPassword(u.password);
+    setPassword('');
     setFullName(u.fullName);
-    setPosition(u.position);
-    setPhone(u.phone || '');
     setRole(u.role);
-    setAssignedProjects(u.assignedProjects || []);
     setFormError(null);
     setIsUserModalOpen(true);
   };
 
-  const handleUserSubmit = (e: React.FormEvent) => {
+  const handleUserSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
     const isMaster = Boolean(editingUser?.isSystemMaster);
     const cleanUsername = isMaster ? 'Admin' : username.trim();
-    if (!cleanUsername || !fullName.trim() || !password.trim()) {
-      setFormError('กรุณากรอก Username, รหัสผ่าน และชื่อ-นามสกุลให้ครบถ้วน');
+    if (!cleanUsername || !fullName.trim() || (!editingUser && !password.trim())) {
+      setFormError('กรุณากรอก Username, ชื่อที่แสดง และรหัสผ่านสำหรับบัญชีใหม่');
       return;
     }
 
@@ -193,28 +172,26 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
     }
 
     const payload: AppUser = {
-      id: editingUser ? editingUser.id : `USR-${Date.now().toString().slice(-5)}`,
+      id: editingUser ? editingUser.id : `USR-${crypto.randomUUID()}`,
       username: cleanUsername,
-      password: password.trim(),
+      password,
       fullName: fullName.trim(),
-      position: position.trim() || 'เจ้าหน้าที่',
-      phone: phone.trim(),
+      position: editingUser?.position || '',
+      phone: editingUser?.phone || '',
       role: isMaster ? 'admin' : role,
-      assignedProjects: isMaster ? [] : assignedProjects,
+      assignedProjects: isMaster ? [] : (editingUser?.assignedProjects || []),
       status: isMaster ? 'active' : (editingUser ? editingUser.status : 'active'),
       isSystemMaster: isMaster,
       createdAt: editingUser ? editingUser.createdAt : new Date().toISOString(),
       lastLoginAt: editingUser?.lastLoginAt
     };
 
-    onSaveUser(payload, !editingUser);
-    setIsUserModalOpen(false);
-  };
-
-  const toggleProjectAssignment = (projName: string) => {
-    setAssignedProjects(prev =>
-      prev.includes(projName) ? prev.filter(p => p !== projName) : [...prev, projName]
-    );
+    try {
+      await onSaveUser(payload, !editingUser);
+      setIsUserModalOpen(false);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'บันทึกบัญชีผู้ใช้ไม่สำเร็จ');
+    }
   };
 
   const handleToggleMenuPermission = (targetRole: UserRole, tabId: string) => {
@@ -274,7 +251,7 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
               จัดการผู้ใช้งาน & กำหนดสิทธิ์การเข้าถึง (Users, Roles & Permissions)
             </h2>
             <p className="text-xs text-slate-500">
-              แยกบัญชีผู้ใช้งาน กำหนดสิทธิ์ Admin / Manager / User รายเมนู และสลับบัญชีทดสอบได้ในคลิกเดียว
+              จัดการบัญชีผู้ใช้งานและกำหนดสิทธิ์ Admin / Manager / User
             </p>
           </div>
         </div>
@@ -334,8 +311,8 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
               <thead>
                 <tr className="bg-slate-100/80 border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase">
                   <th className="py-3 px-4">#</th>
-                  <th className="py-3 px-4">ชื่อ-นามสกุล / ตำแหน่ง</th>
-                  <th className="py-3 px-4">Username / รหัสผ่าน</th>
+                  <th className="py-3 px-4">ชื่อ-นามสกุล / ชื่อที่แสดง</th>
+                  <th className="py-3 px-4">Username</th>
                   <th className="py-3 px-4">บทบาท (Role)</th>
                   <th className="py-3 px-4">ขอบเขตโครงการที่ดูแล</th>
                   <th className="py-3 px-4 text-center">ประวัติบันทึกบิล</th>
@@ -383,7 +360,6 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
                       </td>
                       <td className="py-3.5 px-4 font-mono">
                         <div className="font-bold text-slate-800">{u.username}</div>
-                        <div className="text-[10px] text-slate-400">รหัส: {u.password}</div>
                       </td>
                       <td className="py-3.5 px-4">
                         <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-[11px] font-bold border ${roleInfo?.badgeColor || 'bg-slate-100 text-slate-700 border-slate-200'}`}>
@@ -428,17 +404,6 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="inline-flex items-center gap-1.5">
-                          {u.status === 'active' && !isCurrent && (
-                            <button
-                              type="button"
-                              onClick={() => onSwitchCurrentUser(u)}
-                              className="px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold transition flex items-center gap-1 cursor-pointer"
-                              title="สลับไปใช้งานในชื่อบัญชีนี้ทันที เพื่อทดสอบมุมมองและสิทธิ์"
-                            >
-                              <LogIn className="w-3.5 h-3.5" />
-                              <span>สลับใช้</span>
-                            </button>
-                          )}
                           <button
                             type="button"
                             onClick={() => openEditUserModal(u)}
@@ -649,124 +614,52 @@ export const UsersRolesView: React.FC<UsersRolesViewProps> = ({
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">
-                    รหัสผ่าน (Password) *
+                    รหัสผ่าน (Password) {editingUser ? '(เว้นว่างหากไม่เปลี่ยน)' : '*'}
                   </label>
                   <div className="relative">
                     <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
                     <input
-                      type="text"
+                      type="password"
                       value={password}
                       onChange={e => setPassword(e.target.value)}
-                      placeholder="เช่น 123456"
+                      placeholder={editingUser ? 'กำหนดรหัสใหม่เมื่อจะเปลี่ยน' : 'กำหนดรหัสผ่าน'}
                       className="w-full pl-8 pr-3 py-2 rounded-xl border border-slate-300 font-mono focus:border-indigo-600 outline-none"
-                      required
+                      required={!editingUser}
                     />
                   </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    ชื่อ-นามสกุล / ชื่อที่แสดงในบิล *
-                  </label>
-                  <input
-                    type="text"
-                    value={fullName}
-                    onChange={e => setFullName(e.target.value)}
-                    placeholder="เช่น ช่างเอก (หน้างานพระราม 3)"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:border-indigo-600 outline-none"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    ตำแหน่งงาน
-                  </label>
-                  <input
-                    type="text"
-                    value={position}
-                    onChange={e => setPosition(e.target.value)}
-                    placeholder="เช่น เจ้าหน้าที่สโตร์หน้างาน"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:border-indigo-600 outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    บทบาทและระดับสิทธิ์ (Role) *
-                  </label>
-                  <select
-                    value={editingUser?.isSystemMaster ? 'admin' : role}
-                    onChange={e => setRole(e.target.value as UserRole)}
-                    disabled={Boolean(editingUser?.isSystemMaster)}
-                    className={`w-full px-3 py-2 rounded-xl border border-slate-300 bg-white font-semibold focus:border-indigo-600 outline-none ${
-                      editingUser?.isSystemMaster ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''
-                    }`}
-                  >
-                    <option value="admin">ผู้ดูแลระบบสูงสุด (Admin)</option>
-                    <option value="manager">ผู้จัดการ / บัญชี (Manager)</option>
-                    <option value="user">เจ้าหน้าที่หน้างาน (User / Staff)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    เบอร์โทรศัพท์ติดต่อ
-                  </label>
-                  <input
-                    type="text"
-                    value={phone}
-                    onChange={e => setPhone(e.target.value)}
-                    placeholder="เช่น 081-234-5678"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:border-indigo-600 outline-none"
-                  />
-                </div>
-              </div>
-
-              {/* Project Assignment */}
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">
-                    โครงการที่รับผิดชอบ (ไม่ติ๊ก = ดูแลได้ทุกโครงการ)
-                  </label>
-                  {assignedProjects.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setAssignedProjects([])}
-                      className="text-[11px] text-indigo-600 hover:underline cursor-pointer"
-                    >
-                      ล้างตัวเลือก (ให้ดูแลทุกโครงการ)
-                    </button>
-                  )}
-                </div>
-                {allProjectNames.length === 0 ? (
-                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-500 text-[11px]">
-                    ยังไม่มีโครงการในระบบ (สามารถเพิ่มโครงการได้ที่เมนู ทะเบียนโครงการ)
-                  </div>
-                ) : (
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 max-h-36 overflow-y-auto flex flex-wrap gap-2">
-                    {allProjectNames.map(proj => {
-                      const active = assignedProjects.includes(proj);
-                      return (
-                        <button
-                          key={proj}
-                          type="button"
-                          onClick={() => toggleProjectAssignment(proj)}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
-                            active
-                              ? 'bg-emerald-600 text-white border-emerald-600'
-                              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
-                          }`}
-                        >
-                          {active ? '✓ ' : '+ '}
-                          {proj}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                <label className="block font-bold text-slate-700 mb-1">
+                  ชื่อ-นามสกุล / ชื่อที่แสดงในบิล *
+                </label>
+                <input
+                  type="text"
+                  value={fullName}
+                  onChange={e => setFullName(e.target.value)}
+                  placeholder="เช่น ช่างเอก (หน้างานพระราม 3)"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:border-indigo-600 outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  บทบาทและระดับสิทธิ์ (Role) *
+                </label>
+                <select
+                  value={editingUser?.isSystemMaster ? 'admin' : role}
+                  onChange={e => setRole(e.target.value as UserRole)}
+                  disabled={Boolean(editingUser?.isSystemMaster)}
+                  className={`w-full px-3 py-2 rounded-xl border border-slate-300 bg-white font-semibold focus:border-indigo-600 outline-none ${
+                    editingUser?.isSystemMaster ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''
+                  }`}
+                >
+                  <option value="admin">ผู้ดูแลระบบสูงสุด (Admin)</option>
+                  <option value="manager">ผู้จัดการ / บัญชี (Manager)</option>
+                  <option value="user">เจ้าหน้าที่หน้างาน (User / Staff)</option>
+                </select>
               </div>
 
               <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-200">

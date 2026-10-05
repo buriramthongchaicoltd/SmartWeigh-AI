@@ -3155,7 +3155,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <td className="py-2 px-3 font-bold text-slate-900">ผู้ใช้งาน & สิทธิ์ / ตั้งค่าระบบ</td>
                     <td className="py-2 px-3 font-mono text-[11px] text-slate-500">UsersRolesView.tsx / SystemSettingsView.tsx</td>
                     <td className="py-2 px-3"><span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">พร้อมใช้งาน</span></td>
-                    <td className="py-2 px-3">ระบบสิทธิ์ 3 ระดับ (Admin, Manager, User), บัญชีมาสเตอร์ฝังถาวร (Admin / 123456), ตั้งค่าบริษัท และสำรอง/กู้คืนไฟล์ .json</td>
+                    <td className="py-2 px-3">ระบบบัญชี Username/Password และสิทธิ์ 3 ระดับ (Admin, Manager, User), ตั้งค่าบริษัท และสำรอง/กู้คืนไฟล์ .json</td>
                   </tr>
                 </tbody>
               </table>

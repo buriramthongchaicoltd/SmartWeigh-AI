@@ -3,7 +3,7 @@
 
 **โครงการ:** ระบบบริหารคลังวัสดุ ตั๋วชั่ง และใบสั่งซื้ออัตโนมัติ (AutoStore & 39-Column ERP)  
 **องค์กร:** บริษัท บุรีรัมย์ธงชัยก่อสร้าง จำกัด  
-**วัตถุประสงค์ของเอกสาร:** ใช้เป็นพิมพ์เขียวอ้างอิงมาตรฐาน (Reference Architecture) สำหรับการเชื่อมต่อฐานข้อมูลจริง เพื่อให้การพัฒนาต่อยอดเป็นไปตามโครงสร้างเดียวกัน 100%
+**วัตถุประสงค์ของเอกสาร:** ใช้เป็นพิมพ์เขียวอ้างอิง (Reference Architecture) สำหรับโครงสร้างฐานข้อมูลและจัดเก็บไฟล์; รายละเอียดการทำงานจริงต้องยืนยันกับโค้ดและสถานะบริการ ไม่ถือว่าการระบุไว้ในแผนหมายถึงได้เปิดใช้งานหรือทดสอบครบถ้วน
 
 ---
 
@@ -15,6 +15,13 @@
 | :--- | :--- | :--- |
 | **1. Core Transactional Database** | **Supabase Cloud (PostgreSQL + Realtime)** | จัดเก็บข้อมูลตาราง 39 คอลัมน์, ใบสั่งซื้อ (PO), ตั๋วชั่งปลายทาง, ใบกำกับภาษี, ทะเบียนร้านค้า, โครงการ, กล่องพัก LINE, สิทธิ์ผู้ใช้งาน และรหัสอ้างอิงไฟล์ (`drive_file_id`, `drive_folder_id`) พร้อมซิงก์หน้าจอทุกเครื่องแบบ Realtime |
 | **2. File Storage & Zero-Junk Engine** | **Google Drive API (Service Account / OAuth2)** | จัดเก็บรูปถ่ายบิลและเอกสารแนบทั้งหมด แยกโฟลเดอร์ตามประเภทและเลขที่เอกสารอัตโนมัติ ย้ายไฟล์มารวมชุดเมื่อชนบิลสำเร็จ และลบไฟล์เก่า/ไฟล์ที่ถูกลบออกจากระบบทันที (Zero-Junk Cleanup) |
+
+### สถานะและข้อจำกัดด้านความปลอดภัยหลังทวนโค้ด
+- ไฟล์ `.supabase_config.json` ที่ถูก track มี Supabase service-role credential และ `getSupabaseClient()` เลือกใช้ service-role key ก่อน anon key; service role ข้าม RLS ได้ ให้ถือว่า credential นี้ compromised และหมุน/เพิกถอนก่อนใช้งานต่อ โดยย้ายค่าที่ใช้จริงไปยัง runtime secret และตรวจสอบ Git history/การใช้งานจริง ห้ามคัดลอกค่าลับลงเอกสารหรือ log
+- API ที่ไม่ใช่ public health/login/LINE webhook บังคับ server session; API ตั้งค่าระบบและจัดการผู้ใช้จำกัด Admin. ยังคงต้องทบทวนและบังคับสิทธิ์ role ราย action สำหรับข้อมูลธุรกิจทุกเส้นทาง ไม่ใช้ role UI เป็น security boundary
+- Login ใช้ Username/Password จาก `app_users`, hash scrypt, HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และจะหมดเมื่อ process restart/deploy. Legacy plaintext password จะถูก hash เมื่อ login สำเร็จ
+- ถ้าตาราง `app_users` ยังว่าง ให้ตั้ง `INITIAL_ADMIN_PASSWORD` ใน environment ชั่วคราวและ login เป็น `Admin` เพื่อ bootstrap บัญชีแรก; ค่านี้ถูกลบจาก process หลังบันทึกบัญชีสำเร็จ
+- การแก้ authentication นี้ไม่ได้หมุน Supabase service-role credential และไม่ได้ตรวจฐานข้อมูล/Production จริง; ต้องทำการ rotate credential และทบทวน API policy แยก
 
 ---
 
@@ -72,6 +79,12 @@
 **LINE Inbox Drive Sync reconciliation:** สำหรับ LINE row ที่ยังไม่มี `drive_file_id` ระบบคำนวณ SHA-256 จากภาพต้นฉบับและเทียบกับไฟล์ภาพในโฟลเดอร์ `00` ที่ไม่มี reference ในทุกตารางก่อนสร้างไฟล์ใหม่ หาก bytes ตรงกันจะเชื่อม row กับไฟล์เดิมแบบหนึ่งไฟล์ต่อหนึ่งรายการ; สร้างไฟล์ใหม่เฉพาะเมื่อไม่พบเนื้อหาตรงกัน และหยุดอย่างชัดเจนเมื่อมี candidate เกิน 200 ไฟล์เพื่อควบคุมงาน Drive ไฟล์ที่ยังไม่จับคู่จะไม่ถูกลบหรือกักกันอัตโนมัติ ต้องตรวจ audit ก่อน
 
 **Daily LINE OCR recovery:** งานประจำวันเวลา 06:00 น. (Asia/Bangkok) ตรวจ `line_inbox` ย้อนหลัง 3 วันเพื่อ retry เฉพาะแถวที่ยังไม่มี Drive ID หรือ OCR ล้มเหลว/เลขเอกสารว่าง; ข้าม `verified` และ `ignored_non_bill`. ถ้ามี Drive ID อยู่แล้ว จะดึงต้นฉบับจาก LINE มาสแกนซ้ำและคงไฟล์เดิม ไม่สร้างไฟล์ซ้ำ; เมื่อได้เลขที่จึงเปลี่ยนสถานะเป็น `pending_review`, ถ้ายังอ่านไม่ได้คง `scan_failed` เพื่อรอบถัดไป. รูปต้นฉบับจาก LINE อาจดึงไม่ได้เมื่อพ้นช่วง retention 3 วัน จึงควรเก็บภาพใน Drive ให้สำเร็จก่อนเสมอ
+
+**LINE Inbox ↔ Drive audit interpretation:** `POST /api/drive/audit-line-inbox` เป็นรายงานอ้างอิง ID ไม่ใช่การตรวจภาพด้วยสายตาหรือเทียบ hash. ระบบเปรียบเทียบ `line_inbox.drive_file_id` กับไฟล์ใน Zone 00 และแยกไฟล์ที่ยังถูก `orders`/`purchase_orders` อ้างอิงออกจากไฟล์ที่ไม่มี reference ในทั้งสามตาราง. จำนวน LINE ที่ไม่มี Drive ID และไฟล์ที่ไม่มี database reference ยังไม่พิสูจน์ว่ารูปภาพไม่ตรงกันหรือเป็นขยะ; อย่าลบหรือกักกันจากจำนวนเพียงอย่างเดียว. การตรวจ hash ของรูปเดิมเป็นขั้นตอนคนละ flow ใน `/api/drive/sync-inbox-images` เพื่อพยายาม reuse candidate ก่อน upload.
+
+**Production snapshot (2026-10-05 13:23 Asia/Bangkok; reported by user):** LINE 92 rows; Zone 00 115 files; 86 LINE rows with 86 unique Drive IDs; 6 rows without Drive ID; 29 files without reference in `line_inbox`, `orders`, or `purchase_orders`; duplicate LINE Drive IDs 0; unverified LINE references missing from Zone 00 0; verified rows still in Zone 00 0. These counts are time-specific and may change. The 29 files were not confirmed as junk by image-content comparison.
+
+**Apps Script audit performance/deployment:** ในโหมด GAS action `list_zone_files` ส่งเฉพาะ file ID, name, created time และ view URL เพื่อลด metadata calls. การแก้ source `google_apps_script_drive.gs` ใน GitHub ไม่ได้ deploy ไปยัง Google Apps Script อัตโนมัติ; ต้อง deploy version ที่มีการแก้เอง. การตรวจ audit เคยพบ timeout/response ที่ไม่ใช่ JSON เป็นบางครั้ง ก่อนมีรายงาน audit สำเร็จ; ยังไม่มี Render log ที่ยืนยันต้นเหตุ จึงไม่ถือว่าปัญหา transient ถูกพิสูจน์หรือกำจัดได้แล้ว
 
 ---
 

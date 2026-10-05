@@ -80,7 +80,7 @@ interface HeaderProps {
   dismissedNotifIds?: string[];
   onDismissNotification?: (id: string) => void;
   onClearDismissedNotifications?: () => void;
-  onOpenLoginModal?: () => void;
+  onLogout?: () => void;
   // Database connection status (shown as compact indicator in header)
   isDbConnected?: boolean;
   dbSyncTimestamp?: string | null;
@@ -151,7 +151,7 @@ const TAB_META: Record<MainTabType, { label: string; subtitle: string; badgeText
   },
   users: {
     label: 'ผู้ใช้งาน & กำหนดสิทธิ์ (Users & Roles)',
-    subtitle: 'จัดการบัญชีผู้ใช้งาน แยกสิทธิ์ Admin / Manager / User รายเมนู และสลับบัญชีทดสอบในคลิกเดียว',
+    subtitle: 'จัดการบัญชี Username / Password และกำหนดสิทธิ์ Admin / Manager / User',
     badgeText: 'ผู้ดูแลระบบ • RBAC',
     badgeColor: 'bg-rose-50 text-rose-700 border-rose-200'
   },
@@ -180,7 +180,7 @@ export const Header: React.FC<HeaderProps> = ({
   dismissedNotifIds = [],
   onDismissNotification,
   onClearDismissedNotifications,
-  onOpenLoginModal,
+  onLogout,
   isDbConnected,
   dbSyncTimestamp,
   onSyncDb,
@@ -257,7 +257,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Right: Context Action Controls + Notification Bell + User Profile Switcher */}
+        {/* Right: Context Action Controls + Notification Bell */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* 1. เมนู ใบส่งของ / ใบส่งสินค้า (DO) */}
           {activeTab === 'orders' && (
@@ -552,7 +552,7 @@ export const SidebarNav: React.FC<{
   onCloseMobile: () => void;
   currentUser?: AppUser;
   currentPermissions?: RolePermissions;
-  onOpenLoginModal?: () => void;
+  onLogout?: () => void;
   companyName?: string;
   companyLogoUrl?: string;
 }> = ({
@@ -576,7 +576,7 @@ export const SidebarNav: React.FC<{
   onCloseMobile,
   currentUser,
   currentPermissions,
-  onOpenLoginModal,
+  onLogout,
   companyName = 'บริษัท บุรีรัมย์ธงชัยก่อสร้าง จำกัด',
   companyLogoUrl = DEFAULT_COMPANY_LOGO_URL
 }) => {
@@ -998,11 +998,11 @@ export const SidebarNav: React.FC<{
 
       {/* Bottom User Card & Collapse Button */}
       <div className="p-3 border-t border-slate-800 space-y-2">
-        {currentUser && onOpenLoginModal && (
+        {currentUser && onLogout && (
           <button
             type="button"
-            onClick={onOpenLoginModal}
-            title="คลิกเพื่อสลับผู้ใช้งาน / ทดสอบสิทธิ์"
+            onClick={onLogout}
+            title="ออกจากระบบ"
             className={`w-full flex items-center ${
               collapsed ? 'justify-center p-2' : 'justify-between px-2.5 py-2'
             } rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 text-left transition cursor-pointer`}
@@ -1015,7 +1015,7 @@ export const SidebarNav: React.FC<{
                 <div className="min-w-0">
                   <div className="text-[11px] font-bold text-white truncate">{currentUser.fullName}</div>
                   <div className="text-[10px] text-sky-400 truncate">
-                    {currentPermissions?.label || currentUser.role} • สลับบัญชี
+                    {currentPermissions?.label || currentUser.role} • ออกจากระบบ
                   </div>
                 </div>
               )}
