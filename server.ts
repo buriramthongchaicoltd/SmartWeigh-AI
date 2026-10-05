@@ -1729,13 +1729,46 @@ app.get('/api/line/inbox/image/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // Case 3: Both image_url and LINE API unavailable → return drive link so client can open it
+    // Case 3: Both image_url and LINE API unavailable → try to proxy download from Google Drive
     if (data.drive_web_view_link) {
+      // Extract fileId from drive link and build export URL
+      const fileIdMatch = (data.drive_web_view_link as string).match(/\/d\/([a-zA-Z0-9_-]+)/);
+      if (fileIdMatch) {
+        const fileId = fileIdMatch[1];
+        // Try Google Drive export URL (works for publicly shared files)
+        const driveExportUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+        try {
+          const driveResp = await fetch(driveExportUrl, {
+            headers: { 'User-Agent': 'SmartWeighAI-Server/1.0' },
+            redirect: 'follow'
+          });
+          if (driveResp.ok) {
+            const contentType = driveResp.headers.get('content-type') || 'image/jpeg';
+            // Only proxy if it's actually an image (not a Drive HTML confirmation page)
+            if (contentType.startsWith('image/')) {
+              const arrayBuf = await driveResp.arrayBuffer();
+              const b64 = Buffer.from(arrayBuf).toString('base64');
+              const base64Image = `data:${contentType};base64,${b64}`;
+              console.log(`[inbox/image] Proxied from Drive: fileId=${fileId}, size=${b64.length}`);
+              return res.json({
+                success: true,
+                image: base64Image,
+                driveWebViewLink: data.drive_web_view_link,
+                source: 'drive_proxy'
+              });
+            }
+          }
+        } catch (driveProxyErr: any) {
+          console.warn(`[inbox/image] Drive proxy failed for ${fileId}:`, driveProxyErr?.message);
+        }
+      }
+      // Drive proxy failed — return the link for client to handle
       return res.json({
         success: false,
         image: null,
         driveWebViewLink: data.drive_web_view_link,
-        error: 'รูปภาพถูกเก็บใน Google Drive แล้ว กรุณาเปิดดูจากลิงก์ Drive',
+        driveDirectUrl: fileIdMatch ? `https://drive.google.com/uc?export=view&id=${fileIdMatch[1]}` : null,
+        error: 'ไม่สามารถโหลดรูปภาพจาก Google Drive ได้โดยตรง',
         canOpenInDrive: true
       });
     }
