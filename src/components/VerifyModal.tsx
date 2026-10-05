@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   Save, 
@@ -18,7 +18,8 @@ import {
   Link2,
   PenTool,
   MessageSquare,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Upload
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
@@ -26,6 +27,7 @@ import { checkDuplicateOrder, isDocNumberMatch } from '../utils/poReconciliation
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
 import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
+import { optimizeImageForAI } from '../utils/imageProcessing';
 
 interface VerifyModalProps {
   isOpen: boolean;
@@ -67,6 +69,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [projectMissingError, setProjectMissingError] = useState(false);
   const [remappedNotice, setRemappedNotice] = useState<string | null>(null);
   const [isRescanningAI, setIsRescanningAI] = useState(false);
+  const [isPreparingImage, setIsPreparingImage] = useState(false);
+  const [hasAttachedImage, setHasAttachedImage] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (orderData) {
@@ -125,6 +130,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setConfirmDuplicateOverride(false);
       setProjectMissingError(false);
       setRemappedNotice(null);
+      setHasAttachedImage(false);
 
       // Preserve a document type already classified by the shared OCR pipeline.
       let detectedType: DocumentType = normalized.docType || 'delivery_order';
@@ -383,10 +389,36 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       } else {
         setRemappedNotice(`⚠️ ${res.error || 'ไม่สามารถสแกนใหม่ได้ แต่ข้อมูลเดิมยังอยู่ครบ'}`);
       }
-    } catch {
-      setRemappedNotice('⚠️ เกิดข้อผิดพลาดในการสแกนซ้ำ แต่ข้อมูลเดิมยังอยู่ครบ');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      setRemappedNotice(`⚠️ สแกนภาพไม่สำเร็จ: ${message} (ข้อมูลเดิมยังอยู่ครบ)`);
     } finally {
       setIsRescanningAI(false);
+    }
+  };
+
+  const handleAttachImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setRemappedNotice('⚠️ กรุณาเลือกไฟล์รูปภาพ เช่น JPG, PNG หรือ WEBP');
+      return;
+    }
+
+    setIsPreparingImage(true);
+    setRemappedNotice('กำลังเตรียมรูปภาพสำหรับแนบ...');
+    try {
+      const image = await optimizeImageForAI(file);
+      setCurrentImage(image);
+      setForm(previous => ({ ...previous, image }));
+      setHasAttachedImage(true);
+      setRemappedNotice('แนบรูปแล้ว — กดบันทึกเพื่อแนบอย่างเดียว หรือกดปุ่ม AI เพื่ออ่านข้อมูลจากรูป');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      setRemappedNotice(`⚠️ เตรียมรูปภาพไม่สำเร็จ: ${message}`);
+    } finally {
+      setIsPreparingImage(false);
     }
   };
 
@@ -558,11 +590,37 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
           
           {/* Left Column: Image Viewer with Rotate & Crop (5 Cols) */}
           <div className="md:col-span-5 bg-slate-950 p-3 flex flex-col h-full overflow-hidden">
-            <ImageDocViewer
-              image={currentImage}
-              title="ภาพเอกสารต้นฉบับ"
-              onImageChange={(newImg) => setCurrentImage(newImg)}
-            />
+            {!form.id && (
+              <div className="mb-2 flex items-center gap-2">
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="sr-only"
+                  aria-label="เลือกภาพเอกสารแนบ"
+                  onChange={handleAttachImage}
+                />
+                <button
+                  type="button"
+                  onClick={() => imageInputRef.current?.click()}
+                  disabled={isPreparingImage || isRescanningAI}
+                  className="min-h-10 px-3 py-2 rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 transition cursor-pointer"
+                >
+                  <Upload className="w-4 h-4 text-sky-300" />
+                  {isPreparingImage ? 'กำลังเตรียมรูป...' : currentImage ? 'เปลี่ยนรูปแนบ' : 'เลือกภาพแนบ'}
+                </button>
+                <span className="text-[11px] text-slate-400">
+                  {currentImage ? 'แนบอย่างเดียวได้ หรือสั่ง AI อ่านก็ได้' : 'แนบรูปโดยไม่อ่าน AI ก็ได้'}
+                </span>
+              </div>
+            )}
+            <div className="flex-1 min-h-0">
+              <ImageDocViewer
+                image={currentImage}
+                title="ภาพเอกสารต้นฉบับ"
+                onImageChange={(newImg) => setCurrentImage(newImg)}
+              />
+            </div>
           </div>
 
           {/* Right Column: Dynamic Form tailored by Bill Type (7 Cols) */}
@@ -603,12 +661,16 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {(currentImage || billImage || form.image) && (
                     <button
                       type="button"
-                      disabled={isRescanningAI}
+                      disabled={isRescanningAI || isPreparingImage}
                       onClick={handleOptionalAIRescan}
                       title="ปกติเมื่อสลับประเภทบิล ระบบจะย้ายช่องข้อมูลให้อัตโนมัติทันที แต่หากต้องการให้ AI อ่านซ้ำเฉพาะตามประเภทนี้สามารถกดปุ่มนี้ได้"
                       className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 hover:bg-indigo-100 transition cursor-pointer disabled:opacity-50"
                     >
-                      {isRescanningAI ? '🤖 กำลังอ่านใหม่...' : '🤖 ให้ AI อ่านใหม่ตามประเภทนี้ (ทางเลือก)'}
+                      {isRescanningAI
+                        ? '🤖 กำลังอ่าน...'
+                        : hasAttachedImage
+                          ? '🤖 ให้ AI อ่านรูปตามประเภทนี้'
+                          : '🤖 ให้ AI อ่านใหม่ตามประเภทนี้ (ทางเลือก)'}
                     </button>
                   )}
                 </div>
