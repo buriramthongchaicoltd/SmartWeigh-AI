@@ -314,10 +314,8 @@ function handleCleanup(payload) {
   }
 
   if (fileId) {
-    try {
-      var file = DriveApp.getFileById(fileId);
-      file.setTrashed(true);
-    } catch (e) {}
+    var file = DriveApp.getFileById(fileId);
+    file.setTrashed(true);
   }
 
   if (folderId) {

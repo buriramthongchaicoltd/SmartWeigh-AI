@@ -4,6 +4,20 @@
 
 ---
 
+## [2026-10-05] Delete Unreferenced LINE Inbox Files from Drive
+
+### การเปลี่ยนแปลง
+- เปลี่ยนการลบจากย้ายรูปเข้าโฟลเดอร์กักกันเป็นนำไฟล์ไปถังขยะ Google Drive เมื่อไม่มี `line_inbox` row อื่นหรือเอกสาร `orders`/`purchase_orders` อ้างถึง
+- หากมีรายการอื่นอ้างไฟล์ ให้เก็บไฟล์ไว้; หากตรวจ references หรือลบไฟล์ไม่สำเร็จ จะหยุดก่อนลบ row LINE เพื่อไม่ทิ้งไฟล์ที่ไม่มี reference
+- แสดงผลผู้ใช้แยกตามกรณีลบไฟล์/เก็บไฟล์ที่ยังถูกใช้งาน/ไม่มีไฟล์ และอัปเดตคู่มือ storage
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน (มีคำเตือนเดิมเรื่อง JS bundle ขนาดเกิน 500 kB)
+- `git diff --check` ผ่าน
+- การนำไฟล์ไปถังขยะเป็น soft delete ผ่าน Google Drive; ยังไม่ลบถาวรหรือแก้ไฟล์/ข้อมูลจริงใน Production
+- โหมด Apps Script ต้อง Deploy source `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้การลบที่ล้มเหลวส่ง error กลับและหยุดการลบ row ได้อย่างถูกต้อง
+
 ## [2026-10-05] Keep LINE Inbox Review Human-Driven and Decouple Drive Cleanup
 
 ### การเปลี่ยนแปลง

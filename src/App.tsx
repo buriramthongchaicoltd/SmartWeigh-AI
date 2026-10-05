@@ -2643,25 +2643,14 @@ export default function App() {
                 if (!currentPermissions.canDeleteOrder) {
                   throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
                 }
-                let driveWasQuarantined = false;
-                let driveCleanupWarning = '';
-                try {
-                  const driveResponse = await fetch('/api/drive/quarantine-line-inbox-item', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ inboxId: id })
-                  });
-                  const driveResult = await driveResponse.json();
-                  if (driveResponse.ok && driveResult.success) {
-                    driveWasQuarantined = Boolean(driveResult.quarantined);
-                    driveCleanupWarning = driveWasQuarantined
-                      ? ''
-                      : driveResult.message || 'เก็บไฟล์ไว้โดยไม่ย้ายไปกักกัน';
-                  } else {
-                    driveCleanupWarning = driveResult.error || 'ตรวจสอบ/ย้ายไฟล์ใน Drive ไม่สำเร็จ; เก็บไฟล์ไว้';
-                  }
-                } catch (error: any) {
-                  driveCleanupWarning = error?.message || 'ติดต่อ Google Drive ไม่สำเร็จ; เก็บไฟล์ไว้';
+                const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ inboxId: id })
+                });
+                const driveResult = await driveResponse.json();
+                if (!driveResponse.ok || !driveResult.success) {
+                  throw new Error(driveResult.error || 'ลบไฟล์จาก Google Drive ไม่สำเร็จ; ยังไม่ได้ลบรายการ');
                 }
 
                 const dbResponse = await fetch('/api/database/delete-record', {
@@ -2674,11 +2663,11 @@ export default function App() {
                   throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
                 }
                 setLineInbox(prev => prev.filter(i => i.id !== id));
-                showToast(driveWasQuarantined
-                  ? 'ลบรายการแล้วและย้ายรูปไปถังกักกัน'
-                  : driveCleanupWarning
-                    ? `ลบรายการแล้ว แต่เก็บไฟล์ไว้ใน Drive: ${driveCleanupWarning}`
-                    : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องย้าย');
+                showToast(driveResult.deleted
+                  ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
+                  : driveResult.retained
+                    ? `ลบรายการแล้ว แต่เก็บรูปไว้เพราะยังมีรายการอื่นใช้งาน: ${driveResult.message}`
+                    : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}

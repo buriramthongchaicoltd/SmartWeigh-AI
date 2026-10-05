@@ -4780,7 +4780,7 @@ app.post('/api/drive/quarantine-line-inbox-orphan', async (req: Request, res: Re
   }
 });
 
-app.post('/api/drive/quarantine-line-inbox-item', async (req: Request, res: Response) => {
+app.post('/api/drive/delete-line-inbox-file', async (req: Request, res: Response) => {
   try {
     const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
     if (!inboxId) return res.status(400).json({ success: false, error: 'กรุณาระบุ inboxId' });
@@ -4797,56 +4797,63 @@ app.post('/api/drive/quarantine-line-inbox-item', async (req: Request, res: Resp
     if (inboxError) throw new Error(`ตรวจสอบรายการ LINE ไม่สำเร็จ: ${inboxError.message}`);
     if (!inboxRow) return res.status(404).json({ success: false, error: 'ไม่พบรายการในกล่องพัก LINE' });
     const fileId = inboxRow.drive_file_id;
-    if (!fileId) return res.json({ success: true, quarantined: false, message: 'รายการนี้ไม่มีไฟล์ Drive ที่ต้องย้าย' });
+    if (!fileId) return res.json({ success: true, deleted: false, message: 'รายการนี้ไม่มีไฟล์ Drive ที่ต้องลบ' });
 
-    const cfg = getStoredDriveConfig();
-    if (!cfg.isEnabled || !cfg.rootFolderId) {
-      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
-    }
     const linkedOrderIds = await getDriveLinkedFileIds(client, ['orders', 'purchase_orders']);
     if (linkedOrderIds.has(fileId)) {
-      return res.json({ success: true, quarantined: false, message: 'เก็บไฟล์ไว้เพราะยังเชื่อมโยงกับเอกสารในระบบ' });
+      return res.json({ success: true, deleted: false, retained: true, message: 'เก็บไฟล์ไว้เพราะยังเชื่อมโยงกับเอกสารในระบบ' });
     }
 
+    const { data: otherInboxRows, error: inboxReferenceError } = await client
+      .from('line_inbox')
+      .select('id')
+      .eq('drive_file_id', fileId)
+      .neq('id', inboxId)
+      .limit(1);
+    if (inboxReferenceError) throw new Error(`ตรวจสอบรายการ LINE ที่ใช้ไฟล์เดียวกันไม่สำเร็จ: ${inboxReferenceError.message}`);
+    if (otherInboxRows?.length) {
+      return res.json({ success: true, deleted: false, retained: true, message: 'เก็บไฟล์ไว้เพราะยังมีรายการ LINE อื่นใช้งานไฟล์นี้' });
+    }
+
+    const cfg = getStoredDriveConfig();
+    if (!cfg.isEnabled) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
+    }
     const driveToken = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
     const isGasMode = cfg.connectionMode === 'gas' || (!driveToken && Boolean(cfg.gasWebAppUrl));
     if (isGasMode && cfg.gasWebAppUrl) {
       const result = await callGasDriveApi(cfg.gasWebAppUrl, {
-        action: 'quarantine_inbox_file',
-        rootFolderId: cfg.rootFolderId,
+        action: 'cleanup',
         fileId
       });
       if (!result?.success) {
-        throw new Error(result?.error || 'ย้ายไฟล์ไปถังกักกันผ่าน Google Apps Script ไม่สำเร็จ');
+        throw new Error(result?.error || 'ลบไฟล์จาก Google Drive ผ่าน Google Apps Script ไม่สำเร็จ');
       }
       return res.json({
         success: true,
-        quarantined: result.quarantined === true,
-        message: result.message || (result.quarantined === true
-          ? 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว'
-          : 'ไม่ได้ย้ายไฟล์; ลบเฉพาะรายการในกล่องพักได้')
+        deleted: true,
+        message: 'นำไฟล์ออกจาก Google Drive ไปยังถังขยะแล้ว'
       });
     }
 
     if (!driveToken) {
       return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลเชื่อมต่อ Google Drive' });
     }
-    const zones = await ensureStandardDriveZones(driveToken, cfg.rootFolderId);
-    const metadataResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents,trashed`, {
-      headers: { Authorization: 'Bearer ' + driveToken }
+    const deleteResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer ' + driveToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ trashed: true })
     });
-    if (!metadataResponse.ok) {
-      throw new Error(`ตรวจสอบไฟล์ก่อนย้ายไม่สำเร็จ (${metadataResponse.status}): ${await metadataResponse.text()}`);
+    if (!deleteResponse.ok) {
+      throw new Error(`นำไฟล์ไปถังขยะใน Google Drive ไม่สำเร็จ (${deleteResponse.status}): ${await deleteResponse.text()}`);
     }
-    const metadata = await metadataResponse.json() as { parents?: string[]; trashed?: boolean };
-    if (metadata.trashed || !metadata.parents?.includes(zones.ZONE_00)) {
-      return res.json({ success: true, quarantined: false, message: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงไม่ย้าย' });
-    }
-    await moveDriveFile(driveToken, fileId, zones.ZONE_00, zones.ZONE_99);
-    return res.json({ success: true, quarantined: true, message: 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว' });
+    return res.json({ success: true, deleted: true, message: 'นำไฟล์ออกจาก Google Drive ไปยังถังขยะแล้ว' });
   } catch (err: any) {
     console.error('[LINE Inbox Delete Cleanup] Failed:', err);
-    return res.status(500).json({ success: false, error: err?.message || 'เตรียมไฟล์ LINE ก่อนลบไม่สำเร็จ' });
+    return res.status(500).json({ success: false, error: err?.message || 'ลบไฟล์ LINE จาก Google Drive ไม่สำเร็จ' });
   }
 });
 
