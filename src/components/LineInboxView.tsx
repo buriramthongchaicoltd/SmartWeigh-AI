@@ -13,7 +13,9 @@ import {
   Check,
   Filter,
   Search,
-  Cloud
+  Cloud,
+  Archive,
+  ShieldAlert
 } from 'lucide-react';
 import {
   DocumentType,
@@ -33,7 +35,7 @@ interface LineInboxViewProps {
   pos: PurchaseOrder[];
   onUpdateInboxItem: (updated: LineBillInboxItem) => void;
   onAddInboxItems: (newItems: LineBillInboxItem[]) => void;
-  onDeleteInboxItem: (id: string) => void;
+  onDeleteInboxItem: (id: string) => Promise<void>;
   onOpenVerifyFromInbox: (item: LineBillInboxItem) => void;
   onSyncWebhookQueue: () => Promise<void>;
   showToast: (msg: string, type?: 'success' | 'info') => void;
@@ -94,6 +96,80 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     replyText?: string;
   } | null>(null);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
+  const [isAuditingDrive, setIsAuditingDrive] = useState(false);
+  const [driveAuditError, setDriveAuditError] = useState<string | null>(null);
+  const [driveAudit, setDriveAudit] = useState<{
+    scannedAt: string;
+    zone00Count: number;
+    linkedCount: number;
+    orphanCount: number;
+    linkedFiles: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string; linkedIn: string[] }>;
+    orphanFiles: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string }>;
+  } | null>(null);
+  const [selectedOrphanIds, setSelectedOrphanIds] = useState<Set<string>>(new Set());
+  const [quarantiningIds, setQuarantiningIds] = useState<Set<string>>(new Set());
+  const [deletingInboxId, setDeletingInboxId] = useState<string | null>(null);
+
+  const handleAuditDriveInbox = async () => {
+    setIsAuditingDrive(true);
+    setDriveAuditError(null);
+    try {
+      const response = await fetch('/api/drive/audit-line-inbox', { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `ตรวจสอบ Google Drive ไม่สำเร็จ (${response.status})`);
+      }
+      setDriveAudit(data);
+      setSelectedOrphanIds(new Set());
+    } catch (error: any) {
+      setDriveAuditError(error?.message || 'ตรวจสอบ Google Drive ไม่สำเร็จ');
+    } finally {
+      setIsAuditingDrive(false);
+    }
+  };
+
+  const handleQuarantineSelected = async () => {
+    const selectedFiles = driveAudit?.orphanFiles.filter(file => selectedOrphanIds.has(file.id)) || [];
+    if (selectedFiles.length === 0) return;
+    if (!window.confirm(`ย้ายรูป ${selectedFiles.length} รายการที่เลือกไปโฟลเดอร์กักกัน 99 หรือไม่? ไฟล์จะไม่ถูกลบถาวร`)) return;
+
+    const completed = new Set<string>();
+    const failed: string[] = [];
+    setQuarantiningIds(new Set(selectedFiles.map(file => file.id)));
+    for (const file of selectedFiles) {
+      try {
+        const response = await fetch('/api/drive/quarantine-line-inbox-orphan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileId: file.id })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || `ย้าย ${file.name} ไม่สำเร็จ`);
+        completed.add(file.id);
+      } catch (error: any) {
+        failed.push(`${file.name}: ${error?.message || 'ย้ายไม่สำเร็จ'}`);
+      }
+    }
+    setQuarantiningIds(new Set());
+    setSelectedOrphanIds(new Set());
+    await handleAuditDriveInbox();
+    if (failed.length) {
+      showToast(`ย้ายเข้าถังกักกัน ${completed.size} รูป; ไม่สำเร็จ ${failed.length} รูป — ${failed[0]}`, 'info');
+    } else {
+      showToast(`ย้ายรูป ${completed.size} รายการไปโฟลเดอร์กักกันแล้ว`);
+    }
+  };
+
+  const handleDeleteInboxItem = async (item: LineBillInboxItem) => {
+    setDeletingInboxId(item.id);
+    try {
+      await onDeleteInboxItem(item.id);
+    } catch (error: any) {
+      showToast(error?.message || 'ลบรายการในกล่องพักไม่สำเร็จ', 'info');
+    } finally {
+      setDeletingInboxId(null);
+    }
+  };
 
   // Load bill image on-demand from server (image_url is NOT in list payload to save bandwidth)
   const handleOpenImagePreview = async (item: LineBillInboxItem) => {
@@ -466,6 +542,135 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         </div>
       </div>
 
+      <section className="rounded-xl border border-amber-200 bg-amber-50 p-3" aria-labelledby="drive-audit-title">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+            <div>
+              <h2 id="drive-audit-title" className="text-sm font-bold text-slate-900">ตรวจรูปค้างใน Google Drive</h2>
+              <p className="mt-0.5 text-xs text-slate-600">
+                เทียบไฟล์ในโฟลเดอร์ 00 กับรหัสไฟล์ที่อ้างถึงจาก LINE, ใบงาน และ PO — ระบบไม่ลบไฟล์เอง
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAuditDriveInbox}
+            disabled={isAuditingDrive || quarantiningIds.size > 0}
+            className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isAuditingDrive ? 'animate-spin' : ''}`} />
+            {isAuditingDrive ? 'กำลังตรวจสอบ...' : 'ตรวจเทียบไฟล์ใน Drive'}
+          </button>
+        </div>
+
+        {driveAuditError && (
+          <p role="alert" className="mt-3 rounded-lg bg-rose-100 px-3 py-2 text-xs font-medium text-rose-800">
+            ตรวจสอบไม่สำเร็จ: {driveAuditError}
+          </p>
+        )}
+
+        {driveAudit && (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-white p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <p className="font-semibold text-slate-800">
+                พบในโฟลเดอร์ 00 {driveAudit.zone00Count} ไฟล์ · เชื่อมโยง {driveAudit.linkedCount} ไฟล์ · ไม่พบรหัสอ้างอิง {driveAudit.orphanCount} ไฟล์
+              </p>
+              <p className="text-slate-500">
+                ตรวจล่าสุด {new Date(driveAudit.scannedAt).toLocaleString('th-TH')}
+              </p>
+            </div>
+            {driveAudit.orphanCount === 0 ? (
+              <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+                ไม่พบไฟล์ที่ไม่มีรายการเชื่อมโยงในฐานข้อมูล
+              </p>
+            ) : (
+              <>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOrphanIds(new Set(driveAudit.orphanFiles.map(file => file.id)))}
+                    className="min-h-9 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    เลือกทั้งหมด
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedOrphanIds(new Set())}
+                    className="min-h-9 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    ยกเลิกการเลือก
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleQuarantineSelected}
+                    disabled={selectedOrphanIds.size === 0 || quarantiningIds.size > 0}
+                    className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Archive className="h-3.5 w-3.5" />
+                    {quarantiningIds.size > 0 ? 'กำลังย้ายไฟล์...' : `ย้ายที่เลือกเข้าถังกักกัน (${selectedOrphanIds.size})`}
+                  </button>
+                </div>
+                <ul className="mt-3 max-h-64 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200">
+                  {driveAudit.orphanFiles.map(file => (
+                    <li key={file.id} className="flex items-center gap-3 px-3 py-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedOrphanIds.has(file.id)}
+                        disabled={quarantiningIds.has(file.id)}
+                        onChange={event => setSelectedOrphanIds(current => {
+                          const next = new Set(current);
+                          if (event.target.checked) next.add(file.id);
+                          else next.delete(file.id);
+                          return next;
+                        })}
+                        aria-label={`เลือกไฟล์ ${file.name} เพื่อย้ายไปถังกักกัน`}
+                        className="h-4 w-4 rounded border-slate-300 text-amber-700 focus:ring-amber-600"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-semibold text-slate-800">{file.name}</p>
+                        <p className="text-[11px] text-slate-500">
+                          {file.createdTime ? new Date(file.createdTime).toLocaleString('th-TH') : 'ไม่ทราบวันที่สร้าง'}
+                          {file.mimeType ? ` · ${file.mimeType}` : ''}
+                        </p>
+                      </div>
+                      {file.webViewLink && (
+                        <a
+                          href={file.webViewLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="shrink-0 rounded px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                        >
+                          เปิดรูป
+                        </a>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-[11px] text-slate-500">
+                  ตรวจชื่อและวันที่ก่อนเลือกย้าย; การย้ายไปโฟลเดอร์ 99 เป็นการกักกัน ไม่ใช่การลบถาวร
+                </p>
+              </>
+            )}
+            {driveAudit.linkedCount > 0 && (
+              <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700">
+                  ดูไฟล์ {driveAudit.linkedCount} รายการที่ยังมีการอ้างอิงในฐานข้อมูล (ไม่ถือเป็นไฟล์ขยะ)
+                </summary>
+                <ul className="max-h-48 divide-y divide-slate-200 overflow-y-auto px-3">
+                  {driveAudit.linkedFiles.map(file => (
+                    <li key={file.id} className="flex items-center justify-between gap-3 py-2 text-xs">
+                      <span className="min-w-0 truncate font-medium text-slate-700">{file.name}</span>
+                      <span className="shrink-0 text-slate-500">{file.linkedIn.join(', ')}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+      </section>
+
       {/* Main Inbox Table */}
       {filteredItems.length === 0 ? (
         <div className="bg-white rounded-xl border border-slate-200 p-10 text-center space-y-2">
@@ -770,8 +975,9 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteInboxItem(item.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                            onClick={() => handleDeleteInboxItem(item)}
+                            disabled={deletingInboxId === item.id}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer disabled:opacity-50"
                             title="ลบรายการ"
                           >
                             <Trash2 className="w-3.5 h-3.5" />

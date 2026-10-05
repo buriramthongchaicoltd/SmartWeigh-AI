@@ -2475,14 +2475,32 @@ export default function App() {
                   return next;
                 });
               }}
-              onDeleteInboxItem={(id) => {
+              onDeleteInboxItem={async (id) => {
                 if (!currentPermissions.canDeleteOrder) {
-                  showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`, 'info');
-                  return;
+                  throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
+                }
+                const driveResponse = await fetch('/api/drive/quarantine-line-inbox-item', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ inboxId: id })
+                });
+                const driveResult = await driveResponse.json();
+                if (!driveResponse.ok || !driveResult.success) {
+                  throw new Error(driveResult.error || 'ย้ายรูปไปถังกักกันไม่สำเร็จ จึงยังไม่ลบรายการ');
+                }
+                const dbResponse = await fetch('/api/database/delete-record', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ table: 'line_inbox', id })
+                });
+                const dbResult = await dbResponse.json();
+                if (!dbResponse.ok || !dbResult.success) {
+                  throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
                 }
                 setLineInbox(prev => prev.filter(i => i.id !== id));
-                deleteRecordFromDb('line_inbox', id);
-                showToast('ลบรายการออกจากกล่องพักบิล LINE แล้ว');
+                showToast(driveResult.quarantined
+                  ? 'ลบรายการแล้วและย้ายรูปไปถังกักกัน'
+                  : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องย้าย หรือไฟล์ยังถูกเอกสารอื่นอ้างอิง');
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}

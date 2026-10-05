@@ -2097,5 +2097,13 @@ UI Open Settings → loadConfigs → isConfigured? → runSilentAutoTest() → u
 - อัปเดต `HANDOVER_DOCUMENTATION.md`; ตรวจ `npm.cmd run lint` และ `npm.cmd run build` ผ่าน (ยังมีคำเตือน bundle JavaScript ใหญ่กว่า 500 kB)
 - **ข้อจำกัดการตรวจสอบ:** ยังไม่ได้ทดสอบเรียก Gemini/Supabase/LINE จริง
 
-
+## ตรวจสอบไฟล์ค้างใน Google Drive กล่องพัก LINE
+- ตรวจพบสาเหตุเชิงโค้ดที่ทำให้เกิดไฟล์ค้างได้: การลบแถวจากหน้ากล่องพัก LINE เดิมลบเฉพาะ `line_inbox` ใน Supabase โดยไม่ย้าย/กักกันไฟล์ Drive; ยังสรุปไม่ได้ว่าไฟล์ 11 รูปส่วนเกินที่ผู้ใช้พบเป็นไฟล์ orphan จริงหรือไม่จนกว่าจะรันการตรวจเทียบกับ Drive/ฐานข้อมูลจริง
+- เพิ่ม `POST /api/drive/audit-line-inbox` ให้เทียบไฟล์ในโฟลเดอร์ 00 กับ `drive_file_id` จาก `line_inbox`, `orders`, `purchase_orders`; แสดงรายการ orphan และรายการที่ยังถูกอ้างอิงแยกกัน
+- เพิ่มการเลือกย้าย orphan ไปโฟลเดอร์ 99 ด้วยการยืนยันผู้ใช้ และตรวจซ้ำฝั่งเซิร์ฟเวอร์ว่าไฟล์ยังอยู่โซน 00 และยังไม่มีการอ้างอิงก่อนย้าย; ไม่มีการลบถาวรอัตโนมัติ
+- ปรับการลบรายการในกล่อง LINE: ถ้าไฟล์ยังเชื่อมกับ Order/PO จะเก็บไว้; ถ้าไม่เชื่อมและย้ายเข้ากักกันล้มเหลว จะไม่ลบ record LINE
+- เพิ่ม action `list_zone_files` และ `quarantine_inbox_file` ใน `google_apps_script_drive.gs`; ผู้ใช้โหมด GAS ต้อง Deploy สคริปต์เวอร์ชันล่าสุดก่อนใช้ audit/กักกัน
+- อัปเดต `HANDOVER_DOCUMENTATION.md` และ `DATABASE_STORAGE_BLUEPRINT.md`
+- **Validation:** `npm.cmd run lint`, `npm.cmd run build`, GAS JavaScript syntax check (`node` parse) และ `git diff --check` ผ่าน; build ยังเตือน bundle JavaScript ใหญ่กว่า 500 kB
+- **ข้อจำกัด:** ไม่สามารถอ่านจำนวน/รายการจริงใน Google Drive หรือ Supabase จาก workspace นี้ จึงต้องให้ผู้ใช้กด `ตรวจเทียบไฟล์ใน Drive` บนหน้า LINE Inbox เพื่อระบุจำนวนและต้นเหตุของไฟล์ส่วนเกินจริง
 

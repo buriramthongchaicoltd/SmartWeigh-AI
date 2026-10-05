@@ -38,6 +38,10 @@ function doPost(e) {
       return handleRenameAndMoveFile(payload);
     } else if (action === 'cleanup') {
       return handleCleanup(payload);
+    } else if (action === 'list_zone_files') {
+      return handleListZoneFiles(payload);
+    } else if (action === 'quarantine_inbox_file') {
+      return handleQuarantineInboxFile(payload);
     } else {
       return jsonResponse({ success: false, error: 'ไม่รู้จัก action: ' + action });
     }
@@ -326,6 +330,76 @@ function handleCleanup(payload) {
   return jsonResponse({
     success: true,
     message: 'ทำความสะอาดไฟล์ขยะ (Zero-Junk Cleanup) สำเร็จ'
+  });
+}
+
+function handleListZoneFiles(payload) {
+  var rootFolderId = payload.rootFolderId;
+  if (!rootFolderId) {
+    return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId' });
+  }
+
+  var root = DriveApp.getFolderById(rootFolderId);
+  var zone00Folders = root.getFoldersByName(ZONE_NAMES.ZONE_00);
+  if (!zone00Folders.hasNext()) {
+    return jsonResponse({ success: true, files: [], totalCount: 0 });
+  }
+
+  var files = [];
+  var iterator = zone00Folders.next().getFiles();
+  var maxFiles = 2000;
+  while (iterator.hasNext() && files.length < maxFiles) {
+    var file = iterator.next();
+    files.push({
+      id: file.getId(),
+      name: file.getName(),
+      mimeType: file.getMimeType(),
+      createdTime: file.getDateCreated().toISOString(),
+      webViewLink: file.getUrl()
+    });
+  }
+
+  return jsonResponse({
+    success: true,
+    files: files,
+    totalCount: files.length,
+    hasMore: iterator.hasNext()
+  });
+}
+
+function handleQuarantineInboxFile(payload) {
+  var rootFolderId = payload.rootFolderId;
+  var fileId = payload.fileId;
+  if (!rootFolderId || !fileId) {
+    return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId และ fileId' });
+  }
+
+  var root = DriveApp.getFolderById(rootFolderId);
+  var zone00Folders = root.getFoldersByName(ZONE_NAMES.ZONE_00);
+  var quarantineFolder = getOrCreateSubfolder(root, ZONE_NAMES.ZONE_99);
+  if (!zone00Folders.hasNext()) {
+    return jsonResponse({ success: false, error: 'ไม่พบโฟลเดอร์กล่องพักบิล LINE' });
+  }
+
+  var zone00 = zone00Folders.next();
+  var file = DriveApp.getFileById(fileId);
+  var parents = file.getParents();
+  var isInInboxZone = false;
+  while (parents.hasNext()) {
+    if (parents.next().getId() === zone00.getId()) {
+      isInInboxZone = true;
+      break;
+    }
+  }
+  if (!isInInboxZone) {
+    return jsonResponse({ success: false, error: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงไม่ย้ายไปกักกัน' });
+  }
+
+  file.moveTo(quarantineFolder);
+  return jsonResponse({
+    success: true,
+    fileId: fileId,
+    quarantineFolder: ZONE_NAMES.ZONE_99
   });
 }
 

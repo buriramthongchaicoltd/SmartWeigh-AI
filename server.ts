@@ -4083,6 +4083,247 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   }
 });
 
+async function getDriveLinkedFileIds(
+  client: any,
+  tables: string[] = ['line_inbox', 'orders', 'purchase_orders']
+): Promise<Map<string, string[]>> {
+  const linkedFileIds = new Map<string, string[]>();
+  for (const table of tables) {
+    const pageSize = 500;
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await client
+        .from(table)
+        .select('drive_file_id')
+        .not('drive_file_id', 'is', null)
+        .range(offset, offset + pageSize - 1);
+      if (error) {
+        throw new Error(`ตรวจรายการเชื่อมโยง Drive ใน ${table} ไม่สำเร็จ: ${error.message}`);
+      }
+      for (const row of data || []) {
+        if (row.drive_file_id) {
+          const fileId = String(row.drive_file_id);
+          const sources = linkedFileIds.get(fileId) || [];
+          if (!sources.includes(table)) sources.push(table);
+          linkedFileIds.set(fileId, sources);
+        }
+      }
+      if (!data || data.length < pageSize) break;
+    }
+  }
+  return linkedFileIds;
+}
+
+app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => {
+  try {
+    const cfg = getStoredDriveConfig();
+    if (!cfg.isEnabled || !cfg.rootFolderId) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
+    }
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
+    }
+
+    const linkedFileIds = await getDriveLinkedFileIds(client);
+    let files: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string }> = [];
+    const driveToken = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+    const isGasMode = cfg.connectionMode === 'gas' || (!driveToken && Boolean(cfg.gasWebAppUrl));
+
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'list_zone_files',
+        rootFolderId: cfg.rootFolderId
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || 'อ่านรายการไฟล์จาก Google Apps Script ไม่สำเร็จ');
+      }
+      if (result.hasMore) {
+        throw new Error('โฟลเดอร์มีไฟล์เกินขีดจำกัดที่อ่านได้ กรุณาตรวจสอบก่อนย้ายไฟล์');
+      }
+      files = Array.isArray(result.files) ? result.files : [];
+    } else {
+      if (!driveToken) {
+        return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลเชื่อมต่อ Google Drive' });
+      }
+      const zones = await ensureStandardDriveZones(driveToken, cfg.rootFolderId);
+      const zone00Id = zones.ZONE_00;
+      if (!zone00Id) throw new Error('ไม่พบโฟลเดอร์ 00_กล่องพักบิล_LINE_รอตรวจรับ');
+
+      let pageToken: string | undefined;
+      do {
+        const params = new URLSearchParams({
+          q: `'${zone00Id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
+          pageSize: '1000',
+          fields: 'nextPageToken,files(id,name,mimeType,createdTime,webViewLink)'
+        });
+        if (pageToken) params.set('pageToken', pageToken);
+        const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
+          headers: { Authorization: 'Bearer ' + driveToken }
+        });
+        if (!response.ok) {
+          throw new Error(`อ่านไฟล์ในโฟลเดอร์ Drive ไม่สำเร็จ (${response.status}): ${await response.text()}`);
+        }
+        const page = await response.json() as {
+          nextPageToken?: string;
+          files?: Array<{ id?: string; name?: string; mimeType?: string; createdTime?: string; webViewLink?: string }>;
+        };
+        files.push(...(page.files || []).filter(file => file.id && file.name).map(file => ({
+          id: file.id!,
+          name: file.name!,
+          mimeType: file.mimeType,
+          createdTime: file.createdTime,
+          webViewLink: file.webViewLink
+        })));
+        pageToken = page.nextPageToken;
+        if (files.length > 5000) {
+          throw new Error('โฟลเดอร์มีไฟล์เกิน 5,000 รายการ ระบบหยุดตรวจเพื่อป้องกันการทำงานเกินขอบเขต');
+        }
+      } while (pageToken);
+    }
+
+    const linkedFiles = files
+      .filter(file => linkedFileIds.has(file.id))
+      .map(file => ({ ...file, linkedIn: linkedFileIds.get(file.id) || [] }));
+    const orphanFiles = files.filter(file => !linkedFileIds.has(file.id));
+    return res.json({
+      success: true,
+      scannedAt: new Date().toISOString(),
+      zone00Count: files.length,
+      linkedCount: linkedFiles.length,
+      orphanCount: orphanFiles.length,
+      linkedFiles,
+      orphanFiles,
+      message: 'ไฟล์ที่ไม่มี drive_file_id อ้างอิงจาก line_inbox, orders หรือ purchase_orders แสดงเป็นรายการให้ตรวจสอบก่อนย้ายเข้าถังกักกัน'
+    });
+  } catch (err: any) {
+    console.error('[Drive Inbox Audit] Failed:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'ตรวจสอบรายการไฟล์ Drive ไม่สำเร็จ' });
+  }
+});
+
+app.post('/api/drive/quarantine-line-inbox-orphan', async (req: Request, res: Response) => {
+  try {
+    const fileId = typeof req.body?.fileId === 'string' ? req.body.fileId.trim() : '';
+    if (!fileId) return res.status(400).json({ success: false, error: 'กรุณาระบุ fileId' });
+
+    const cfg = getStoredDriveConfig();
+    if (!cfg.isEnabled || !cfg.rootFolderId) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
+    }
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
+    }
+    const linkedFileIds = await getDriveLinkedFileIds(client);
+    if (linkedFileIds.has(fileId)) {
+      return res.status(409).json({ success: false, error: 'ไฟล์นี้ถูกเชื่อมโยงกับข้อมูลในระบบแล้ว จึงไม่ย้ายไปกักกัน' });
+    }
+
+    const driveToken = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+    const isGasMode = cfg.connectionMode === 'gas' || (!driveToken && Boolean(cfg.gasWebAppUrl));
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'quarantine_inbox_file',
+        rootFolderId: cfg.rootFolderId,
+        fileId
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || 'ย้ายไฟล์ไปถังกักกันผ่าน Google Apps Script ไม่สำเร็จ');
+      }
+      return res.json({ success: true, fileId, message: 'ย้ายไฟล์ไปโฟลเดอร์ 99_ถังขยะ_รอทำลาย_30วันแล้ว' });
+    }
+
+    if (!driveToken) {
+      return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลเชื่อมต่อ Google Drive' });
+    }
+    const zones = await ensureStandardDriveZones(driveToken, cfg.rootFolderId);
+    const metadataResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,parents,trashed`, {
+      headers: { Authorization: 'Bearer ' + driveToken }
+    });
+    if (!metadataResponse.ok) {
+      throw new Error(`ตรวจสอบไฟล์ก่อนย้ายไม่สำเร็จ (${metadataResponse.status}): ${await metadataResponse.text()}`);
+    }
+    const metadata = await metadataResponse.json() as { id: string; name?: string; parents?: string[]; trashed?: boolean };
+    if (metadata.trashed || !metadata.parents?.includes(zones.ZONE_00)) {
+      return res.status(409).json({ success: false, error: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 แล้ว จึงไม่ย้ายไปกักกัน' });
+    }
+    await moveDriveFile(driveToken, fileId, zones.ZONE_00, zones.ZONE_99);
+    return res.json({
+      success: true,
+      fileId,
+      name: metadata.name,
+      message: 'ย้ายไฟล์ไปโฟลเดอร์ 99_ถังขยะ_รอทำลาย_30วันแล้ว'
+    });
+  } catch (err: any) {
+    console.error('[Drive Inbox Quarantine] Failed:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'ย้ายไฟล์ไปถังกักกันไม่สำเร็จ' });
+  }
+});
+
+app.post('/api/drive/quarantine-line-inbox-item', async (req: Request, res: Response) => {
+  try {
+    const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+    if (!inboxId) return res.status(400).json({ success: false, error: 'กรุณาระบุ inboxId' });
+
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
+    }
+    const { data: inboxRow, error: inboxError } = await client
+      .from('line_inbox')
+      .select('drive_file_id')
+      .eq('id', inboxId)
+      .maybeSingle();
+    if (inboxError) throw new Error(`ตรวจสอบรายการ LINE ไม่สำเร็จ: ${inboxError.message}`);
+    if (!inboxRow) return res.status(404).json({ success: false, error: 'ไม่พบรายการในกล่องพัก LINE' });
+    const fileId = inboxRow.drive_file_id;
+    if (!fileId) return res.json({ success: true, quarantined: false, message: 'รายการนี้ไม่มีไฟล์ Drive ที่ต้องย้าย' });
+
+    const cfg = getStoredDriveConfig();
+    if (!cfg.isEnabled || !cfg.rootFolderId) {
+      return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Google Drive กรุณาตั้งค่าก่อน' });
+    }
+    const linkedOrderIds = await getDriveLinkedFileIds(client, ['orders', 'purchase_orders']);
+    if (linkedOrderIds.has(fileId)) {
+      return res.json({ success: true, quarantined: false, message: 'เก็บไฟล์ไว้เพราะยังเชื่อมโยงกับเอกสารในระบบ' });
+    }
+
+    const driveToken = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+    const isGasMode = cfg.connectionMode === 'gas' || (!driveToken && Boolean(cfg.gasWebAppUrl));
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'quarantine_inbox_file',
+        rootFolderId: cfg.rootFolderId,
+        fileId
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || 'ย้ายไฟล์ไปถังกักกันผ่าน Google Apps Script ไม่สำเร็จ');
+      }
+      return res.json({ success: true, quarantined: true, message: 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว' });
+    }
+
+    if (!driveToken) {
+      return res.status(400).json({ success: false, error: 'ไม่พบข้อมูลเชื่อมต่อ Google Drive' });
+    }
+    const zones = await ensureStandardDriveZones(driveToken, cfg.rootFolderId);
+    const metadataResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents,trashed`, {
+      headers: { Authorization: 'Bearer ' + driveToken }
+    });
+    if (!metadataResponse.ok) {
+      throw new Error(`ตรวจสอบไฟล์ก่อนย้ายไม่สำเร็จ (${metadataResponse.status}): ${await metadataResponse.text()}`);
+    }
+    const metadata = await metadataResponse.json() as { parents?: string[]; trashed?: boolean };
+    if (metadata.trashed || !metadata.parents?.includes(zones.ZONE_00)) {
+      return res.json({ success: true, quarantined: false, message: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงไม่ย้าย' });
+    }
+    await moveDriveFile(driveToken, fileId, zones.ZONE_00, zones.ZONE_99);
+    return res.json({ success: true, quarantined: true, message: 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว' });
+  } catch (err: any) {
+    console.error('[LINE Inbox Delete Cleanup] Failed:', err);
+    return res.status(500).json({ success: false, error: err?.message || 'เตรียมไฟล์ LINE ก่อนลบไม่สำเร็จ' });
+  }
+});
+
 // 7. Sync & Rescan Inbox Images to Google Drive ZONE_00 (POST /api/drive/sync-inbox-images)
 // Downloads images from Supabase or LINE API, re-scans with Gemini AI, uploads to Google Drive, and stores links in Supabase
 let inboxDriveSyncInProgress = false;
