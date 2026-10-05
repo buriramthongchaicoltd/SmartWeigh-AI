@@ -47,8 +47,16 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
     shortLabel: '📦 ใบส่งของ (DO)'
   },
   {
+    value: 'weighbridge',
+    shortLabel: '⚖️ ตั๋วชั่งต้นทาง'
+  },
+  {
     value: 'dest_weighbridge',
     shortLabel: '⚖️ ตั๋วชั่งปลายทาง'
+  },
+  {
+    value: 'concrete',
+    shortLabel: '🏗️ ใบส่งคอนกรีต'
   },
   {
     value: 'tax_invoice',
@@ -57,6 +65,10 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
   {
     value: 'purchase_order',
     shortLabel: '📝 ใบสั่งซื้อ (PO)'
+  },
+  {
+    value: 'full_logistics',
+    shortLabel: '🚚 โลจิสติกส์เต็มรูปแบบ'
   }
 ];
 
@@ -71,6 +83,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<
     'all' | 'pending_review' | 'duplicate_warning' | 'scan_failed' | 'verified' | 'ignored_non_bill'
   >('all');
+  const [docTypeFilter, setDocTypeFilter] = useState<DocumentType | 'all'>('all');
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
@@ -367,9 +380,18 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const uniqueGroups = Array.from(
     new Set(inboxItems.map(i => i.lineGroupName).filter(Boolean))
   );
+  const documentTypeCounts = inboxItems.reduce<Partial<Record<DocumentType, number>>>((counts, item) => {
+    counts[item.detectedDocType] = (counts[item.detectedDocType] || 0) + 1;
+    return counts;
+  }, {});
+  const hasActiveFilters = statusFilter !== 'all' || docTypeFilter !== 'all' ||
+    groupFilter !== 'all' || Boolean(searchQuery.trim());
 
   // Filtered items
   const filteredItems = inboxItems.filter(item => {
+    if (docTypeFilter !== 'all' && item.detectedDocType !== docTypeFilter) {
+      return false;
+    }
     if (statusFilter !== 'all') {
       if (statusFilter === 'pending_review') {
         if (item.status !== 'pending_review' && item.status !== 'queued') return false;
@@ -635,8 +657,24 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
             )}
           </div>
 
-          {/* Search, Group Filter & Webhook Controls */}
+          {/* Search, Document/Group Filters & Webhook Controls */}
           <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1 text-xs">
+              <Filter className="w-3.5 h-3.5 text-slate-400" />
+              <select
+                value={docTypeFilter}
+                onChange={e => setDocTypeFilter(e.target.value as DocumentType | 'all')}
+                aria-label="กรองตามประเภทเอกสาร"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-lg bg-slate-50 text-xs font-semibold text-slate-800 outline-none focus:border-blue-500 focus:bg-white"
+              >
+                <option value="all">ทุกประเภทเอกสาร</option>
+                {DOC_TYPE_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>
+                    {option.shortLabel} ({documentTypeCounts[option.value] || 0})
+                  </option>
+                ))}
+              </select>
+            </div>
             {uniqueGroups.length > 0 && (
               <div className="flex items-center gap-1 text-xs">
                 <Filter className="w-3.5 h-3.5 text-slate-400" />
@@ -938,16 +976,20 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
           <div className="w-12 h-12 rounded-xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
             <MessageSquare className="w-6 h-6" />
           </div>
-          <div className="text-sm font-bold text-slate-800">ไม่มีรายการบิลในกล่องพัก</div>
+          <div className="text-sm font-bold text-slate-800">
+            {hasActiveFilters ? 'ไม่พบรายการตามตัวกรอง' : 'ไม่มีรายการบิลในกล่องพัก'}
+          </div>
           <div className="text-xs text-slate-500">
-            บิลที่ส่งเข้ากลุ่ม LINE OA จะแสดงในตารางนี้อัตโนมัติ
+            {hasActiveFilters
+              ? 'ลองเปลี่ยนประเภทเอกสาร สถานะ กลุ่ม LINE หรือคำค้นหา'
+              : 'บิลที่ส่งเข้ากลุ่ม LINE OA จะแสดงในตารางนี้อัตโนมัติ'}
           </div>
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
-          <div className="overflow-x-auto">
+          <div className="max-h-[min(68vh,720px)] min-h-[280px] overflow-auto overscroll-contain">
             <table className="w-full text-xs text-left border-collapse">
-              <thead>
+              <thead className="sticky top-0 z-20">
                 <tr className="bg-slate-100 text-slate-700 border-b border-slate-200 font-bold text-[11px] whitespace-nowrap">
                   <th className="py-2.5 px-3 border-r border-slate-200 text-center w-10">#</th>
                   <th className="py-2.5 px-3 border-r border-slate-200 w-16 text-center">รูปบิล</th>
