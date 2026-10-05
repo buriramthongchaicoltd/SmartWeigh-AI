@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-10-05] Reduce Timeout Risk in LINE Drive Audit Listing
+
+### ปัญหา
+- เมื่อใช้ Google Apps Script, audit อ่าน metadata หลายรายการแยกกับไฟล์ทุกไฟล์ในโฟลเดอร์ 00; คำขอจาก server มี timeout 45 วินาทีและอาจล้มก่อนรายงานเสร็จ
+
+### การแก้ไข
+- ลด metadata ที่ Apps Script อ่านต่อไฟล์ โดยตัด MIME type ที่หน้า audit ไม่ใช้ และสร้าง Drive view URL จาก file ID แทนการเรียก `getUrl()`; คงชื่อและวันสร้างไว้สำหรับตรวจรายการ
+- อัปเดต handover ให้ระบุการลิสต์ไฟล์แบบลด metadata ในโหมด Apps Script
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `node --check` สำหรับ Apps Script ผ่าน
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] Add Optional Image Attachment and OCR to Manual DO Form
 
 ### ความต้องการ

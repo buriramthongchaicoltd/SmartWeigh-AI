@@ -352,12 +352,12 @@ function handleListZoneFiles(payload) {
   var maxFiles = 2000;
   while (iterator.hasNext() && files.length < maxFiles) {
     var file = iterator.next();
+    var fileId = file.getId();
     files.push({
-      id: file.getId(),
+      id: fileId,
       name: file.getName(),
-      mimeType: file.getMimeType(),
       createdTime: file.getDateCreated().toISOString(),
-      webViewLink: file.getUrl()
+      webViewLink: 'https://drive.google.com/file/d/' + fileId + '/view'
     });
   }
 
