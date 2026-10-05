@@ -396,6 +396,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   };
 
   const handleDocTypeSelect = (docType: DocumentType) => {
+    if (docType === 'delivery_order' && selectedDocType === 'weighbridge') {
+      setRemappedNotice('เอกสารส่งมอบจากร้านค้าเหมือนกัน ระบบคงชนิดย่อย “ตั๋วชั่งต้นทาง” จาก OCR และเก็บน้ำหนักช่อง 13–15 โดยไม่แปลงข้อมูลซ้ำ');
+      return;
+    }
     setSelectedDocType(docType);
     const updated = remapLineBillToDocType(form, docType);
 
@@ -792,16 +796,16 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         setShowDocTypeSwitcher(false);
                       }}
                       className={`p-2 rounded-lg text-left border transition cursor-pointer ${
-                        selectedDocType === 'delivery_order' || selectedDocType === 'concrete'
+                        selectedDocType === 'delivery_order' || selectedDocType === 'weighbridge' || selectedDocType === 'concrete'
                           ? 'bg-sky-50 border-sky-500 text-sky-950 shadow-xs ring-1 ring-sky-500'
                           : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                       }`}
                     >
                       <div className="flex items-center gap-1.5 font-bold text-xs">
                         <Boxes className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                        <span className="truncate">ใบส่งของ (DO)</span>
+                        <span className="truncate">เอกสารส่งมอบ</span>
                       </div>
-                      <div className="text-[10px] text-slate-500 mt-0.5 truncate">บิลร้านค้า (ชั่งต้นทาง 13-15)</div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 truncate">DO หรือ ตั๋วชั่งต้นทาง (ช่อง 13–15)</div>
                     </button>
 
                     {/* 2. Tax Invoice */}
@@ -1179,9 +1183,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {selectedDocType === 'purchase_order' && <FileText className="w-4 h-4 text-indigo-600 shrink-0" />}
                   <div>
                     <span className="font-bold block">
-                      {selectedDocType === 'delivery_order' ? 'ฟอร์มใบส่งของ (DO) — เก็บตารางหลัก 39 คอลัมน์ (น้ำหนักต้นทาง ช่อง 13, 14, 15)' :
+                      {selectedDocType === 'delivery_order' ? 'ฟอร์มเอกสารส่งมอบ (DO) — เก็บตารางหลัก 39 คอลัมน์ (น้ำหนักต้นทาง ช่อง 13, 14, 15)' :
                        selectedDocType === 'dest_weighbridge' ? 'ฟอร์มตั๋วชั่งน้ำหนักปลายทาง — เก็บลง [โซน 4: ช่อง 18, 19, 20] เพื่อชนบิลกับ DO' :
-                       selectedDocType === 'weighbridge' ? 'ฟอร์มตั๋วชั่งน้ำหนักต้นทาง (กรณีใช้แทน DO — เก็บลงช่อง 13, 14, 15)' :
+                       selectedDocType === 'weighbridge' ? 'ฟอร์มเอกสารส่งมอบ: ตั๋วชั่งต้นทาง (ใช้แทน DO — เก็บลงช่อง 13, 14, 15; ระบบคงชนิดย่อยจาก OCR)' :
                        selectedDocType === 'tax_invoice' ? 'ฟอร์มใบเสร็จรับเงิน / ใบกำกับภาษี (Tax Invoice)' :
                        selectedDocType === 'purchase_order' ? 'ฟอร์มใบสั่งซื้อสินค้า (PO)' : 'ฟอร์มโลจิสติกส์เต็มรูปแบบ'}
                     </span>
@@ -1189,7 +1193,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       {showAllCols ? 'แสดงทุกฟิลด์ (ครบ 39 คอลัมน์)' :
                        selectedDocType === 'delivery_order' ? 'แสดงฟิลด์ใบส่งของ (DO) และน้ำหนักต้นทาง ช่อง 13 (หนัก Gross), 14 (เบา Tare), 15 (สุทธิ Net)' :
                        selectedDocType === 'dest_weighbridge' ? 'บันทึก 18. หนักเข้า (Gross), 19. เบาออก (Tare), 20. น้ำหนักสุทธิ (Net) เพื่อนำไปชนกับใบส่งของ (DO)' :
-                       selectedDocType === 'weighbridge' ? 'แสดงน้ำหนักชั่งต้นทาง ช่อง 13-15 (สามารถกดสลับเป็นโหมดตั๋วชั่งปลายทาง ช่อง 18-20 ได้)' :
+                       selectedDocType === 'weighbridge' ? 'เป็นเอกสารส่งมอบเช่นเดียวกับ DO; เก็บน้ำหนักต้นทางช่อง 13-15 และคงชนิดเอกสารตั๋วชั่งที่ OCR ตรวจพบ' :
                        selectedDocType === 'tax_invoice' ? 'แสดงเฉพาะเลขผู้เสียภาษี 13 หลัก รายการสินค้า และยอดเงิน (ซ่อนน้ำหนักตราชั่ง)' :
                        'ระบบปรับฟิลด์ตามบริบทเอกสาร'}
                     </span>

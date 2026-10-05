@@ -44,11 +44,7 @@ interface LineInboxViewProps {
 const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
   {
     value: 'delivery_order',
-    shortLabel: '📦 ใบส่งของ (DO)'
-  },
-  {
-    value: 'weighbridge',
-    shortLabel: '⚖️ ตั๋วชั่งต้นทาง'
+    shortLabel: '📦 เอกสารส่งมอบ (DO / ตั๋วชั่งต้นทาง)'
   },
   {
     value: 'dest_weighbridge',
@@ -384,12 +380,18 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     counts[item.detectedDocType] = (counts[item.detectedDocType] || 0) + 1;
     return counts;
   }, {});
+  const supplierDeliveryCount =
+    (documentTypeCounts.delivery_order || 0) + (documentTypeCounts.weighbridge || 0);
   const hasActiveFilters = statusFilter !== 'all' || docTypeFilter !== 'all' ||
     groupFilter !== 'all' || Boolean(searchQuery.trim());
 
   // Filtered items
   const filteredItems = inboxItems.filter(item => {
-    if (docTypeFilter !== 'all' && item.detectedDocType !== docTypeFilter) {
+    if (
+      docTypeFilter !== 'all' &&
+      item.detectedDocType !== docTypeFilter &&
+      !(docTypeFilter === 'delivery_order' && item.detectedDocType === 'weighbridge')
+    ) {
       return false;
     }
     if (statusFilter !== 'all') {
@@ -496,6 +498,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   // Instant Document Type Switch
   const handleInstantDocTypeChange = (item: LineBillInboxItem, newDocType: DocumentType) => {
+    const currentIsSupplierDelivery = item.detectedDocType === 'delivery_order' || item.detectedDocType === 'weighbridge';
+    if (currentIsSupplierDelivery && newDocType === 'delivery_order') {
+      return;
+    }
     const remappedData = remapLineBillToDocType(item.extractedData, newDocType);
     const updatedItem: LineBillInboxItem = {
       ...item,
@@ -670,7 +676,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 <option value="all">ทุกประเภทเอกสาร</option>
                 {DOC_TYPE_OPTIONS.map(option => (
                   <option key={option.value} value={option.value}>
-                    {option.shortLabel} ({documentTypeCounts[option.value] || 0})
+                    {option.shortLabel} ({option.value === 'delivery_order' ? supplierDeliveryCount : documentTypeCounts[option.value] || 0})
                   </option>
                 ))}
               </select>
@@ -1176,7 +1182,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                         {item.status !== 'ignored_non_bill' ? (
                           <div className="flex items-center gap-1">
                             <select
-                              value={item.detectedDocType}
+                              value={item.detectedDocType === 'weighbridge' ? 'delivery_order' : item.detectedDocType}
                               onChange={e =>
                                 handleInstantDocTypeChange(item, e.target.value as DocumentType)
                               }
