@@ -18,6 +18,7 @@
 - นำการแสดงรหัสผ่าน/ปุ่มสลับบัญชีออกจาก UI; หน้าจัดการบัญชีเหลือ Username, Password, ชื่อที่แสดง และ Role พร้อมอัปเดต/เปลี่ยนรหัสผ่านผ่าน API ที่ต้องเป็น Admin
 - แก้ handover, blueprint และ README ให้ระบุการ login/session และข้อจำกัดที่ยังเปิด: role policy บาง action ต้องทบทวน และ service-role credential ยังไม่ได้หมุน
 - ไม่มีการแก้ข้อมูล Production หรือหมุน secret; ทดสอบ `npm run lint`, `npm run build` และ `git diff --check` ผ่าน
+- แก้ตามข้อสังเกตของผู้ใช้: ถ้าไม่มี Master Admin ใน `app_users` server สร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) ให้อัตโนมัติด้วยรหัสเริ่มต้น `123456` ที่เก็บเป็น hash; อัปเดตเอกสารให้ระบุว่าต้องเปลี่ยนรหัสทันทีหลังล็อกอินครั้งแรก
 
 ### การเปลี่ยนแปลง
 - อัปเดต `HANDOVER_DOCUMENTATION.md`, `DATABASE_STORAGE_BLUEPRINT.md` และบันทึกงานนี้

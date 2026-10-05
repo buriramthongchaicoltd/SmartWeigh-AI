@@ -53,6 +53,8 @@ type AuthenticatedAppUser = {
 
 const AUTH_COOKIE_NAME = 'smartweigh_session';
 const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SYSTEM_MASTER_USERNAME = 'Admin';
+const SYSTEM_MASTER_INITIAL_PASSWORD = '123456';
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
 const authSessions = new Map<string, { user: AuthenticatedAppUser; expiresAt: number }>();
 const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
@@ -151,44 +153,31 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
     const { data, error } = await client.from('app_users').select('id,username,status');
     if (error) throw error;
-    if ((data || []).length === 0 && !process.env.INITIAL_ADMIN_PASSWORD) {
-      return res.status(503).json({
-        success: false,
-        error: 'ยังไม่มีบัญชี Admin เริ่มต้น กรุณาตั้ง INITIAL_ADMIN_PASSWORD ใน Environment ของเซิร์ฟเวอร์ก่อน'
-      });
+    const hasMasterAccount = (data || []).some((user: Record<string, any>) =>
+      String(user.id) === 'SYSTEM-MASTER-ADMIN' || String(user.username || '').trim().toLowerCase() === SYSTEM_MASTER_USERNAME.toLowerCase()
+    );
+    if (!hasMasterAccount) {
+      const { error: seedError } = await client.from('app_users').upsert({
+        id: 'SYSTEM-MASTER-ADMIN',
+        username: SYSTEM_MASTER_USERNAME,
+        password: hashPassword(SYSTEM_MASTER_INITIAL_PASSWORD),
+        full_name: SYSTEM_MASTER_USERNAME,
+        role: 'admin',
+        department: '',
+        status: 'active'
+      }, { onConflict: 'id', ignoreDuplicates: true });
+      if (seedError) throw seedError;
     }
-    const matchingUser = (data || []).find((user: Record<string, any>) => String(user.username || '').trim().toLowerCase() === username.toLowerCase());
-    let row: Record<string, any> | null = null;
-    let checked: { valid: boolean; needsUpgrade: boolean } | null = null;
-    if (matchingUser) {
-      const { data: account, error: accountError } = await client.from('app_users').select('*').eq('id', matchingUser.id).single();
-      if (accountError) throw accountError;
-      row = account;
-    } else if ((data || []).length === 0 && username.toLowerCase() === 'admin' && process.env.INITIAL_ADMIN_PASSWORD) {
-      const initialPassword = process.env.INITIAL_ADMIN_PASSWORD;
-      const expected = Buffer.from(initialPassword);
-      const attempted = Buffer.from(password);
-      if (expected.length === attempted.length && crypto.timingSafeEqual(expected, attempted)) {
-        const { data: created, error: createError } = await client.from('app_users').insert({
-          id: 'SYSTEM-MASTER-ADMIN',
-          username: 'Admin',
-          password: hashPassword(password),
-          full_name: 'Admin',
-          role: 'admin',
-          department: '',
-          status: 'active'
-        }).select('*').single();
-        if (createError) throw createError;
-        row = created;
-        checked = { valid: true, needsUpgrade: false };
-        delete process.env.INITIAL_ADMIN_PASSWORD;
-      }
-    }
+    const { data: row, error: accountError } = await client.from('app_users')
+      .select('*')
+      .ilike('username', username)
+      .maybeSingle();
+    if (accountError) throw accountError;
     if (!row || row.status === 'suspended' || typeof row.password !== 'string') {
       return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     }
 
-    checked ||= verifyPassword(password, row.password);
+    const checked = verifyPassword(password, row.password);
     if (!checked.valid) return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     if (checked.needsUpgrade) {
       const { error: upgradeError } = await client.from('app_users').update({ password: hashPassword(password) }).eq('id', row.id);

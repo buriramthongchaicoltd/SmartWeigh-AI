@@ -20,7 +20,7 @@
 - ไฟล์ `.supabase_config.json` ที่ถูก track มี Supabase service-role credential และ `getSupabaseClient()` เลือกใช้ service-role key ก่อน anon key; service role ข้าม RLS ได้ ให้ถือว่า credential นี้ compromised และหมุน/เพิกถอนก่อนใช้งานต่อ โดยย้ายค่าที่ใช้จริงไปยัง runtime secret และตรวจสอบ Git history/การใช้งานจริง ห้ามคัดลอกค่าลับลงเอกสารหรือ log
 - API ที่ไม่ใช่ public health/login/LINE webhook บังคับ server session; API ตั้งค่าระบบและจัดการผู้ใช้จำกัด Admin. ยังคงต้องทบทวนและบังคับสิทธิ์ role ราย action สำหรับข้อมูลธุรกิจทุกเส้นทาง ไม่ใช้ role UI เป็น security boundary
 - Login ใช้ Username/Password จาก `app_users`, hash scrypt, HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และจะหมดเมื่อ process restart/deploy. Legacy plaintext password จะถูก hash เมื่อ login สำเร็จ
-- ถ้าตาราง `app_users` ยังว่าง ให้ตั้ง `INITIAL_ADMIN_PASSWORD` ใน environment ชั่วคราวและ login เป็น `Admin` เพื่อ bootstrap บัญชีแรก; ค่านี้ถูกลบจาก process หลังบันทึกบัญชีสำเร็จ
+- ถ้ายังไม่มี Master Admin ใน `app_users`, endpoint login จะสร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) อัตโนมัติด้วยรหัสเริ่มต้น `123456` และเก็บเป็น scrypt hash; หลังล็อกอินครั้งแรก Admin ตั้งรหัสใหม่และสร้างบัญชีพนักงานได้โดยไม่ต้องเพิ่มค่า environment. รหัสเริ่มต้นเป็นค่าที่ทราบและอยู่ใน server source จึงต้องเปลี่ยนทันที
 - การแก้ authentication นี้ไม่ได้หมุน Supabase service-role credential และไม่ได้ตรวจฐานข้อมูล/Production จริง; ต้องทำการ rotate credential และทบทวน API policy แยก
 
 ---
