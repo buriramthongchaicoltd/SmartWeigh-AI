@@ -4,6 +4,22 @@
 
 ---
 
+## [2026-10-05] Prevent Browser Timeout Racing Gemini OCR
+
+### ปัญหา
+- ScanModal ยกเลิก HTTP request เองหลัง 32 วินาที ขณะที่ server OCR มี retry/timeout รวม 32 วินาที จึงชนกันพอดีและ browser รายงาน `AbortError: signal is aborted without reason` ก่อนรับคำตอบจาก server
+
+### การแก้ไข
+- ขยาย timeout ฝั่ง browser สำหรับสแกนบิลและ PO เป็น 45 วินาที เพื่อเผื่อเวลารับคำตอบหลัง server จบ retry policy
+- เคลียร์ timer ใน `finally` ทั้งสอง modal ให้ครอบคลุมทั้งกรณีสำเร็จและ error
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] Fix Verify Modal AI Re-Scan Request Payload
 
 ### ปัญหา

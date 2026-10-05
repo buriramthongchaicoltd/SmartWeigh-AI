@@ -218,7 +218,7 @@ export const ScanModal: React.FC<ScanModalProps> = ({
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
-    }, 32000);
+    }, 45000);
 
     try {
       setTimeout(() => {
@@ -237,8 +237,6 @@ export const ScanModal: React.FC<ScanModalProps> = ({
             mimeType: selectedFile?.type || 'image/png'
           })
         });
-        clearTimeout(timeoutId);
-
         if (!resp.ok) {
           const errJson = await resp.json().catch(() => ({}));
           throw new Error(errJson.error || `HTTP ${resp.status}`);
@@ -272,8 +270,6 @@ export const ScanModal: React.FC<ScanModalProps> = ({
           targetDocType: selectedDocType
         })
       });
-      clearTimeout(timeoutId);
-
       if (!resp.ok) {
         const errJson = await resp.json().catch(() => ({}));
         throw new Error(errJson.error || `HTTP ${resp.status}`);
@@ -350,6 +346,8 @@ export const ScanModal: React.FC<ScanModalProps> = ({
       } else {
         setErrorMsg(err.message || 'เกิดข้อผิดพลาดในการเชื่อมต่อสแกนบิล โปรดลองใหม่อีกครั้ง');
       }
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 

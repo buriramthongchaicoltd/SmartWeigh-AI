@@ -112,7 +112,7 @@ export const POScanModal: React.FC<POScanModalProps> = ({
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
       abortController.abort();
-    }, 32000);
+    }, 45000);
 
     try {
       const response = await fetch('/api/scan-po', {
@@ -124,8 +124,6 @@ export const POScanModal: React.FC<POScanModalProps> = ({
           mimeType: selectedFile?.type || 'image/png'
         })
       });
-      clearTimeout(timeoutId);
-
       const result = await response.json();
 
       if (!result.success) {
@@ -142,6 +140,7 @@ export const POScanModal: React.FC<POScanModalProps> = ({
         setScanError(err.message || 'เกิดข้อผิดพลาดในการเชื่อมต่อกับ Gemini AI');
       }
     } finally {
+      clearTimeout(timeoutId);
       setIsScanning(false);
     }
   };
