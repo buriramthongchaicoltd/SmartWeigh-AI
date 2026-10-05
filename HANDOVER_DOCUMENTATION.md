@@ -54,6 +54,7 @@
 - Schema และ adapter ผลลัพธ์ยังแยกตามเอกสารเพื่อคง contract ของ Order (39 คอลัมน์), PO (`items/orderedQty`) และ LINE Inbox; `/api/scan-po` ระบุประเภท `purchase_order` จากบริบทของ endpoint ส่วน `VerifyModal` คงประเภทที่ OCR จำแนกไว้แทนการเปลี่ยน `weighbridge`/`concrete` เป็น `delivery_order`
 - ชุดประเภทเอกสารกลางคือ `delivery_order`, `weighbridge`, `dest_weighbridge`, `concrete`, `tax_invoice`, `purchase_order` และ `full_logistics`
 - ใช้ `normalizeOcrDocumentNumber()` และ `normalizeOcrWeightPair()` ร่วมกันสำหรับเลขเล่ม/เลขที่และการจัด Gross/Tare/Net; full-logistics จาก LINE มีฟิลด์น้ำหนักปลายทางแยกจากต้นทาง
+- OCR จาก LINE เพิ่มรอบช่วยอ่านเฉพาะเลขที่ด้วย `gemini-2.5-pro` เมื่อเลขว่างหรือ `docNumberConfidence` ต่ำกว่า 75/100; รับผลรอบช่วยเฉพาะเมื่อมีเลขและ confidence ถึงเกณฑ์, รักษาเลขศูนย์นำหน้า และถ้ายังไม่ชัดให้เก็บช่องเลขว่างเพื่อให้คนตรวจแทนการเดา
 - `remapLineBillToDocType()` คง snapshot น้ำหนัก/เลขที่ปลายทางเมื่อผู้ตรวจสลับรายการ LINE ไปเป็น `full_logistics`
 
 ### กฎข้อที่ 4: การแยก "ชื่อกลุ่ม LINE" ออกจาก "ชื่อโครงการ (ช่อง 2)"

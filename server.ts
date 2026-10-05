@@ -137,6 +137,8 @@ const getGeminiClient = () => {
 // (with 'gemini-3.1-flash-lite' as same-family fallback) so the system automatically updates when a newer
 // flash-lite version is released while keeping 100% consistent flash-lite extraction behavior.
 const FLASH_LITE_MODELS = ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite'];
+const DOCUMENT_NUMBER_RESCUE_MODEL = 'gemini-2.5-pro';
+const DOCUMENT_NUMBER_RESCUE_CONFIDENCE_THRESHOLD = 75;
 const OCR_DOCUMENT_TYPES: DocumentType[] = [
   'delivery_order',
   'weighbridge',
@@ -198,33 +200,51 @@ function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValu
 }
 
 /**
- * Executes a Gemini request strictly using the 'flash-lite' model family ('gemini-flash-lite-latest')
- * with automatic retry and timeout protection so extraction results remain 100% consistent.
+ * Executes Gemini requests with retry/timeout protection; Flash-Lite is the default OCR family.
  */
-async function callGeminiWithResilience(ai: GoogleGenAI, requestPayload: any, overallTimeoutMs = 32000) {
+async function callGeminiWithResilience(
+  ai: GoogleGenAI,
+  requestPayload: any,
+  options: {
+    models?: readonly string[];
+    overallTimeoutMs?: number;
+    attemptTimeoutMs?: number;
+  } = {}
+) {
+  const models = options.models || FLASH_LITE_MODELS;
+  const overallTimeoutMs = options.overallTimeoutMs || 32000;
+  const attemptTimeoutMs = options.attemptTimeoutMs || 16000;
   let lastError: any = null;
   const overallStartTime = Date.now();
 
-  for (const model of FLASH_LITE_MODELS) {
+  for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
       if (Date.now() - overallStartTime > overallTimeoutMs) {
-        throw new Error('การประมวลผล Gemini Flash-Lite หมดเวลา (Request Timeout) กรุณาลองใหม่อีกครั้ง');
+        throw new Error('การประมวลผล Gemini หมดเวลา (Request Timeout) กรุณาลองใหม่อีกครั้ง');
       }
 
       try {
         console.log(`[Gemini] Calling model ${model} (attempt ${attempt + 1}/2)...`);
 
-        // Enforce 16s per-attempt timeout using Promise.race
+        // Bound each model call so the retry path cannot stall the LINE webhook indefinitely.
         const attemptCall = ai.models.generateContent({
           ...requestPayload,
           model: model
         });
 
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
         const attemptTimeout = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error(`Timeout: โมเดล ${model} ใช้เวลาเกิน 16 วินาที`)), 16000);
+          timeoutId = setTimeout(
+            () => reject(new Error(`Timeout: โมเดล ${model} ใช้เวลาเกิน ${attemptTimeoutMs / 1000} วินาที`)),
+            attemptTimeoutMs
+          );
         });
-
-        const response = await Promise.race([attemptCall, attemptTimeout]);
+        let response: Awaited<typeof attemptCall>;
+        try {
+          response = await Promise.race([attemptCall, attemptTimeout]);
+        } finally {
+          if (timeoutId) clearTimeout(timeoutId);
+        }
         return { response, usedModel: model };
       } catch (err: any) {
         lastError = err;
@@ -251,7 +271,15 @@ async function callGeminiWithResilience(ai: GoogleGenAI, requestPayload: any, ov
   throw lastError;
 }
 
-async function requestOcrWithSharedPolicy(ai: GoogleGenAI, payload: Record<string, any>) {
+async function requestOcrWithSharedPolicy(
+  ai: GoogleGenAI,
+  payload: Record<string, any>,
+  options: {
+    models?: readonly string[];
+    overallTimeoutMs?: number;
+    attemptTimeoutMs?: number;
+  } = {}
+) {
   const parts = payload.contents?.parts;
   const promptPart = Array.isArray(parts)
     ? parts.find((part: any) => typeof part?.text === 'string')
@@ -260,7 +288,7 @@ async function requestOcrWithSharedPolicy(ai: GoogleGenAI, payload: Record<strin
     throw new Error('OCR request ไม่มี prompt สำหรับแนบมาตรฐานการอ่านเอกสาร');
   }
   promptPart.text = `${SHARED_OCR_POLICY}\n\n${promptPart.text}`;
-  const result = await callGeminiWithResilience(ai, payload);
+  const result = await callGeminiWithResilience(ai, payload, options);
   const output = result.response.text || '{}';
   let data: Record<string, any>;
   try {
@@ -1369,6 +1397,7 @@ async function analyzeLineBillWithGemini(
    - กฎเหล็กการอ่านเลขที่เอกสาร (PO / DO / ใบเสร็จ):
      * กรณีเอกสารมีทั้ง "เล่มที่ (Book No. / Vol.)" และ "เลขที่ (No.)" แยกกันบนหัวบิล ให้สกัดและจัดเก็บเป็นรูปแบบ 'เล่มที่/เลขที่' เสมอ (เช่น บนบิลพิมพ์ 'เล่มที่ 02 เลขที่ 0045' ให้บันทึกเป็น '02/0045' พร้อมระบุเล่มที่ใน bookNo)
      * กรณีไม่มีเล่มที่ ให้อ่านตามที่ปรากฏตรงๆ
+     * ให้คะแนน docNumberConfidence แยกเฉพาะการอ่านเลขที่เอกสารหลักเป็น 0–100 ตามความชัดของตัวอักษรในภาพ ไม่ใช่ความมั่นใจภาพรวม
    - กฎเหล็กน้ำหนักชั่งรถบรรทุก (Gross / Tare / Net):
      * GrossWeightKg = น้ำหนักหนัก / รถรวมสินค้า (ค่าที่มากกว่าเสมอ แม้บิลโรงโม่ต้นทางพิมพ์ว่าน้ำหนักออก)
      * TareWeightKg = น้ำหนักเบา / รถเปล่า (ค่าที่น้อยกว่าเสมอ แม้บิลโรงโม่ต้นทางพิมพ์ว่าน้ำหนักเข้า)
@@ -1376,7 +1405,7 @@ async function analyzeLineBillWithGemini(
    - จัดหมวดหมู่วัสดุ (category) ตามมาตรฐานงานโยธา/ทล./ทช. เช่น 'หิน/ดิน/ทราย (ชั้นทาง & พื้นทาง)', 'ยางมะตอย & ผิวทางลาดยาง (ทล./ทช.)', 'คอนกรีตผสมเสร็จ & ผิวทางคอนกรีต', 'งานสะพาน & คอนกรีตอัดแรง', 'เหล็กเส้น & เหล็กโครงสร้างสะพาน/ถนน', 'งานท่อระบายน้ำ & รางระบายน้ำ', 'งานอำนวยความปลอดภัย & จราจร (ทล./ทช.)', 'งานป้องกันการกัดเซาะ & กำแพงกันดิน', 'ปูนซีเมนต์ & เคมีภัณฑ์ก่อสร้าง', 'ไม้แบบ นั่งร้าน & วัสดุสิ้นเปลือง', 'เครื่องจักรกลหนัก & น้ำมันเชื้อเพลิง', 'งานขนส่ง & โลจิสติกส์', 'ระบบไฟฟ้า & ประปาสนาม', หรือ 'วัสดุก่อสร้างทั่วไป'
    - ห้ามเดาชื่อโครงการ (col2) จากชื่อกลุ่ม LINE เด็ดขาด และแยกข้อความหมายเหตุออกจากชื่อสินค้าหลักเสมอ`;
 
-  const { data: raw } = await requestOcrWithSharedPolicy(ai, {
+  const { data: initialRaw } = await requestOcrWithSharedPolicy(ai, {
     contents: {
       parts: [
         { inlineData: { mimeType: mimeType || 'image/jpeg', data: cleanBase64 } },
@@ -1440,13 +1469,15 @@ async function analyzeLineBillWithGemini(
               }
             }
           },
-          confidence: { type: Type.NUMBER }
+          confidence: { type: Type.NUMBER, description: 'ความมั่นใจภาพรวม 0 ถึง 100' },
+          docNumberConfidence: { type: Type.NUMBER, description: 'ความมั่นใจในการอ่านเลขที่เอกสารหลักโดยเฉพาะ 0 ถึง 100' }
         },
-        required: ['isBillDocument']
+        required: ['isBillDocument', 'docNumberConfidence']
       }
     }
   });
 
+  const raw = { ...initialRaw };
   if (raw.isBillDocument === false) {
     return {
       isBillDocument: false,
@@ -1456,6 +1487,85 @@ async function analyzeLineBillWithGemini(
       rawAiSnapshot: {},
       confidence: Number(raw.confidence) || 90
     };
+  }
+
+  const initialDocNumber = normalizeOcrDocumentNumber(raw.docNumber, raw.bookNo);
+  const docNumberConfidence = Number(raw.docNumberConfidence);
+  const shouldRescanDocumentNumber =
+    !initialDocNumber ||
+    (Number.isFinite(docNumberConfidence) && docNumberConfidence < DOCUMENT_NUMBER_RESCUE_CONFIDENCE_THRESHOLD);
+  const docNumberRescue: {
+    attempted: boolean;
+    accepted: boolean;
+    confidence?: number;
+    model?: string;
+    error?: string;
+  } = {
+    attempted: shouldRescanDocumentNumber,
+    accepted: false
+  };
+
+  if (shouldRescanDocumentNumber) {
+    const numberOnlyPrompt = `อ่านข้อความจากเอกสารภาพนี้โดยโฟกัสเฉพาะเลขที่เอกสารหลักและเล่มที่:
+- ประเภทเอกสารที่รอบแรกจำแนกได้: ${raw.docType || 'ไม่ทราบ'}
+- มองหาหัวข้อ "เลขที่", "เลขที่เอกสาร", "No.", "Invoice No.", "DO No.", "PO No.", "เลขตั๋ว" และ "เล่มที่/Book No." ที่เป็นเลขของเอกสารฉบับนี้
+- ห้ามใช้เลขอ้างอิง PO/DO ของเอกสารอื่น, วันที่, ทะเบียนรถ, เลขน้ำหนัก, เลขประจำตัวผู้เสียภาษี หรือเลขโทรศัพท์แทนเลขเอกสารหลัก
+- รักษาเลขศูนย์นำหน้า ตัวอักษร ขีด และเครื่องหมาย / ตามที่พิมพ์บนเอกสาร ห้ามเติม/ตัดอักขระเอง
+- หากมีทั้งเล่มที่และเลขที่ ให้ส่งแยกใน bookNo และ docNumber; หากไม่มีเล่มที่ให้ bookNo เป็นสตริงว่าง
+- หากภาพอ่านไม่ได้หรือมีเอกสารหลายฉบับจนระบุฉบับหลักไม่ได้ ให้ส่ง docNumber เป็นสตริงว่าง ห้ามเดา
+- confidence คือความมั่นใจในการอ่านเลขที่เอกสารหลัก 0 ถึง 100`;
+    try {
+      const { data: rescue, usedModel } = await requestOcrWithSharedPolicy(ai, {
+        contents: {
+          parts: [
+            { inlineData: { mimeType: mimeType || 'image/jpeg', data: cleanBase64 } },
+            { text: numberOnlyPrompt }
+          ]
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              bookNo: { type: Type.STRING, description: 'เล่มที่เอกสาร หรือสตริงว่าง' },
+              docNumber: { type: Type.STRING, description: 'เลขที่เอกสารหลัก หรือสตริงว่างถ้าอ่านไม่ได้' },
+              confidence: { type: Type.NUMBER, description: 'ความมั่นใจในการอ่านเลขที่ 0 ถึง 100' }
+            },
+            required: ['bookNo', 'docNumber', 'confidence']
+          }
+        }
+      }, {
+        models: [DOCUMENT_NUMBER_RESCUE_MODEL],
+        overallTimeoutMs: 60000,
+        attemptTimeoutMs: 25000
+      });
+      const rescuedDocNumber = normalizeOcrDocumentNumber(rescue.docNumber, rescue.bookNo);
+      const rescueConfidence = Number(rescue.confidence);
+      docNumberRescue.confidence = rescueConfidence;
+      docNumberRescue.model = usedModel;
+      if (
+        rescuedDocNumber &&
+        Number.isFinite(rescueConfidence) &&
+        rescueConfidence >= DOCUMENT_NUMBER_RESCUE_CONFIDENCE_THRESHOLD
+      ) {
+        raw.docNumber = rescue.docNumber;
+        raw.bookNo = rescue.bookNo;
+        raw.docNumberConfidence = rescueConfidence;
+        docNumberRescue.accepted = true;
+      }
+    } catch (error) {
+      docNumberRescue.error = (error as Error).message;
+      console.warn('[LINE OCR] Document number rescue failed:', docNumberRescue.error);
+    }
+  }
+  if (
+    initialDocNumber &&
+    Number.isFinite(docNumberConfidence) &&
+    docNumberConfidence < DOCUMENT_NUMBER_RESCUE_CONFIDENCE_THRESHOLD &&
+    !docNumberRescue.accepted
+  ) {
+    raw.docNumber = '';
+    raw.bookNo = '';
   }
 
   const detectedDocType = normalizeOcrDocumentType(raw.docType);
@@ -1491,7 +1601,10 @@ async function analyzeLineBillWithGemini(
   const rawAiSnapshot: Record<string, any> = {
     docType: detectedDocType,
     rawDocNo: formattedDocNo,
+    rawDocNoCandidate: initialDocNumber || '',
     rawBookNo: rawBook,
+    docNumberConfidence: Number(raw.docNumberConfidence) || 0,
+    docNumberRescue,
     rawRefPoNo: (raw.referencePoNo || '').toString().trim(),
     rawRefDoNo: (raw.referenceDoNo || '').toString().trim(),
     referenceSource: raw.referenceSource || 'form_field',
