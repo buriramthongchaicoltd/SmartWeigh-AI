@@ -2007,13 +2007,9 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         try {
           const driveCfg = getStoredDriveConfig();
           if (driveCfg.isEnabled && driveCfg.rootFolderId) {
-            const extData = inboxItem.extractedData as any;
-            // ใช้เลขที่เอกสาร ถ้าไม่มีใช้ LINE messageId (ตัดเลขท้าย 6 หลักสำหรับ readability)
-            const rawId = extData?.col17 || extData?.col6 || extData?.col4
-              || (inboxItem.lineMessageId ? `MSG${String(inboxItem.lineMessageId).slice(-8)}` : null)
-              || (inboxItem.id ? inboxItem.id.replace(/^LINE_(?:SIM_)?/, '') : `NOID_${Date.now()}`);
-            const safeDocNo = rawId.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '_');
-            const fileName = `LINE_${new Date().toISOString().slice(0, 10)}_${safeDocNo}.jpg`;
+            const safeInboxId = sanitizeDriveName(inboxItem.id).slice(-80);
+            const dateStr = new Date(inboxItem.receivedAt).toISOString().slice(0, 10);
+            const fileName = `LINE_${dateStr}_${safeInboxId}.jpg`;
             let driveResult: any = null;
 
             if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
@@ -2029,13 +2025,16 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
               if (driveToken) {
                 const zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
                 if (zones.ZONE_00) {
-                  driveResult = await uploadFileToDrive({
-                    accessToken: driveToken,
-                    folderId: zones.ZONE_00,
-                    fileName,
-                    base64Data: base64DataUrl,
-                    mimeType
-                  });
+                  driveResult = await findDriveFileByName(driveToken, zones.ZONE_00, fileName);
+                  if (!driveResult) {
+                    driveResult = await uploadFileToDrive({
+                      accessToken: driveToken,
+                      folderId: zones.ZONE_00,
+                      fileName,
+                      base64Data: base64DataUrl,
+                      mimeType
+                    });
+                  }
                 }
               }
             }
@@ -2060,7 +2059,8 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       try {
         const client = getSupabaseClient();
         if (client) {
-          await client.from('line_inbox').upsert(mapLineInboxToSupabase(inboxItem), { onConflict: 'id' });
+          const { error } = await client.from('line_inbox').upsert(mapLineInboxToSupabase(inboxItem), { onConflict: 'id' });
+          if (error) throw new Error(`บันทึกรายการ LINE ${inboxItem.id} ลง Supabase ไม่สำเร็จ: ${error.message}`);
         }
       } catch (dbErr) {
         console.warn('[LINE Webhook] Failed to auto-save inboxItem to Supabase line_inbox table:', dbErr);
@@ -4125,6 +4125,27 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
     }
 
     const linkedFileIds = await getDriveLinkedFileIds(client);
+    const lineRows: Array<{
+      id: string;
+      status?: string;
+      drive_file_id?: string;
+      drive_file_location?: string;
+      received_at?: string;
+      doc_number?: string;
+      store_name?: string;
+    }> = [];
+    const linePageSize = 500;
+    for (let offset = 0; ; offset += linePageSize) {
+      const { data, error } = await client
+        .from('line_inbox')
+        .select('id,status,drive_file_id,drive_file_location,received_at,doc_number,store_name')
+        .order('id', { ascending: true })
+        .range(offset, offset + linePageSize - 1);
+      if (error) throw new Error(`อ่านรายการกล่องพัก LINE ไม่สำเร็จ: ${error.message}`);
+      lineRows.push(...(data || []));
+      if (!data || data.length < linePageSize) break;
+    }
+
     let files: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string }> = [];
     const driveToken = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
     const isGasMode = cfg.connectionMode === 'gas' || (!driveToken && Boolean(cfg.gasWebAppUrl));
@@ -4181,19 +4202,72 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
       } while (pageToken);
     }
 
+    const lineRowsByFileId = new Map<string, typeof lineRows>();
+    for (const row of lineRows) {
+      if (!row.drive_file_id) continue;
+      const references = lineRowsByFileId.get(row.drive_file_id) || [];
+      references.push(row);
+      lineRowsByFileId.set(row.drive_file_id, references);
+    }
+
+    const zone00FileIds = new Set(files.map(file => file.id));
     const linkedFiles = files
       .filter(file => linkedFileIds.has(file.id))
-      .map(file => ({ ...file, linkedIn: linkedFileIds.get(file.id) || [] }));
+      .map(file => ({
+        ...file,
+        linkedIn: linkedFileIds.get(file.id) || [],
+        lineInboxItems: (lineRowsByFileId.get(file.id) || []).map(row => ({
+          id: row.id,
+          status: row.status,
+          docNumber: row.doc_number,
+          storeName: row.store_name
+        }))
+      }));
     const orphanFiles = files.filter(file => !linkedFileIds.has(file.id));
+    const filesNotMatchedToLine = files
+      .filter(file => !lineRowsByFileId.has(file.id))
+      .map(file => ({ ...file, linkedIn: linkedFileIds.get(file.id) || [] }));
+    const lineRowsWithoutDriveId = lineRows.filter(row => !row.drive_file_id);
+    const lineRowsWithFileOutsideZone00 = lineRows.filter(row =>
+      row.status !== 'verified' &&
+      row.drive_file_id &&
+      (!row.drive_file_location || row.drive_file_location === 'zone_00') &&
+      !zone00FileIds.has(row.drive_file_id)
+    );
+    const verifiedRowsStillInZone00 = lineRows.filter(row =>
+      row.status === 'verified' && row.drive_file_id && zone00FileIds.has(row.drive_file_id)
+    );
+    const duplicateLineReferences = Array.from(lineRowsByFileId.entries())
+      .filter(([, references]) => references.length > 1)
+      .map(([fileId, references]) => ({
+        fileId,
+        lineInboxCount: references.length,
+        lineInboxIds: references.map(row => row.id),
+        status: references.map(row => row.status || 'unknown')
+      }));
     return res.json({
       success: true,
       scannedAt: new Date().toISOString(),
       zone00Count: files.length,
-      linkedCount: linkedFiles.length,
+      lineInboxCount: lineRows.length,
+      lineInboxWithDriveIdCount: lineRows.filter(row => row.drive_file_id).length,
+      lineInboxUniqueDriveFileCount: lineRowsByFileId.size,
+      lineInboxWithoutDriveIdCount: lineRowsWithoutDriveId.length,
+      zone00MatchedToLineCount: files.length - filesNotMatchedToLine.length,
+      zone00NotMatchedToLineCount: filesNotMatchedToLine.length,
+      zone00LinkedToOtherDocumentsCount: filesNotMatchedToLine.filter(file => file.linkedIn.length > 0).length,
       orphanCount: orphanFiles.length,
+      duplicateLineReferenceCount: duplicateLineReferences.length,
+      lineRowsWithFileOutsideZone00Count: lineRowsWithFileOutsideZone00.length,
+      verifiedRowsStillInZone00Count: verifiedRowsStillInZone00.length,
       linkedFiles,
       orphanFiles,
-      message: 'ไฟล์ที่ไม่มี drive_file_id อ้างอิงจาก line_inbox, orders หรือ purchase_orders แสดงเป็นรายการให้ตรวจสอบก่อนย้ายเข้าถังกักกัน'
+      filesNotMatchedToLine,
+      lineRowsWithoutDriveId,
+      duplicateLineReferences,
+      lineRowsWithFileOutsideZone00,
+      verifiedRowsStillInZone00,
+      message: 'จับคู่ไฟล์ในโฟลเดอร์ 00 กับ line_inbox ด้วย drive_file_id โดยตรง; แยกไฟล์ที่อ้างอิงโดย orders/PO และไฟล์ที่ไม่มีการอ้างอิงก่อนเสนอให้กักกัน'
     });
   } catch (err: any) {
     console.error('[Drive Inbox Audit] Failed:', err);

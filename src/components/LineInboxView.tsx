@@ -101,10 +101,44 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [driveAudit, setDriveAudit] = useState<{
     scannedAt: string;
     zone00Count: number;
-    linkedCount: number;
+    lineInboxCount: number;
+    lineInboxWithDriveIdCount: number;
+    lineInboxUniqueDriveFileCount: number;
+    lineInboxWithoutDriveIdCount: number;
+    zone00MatchedToLineCount: number;
+    zone00NotMatchedToLineCount: number;
+    zone00LinkedToOtherDocumentsCount: number;
     orphanCount: number;
-    linkedFiles: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string; linkedIn: string[] }>;
+    duplicateLineReferenceCount: number;
+    lineRowsWithFileOutsideZone00Count: number;
+    verifiedRowsStillInZone00Count: number;
+    linkedFiles: Array<{
+      id: string;
+      name: string;
+      mimeType?: string;
+      createdTime?: string;
+      webViewLink?: string;
+      linkedIn: string[];
+      lineInboxItems: Array<{ id: string; status?: string; docNumber?: string; storeName?: string }>;
+    }>;
     orphanFiles: Array<{ id: string; name: string; mimeType?: string; createdTime?: string; webViewLink?: string }>;
+    filesNotMatchedToLine: Array<{
+      id: string;
+      name: string;
+      mimeType?: string;
+      createdTime?: string;
+      webViewLink?: string;
+      linkedIn: string[];
+    }>;
+    lineRowsWithoutDriveId: Array<{ id: string; status?: string; received_at?: string; doc_number?: string; store_name?: string }>;
+    duplicateLineReferences: Array<{
+      fileId: string;
+      lineInboxCount: number;
+      lineInboxIds: string[];
+      status: string[];
+    }>;
+    lineRowsWithFileOutsideZone00: Array<{ id: string; status?: string; drive_file_id?: string; doc_number?: string }>;
+    verifiedRowsStillInZone00: Array<{ id: string; drive_file_id?: string; doc_number?: string }>;
   } | null>(null);
   const [selectedOrphanIds, setSelectedOrphanIds] = useState<Set<string>>(new Set());
   const [quarantiningIds, setQuarantiningIds] = useState<Set<string>>(new Set());
@@ -574,15 +608,35 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
           <div className="mt-3 rounded-lg border border-amber-200 bg-white p-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <p className="font-semibold text-slate-800">
-                พบในโฟลเดอร์ 00 {driveAudit.zone00Count} ไฟล์ · เชื่อมโยง {driveAudit.linkedCount} ไฟล์ · ไม่พบรหัสอ้างอิง {driveAudit.orphanCount} ไฟล์
+                LINE {driveAudit.lineInboxCount} รายการ · โฟลเดอร์ 00 มี {driveAudit.zone00Count} ไฟล์ · จับคู่ LINE โดยตรง {driveAudit.zone00MatchedToLineCount} ไฟล์ · ไม่มี LINE อ้างอิง {driveAudit.zone00NotMatchedToLineCount} ไฟล์
               </p>
               <p className="text-slate-500">
                 ตรวจล่าสุด {new Date(driveAudit.scannedAt).toLocaleString('th-TH')}
               </p>
             </div>
+            <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                LINE มี Drive ID {driveAudit.lineInboxWithDriveIdCount} แถว · เป็นรหัสไฟล์ไม่ซ้ำ {driveAudit.lineInboxUniqueDriveFileCount} ไฟล์
+              </p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                LINE ไม่มี Drive ID {driveAudit.lineInboxWithoutDriveIdCount} รายการ
+              </p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                ไฟล์ที่ไม่ตรง LINE แต่ Order/PO อ้างอิง {driveAudit.zone00LinkedToOtherDocumentsCount} · ไม่มีการอ้างอิงเลย {driveAudit.orphanCount}
+              </p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                LINE ใช้ Drive ID ซ้ำ {driveAudit.duplicateLineReferenceCount} ไฟล์
+              </p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                รายการยังไม่ยืนยันที่อ้างไฟล์แต่ไม่พบใน 00 {driveAudit.lineRowsWithFileOutsideZone00Count}
+              </p>
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-slate-700">
+                รายการยืนยันแล้วแต่ไฟล์ยังอยู่ใน 00 {driveAudit.verifiedRowsStillInZone00Count}
+              </p>
+            </div>
             {driveAudit.orphanCount === 0 ? (
               <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
-                ไม่พบไฟล์ที่ไม่มีรายการเชื่อมโยงในฐานข้อมูล
+                ไม่พบไฟล์ที่ไม่มีการอ้างอิงจาก LINE, Order หรือ PO ในฐานข้อมูล
               </p>
             ) : (
               <>
@@ -652,16 +706,96 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 </p>
               </>
             )}
-            {driveAudit.linkedCount > 0 && (
+            {driveAudit.linkedFiles.length > 0 && (
               <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50">
                 <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700">
-                  ดูไฟล์ {driveAudit.linkedCount} รายการที่ยังมีการอ้างอิงในฐานข้อมูล (ไม่ถือเป็นไฟล์ขยะ)
+                  ดูไฟล์ {driveAudit.linkedFiles.length} รายการที่ยังมีการอ้างอิงในฐานข้อมูล
                 </summary>
                 <ul className="max-h-48 divide-y divide-slate-200 overflow-y-auto px-3">
                   {driveAudit.linkedFiles.map(file => (
+                    <li key={file.id} className="flex items-start justify-between gap-3 py-2 text-xs">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium text-slate-700">{file.name}</p>
+                        {file.lineInboxItems.length > 0 && (
+                          <p className="mt-1 text-slate-500">
+                            LINE: {file.lineInboxItems.map(row => `${row.id}${row.docNumber ? ` (${row.docNumber})` : ''}`).join(', ')}
+                          </p>
+                        )}
+                      </div>
+                      <span className="shrink-0 text-slate-500">{file.linkedIn.join(', ')}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {driveAudit.filesNotMatchedToLine.length > 0 && (
+              <details className="mt-3 rounded-lg border border-slate-200 bg-slate-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-slate-700">
+                  ดู {driveAudit.filesNotMatchedToLine.length} ไฟล์ใน 00 ที่ไม่มี LINE อ้างอิง (แยกตาม Order/PO)
+                </summary>
+                <ul className="max-h-48 divide-y divide-slate-200 overflow-y-auto px-3">
+                  {driveAudit.filesNotMatchedToLine.map(file => (
                     <li key={file.id} className="flex items-center justify-between gap-3 py-2 text-xs">
                       <span className="min-w-0 truncate font-medium text-slate-700">{file.name}</span>
-                      <span className="shrink-0 text-slate-500">{file.linkedIn.join(', ')}</span>
+                      <span className="shrink-0 text-slate-500">
+                        {file.linkedIn.length ? file.linkedIn.join(', ') : 'ไม่มีการอ้างอิง'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {driveAudit.lineInboxWithoutDriveIdCount > 0 && (
+              <details className="mt-3 rounded-lg border border-amber-200 bg-amber-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-amber-900">
+                  ดู {driveAudit.lineRowsWithoutDriveId.length} รายการ LINE ที่ไม่มี Drive ID
+                </summary>
+                <ul className="max-h-48 divide-y divide-amber-100 overflow-y-auto px-3">
+                  {driveAudit.lineRowsWithoutDriveId.map(row => (
+                    <li key={row.id} className="py-2 text-xs text-amber-900">
+                      {row.id} · {row.status || 'ไม่ทราบสถานะ'} · {row.doc_number || row.store_name || 'ไม่มีรายละเอียด'}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {driveAudit.duplicateLineReferenceCount > 0 && (
+              <details className="mt-3 rounded-lg border border-amber-200 bg-amber-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-amber-900">
+                  ตรวจ LINE {driveAudit.duplicateLineReferenceCount} กลุ่มที่อ้าง Drive ID ซ้ำ
+                </summary>
+                <ul className="max-h-48 divide-y divide-amber-100 overflow-y-auto px-3">
+                  {driveAudit.duplicateLineReferences.map(group => (
+                    <li key={group.fileId} className="py-2 text-xs text-amber-900">
+                      Drive ID {group.fileId} · LINE: {group.lineInboxIds.join(', ')}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {driveAudit.lineRowsWithFileOutsideZone00Count > 0 && (
+              <details className="mt-3 rounded-lg border border-amber-200 bg-amber-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-amber-900">
+                  ดูรายการที่อ้าง Drive ID แต่ยังไม่ verified และไม่พบไฟล์ใน 00
+                </summary>
+                <ul className="max-h-48 divide-y divide-amber-100 overflow-y-auto px-3">
+                  {driveAudit.lineRowsWithFileOutsideZone00.map(row => (
+                    <li key={row.id} className="py-2 text-xs text-amber-900">
+                      {row.id} · {row.status || 'ไม่ทราบสถานะ'} · {row.doc_number || 'ไม่มีเลขที่เอกสาร'} · Drive ID {row.drive_file_id}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {driveAudit.verifiedRowsStillInZone00Count > 0 && (
+              <details className="mt-3 rounded-lg border border-amber-200 bg-amber-50">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-amber-900">
+                  ดูรายการ verified ที่ไฟล์ยังอยู่ใน 00
+                </summary>
+                <ul className="max-h-48 divide-y divide-amber-100 overflow-y-auto px-3">
+                  {driveAudit.verifiedRowsStillInZone00.map(row => (
+                    <li key={row.id} className="py-2 text-xs text-amber-900">
+                      {row.id} · {row.doc_number || 'ไม่มีเลขที่เอกสาร'} · Drive ID {row.drive_file_id}
                     </li>
                   ))}
                 </ul>

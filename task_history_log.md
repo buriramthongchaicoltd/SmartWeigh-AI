@@ -4,6 +4,47 @@
 
 ---
 
+## [2026-10-05] LINE Inbox Drive Audit: Direct Reference Reconciliation
+
+### ปัญหา
+- ผลตรวจเดิมนับ linked จาก `line_inbox`, `orders`, `purchase_orders` รวมกัน จึงตอบไม่ได้ว่าไฟล์ในโฟลเดอร์ `00` ตรงกับรายการ LINE โดยตรงกี่ไฟล์ และทำให้ยอด 92 รายการกับ 115 ไฟล์ตีความผิดได้
+- LINE Inbox count รวมทุกสถานะ ขณะที่ไฟล์โฟลเดอร์ `00` เป็นเพียงไฟล์ที่ยังอยู่ในพื้นที่รอตรวจรับ จึงไม่ควรคาดหวังว่ายอดรวมสองฝั่งเท่ากันเสมอ
+
+### การแก้ไข
+- `POST /api/drive/audit-line-inbox` อ่านรายการ LINE แบบแบ่งหน้าและจับคู่กับไฟล์โฟลเดอร์ `00` ด้วย `line_inbox.drive_file_id` โดยตรง
+- รายงาน LINE rows ที่ไม่มี Drive ID, Drive ID ซ้ำ, ไฟล์ใน `00` ที่ไม่มี LINE reference, แถว LINE ที่ไฟล์ไม่อยู่ใน `00` และ verified rows ที่ยังค้างใน `00`
+- แยกไฟล์ที่ไม่มี LINE reference แต่ยังถูก Order/PO อ้างอิง ออกจาก orphan ที่ไม่มี reference ทุกตาราง; การเลือกกักกันยังทำได้เฉพาะ orphan และยังเป็นการย้ายแบบย้อนกลับได้ ไม่ลบถาวร
+- อัปเดต UI LINE Inbox, `HANDOVER_DOCUMENTATION.md` และ `DATABASE_STORAGE_BLUEPRINT.md` ให้สื่อความหมายจำนวนตรงกับข้อมูลที่ตรวจจริง
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `git diff --check` ผ่าน
+
+---
+
+## [2026-10-05] Fix: Prevent Duplicate LINE Webhook Drive Uploads
+
+### ปัญหาและสาเหตุจากโค้ด
+- ผู้ใช้ยืนยันว่าไม่มีรายการตรวจรับหรือย้ายไฟล์ จึงไม่สามารถใช้อธิบายไฟล์ส่วนเกินด้วยการย้ายออกจากโฟลเดอร์ 00 ได้
+- LINE webhook upsert `line_inbox` ด้วย LINE message ID ซึ่งทำให้ event เดิมทับแถวเดิม แต่ก่อนแก้ webhook ตั้งชื่อไฟล์จากเลขเอกสารและโหมด Drive API อัปโหลดโดยไม่ค้นหาไฟล์เดิม จึงมีช่องทางสร้างไฟล์ใหม่ซ้ำโดยที่ฐานข้อมูลยังมีแถวเดียว
+
+### การแก้ไข
+- ให้ Webhook ตั้งชื่อไฟล์จากวันที่รับและ LINE inbox ID แบบเดียวกับงานซิงก์ และค้นหาไฟล์ชื่อนี้ก่อนอัปโหลดในโหมด Drive API; โหมด GAS เดิมค้นหาชื่อภายใต้ Script Lock
+- ตรวจและรายงาน error ที่ Supabase ส่งกลับจากการ upsert แทนการมองว่าเขียนสำเร็จ
+- อัปเดตกฎชื่อไฟล์และ idempotency ใน `HANDOVER_DOCUMENTATION.md` และ `DATABASE_STORAGE_BLUEPRINT.md`
+
+### ขอบเขตข้อสรุป
+- ยืนยันได้ว่าโค้ดเดิมมีโอกาสทำให้เกิดไฟล์ซ้ำต่อแถว LINE; ยังระบุไม่ได้ว่าไฟล์เกิน 23 ไฟล์ใน Drive จริงเกิดจากช่องทางนี้ทั้งหมด จนกว่าจะรัน audit แล้วดูชื่อ/Drive IDs ของไฟล์ orphan และจำนวน webhook event/message ID จริง
+- ห้ามย้าย/ลบไฟล์ orphan โดยอัตโนมัติ; ต้องตรวจผล audit ก่อน
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] LINE Inbox Drive Sync: Idempotent Backfill & Daily 3-Day Check
 
 ### ปัญหา
@@ -2106,4 +2147,3 @@ UI Open Settings → loadConfigs → isConfigured? → runSilentAutoTest() → u
 - อัปเดต `HANDOVER_DOCUMENTATION.md` และ `DATABASE_STORAGE_BLUEPRINT.md`
 - **Validation:** `npm.cmd run lint`, `npm.cmd run build`, GAS JavaScript syntax check (`node` parse) และ `git diff --check` ผ่าน; build ยังเตือน bundle JavaScript ใหญ่กว่า 500 kB
 - **ข้อจำกัด:** ไม่สามารถอ่านจำนวน/รายการจริงใน Google Drive หรือ Supabase จาก workspace นี้ จึงต้องให้ผู้ใช้กด `ตรวจเทียบไฟล์ใน Drive` บนหน้า LINE Inbox เพื่อระบุจำนวนและต้นเหตุของไฟล์ส่วนเกินจริง
-
