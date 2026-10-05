@@ -4,6 +4,23 @@
 
 ---
 
+## [2026-10-05] Fix Verify Modal AI Re-Scan Request Payload
+
+### ปัญหา
+- ปุ่มอ่าน AI ใหม่ส่งรูปด้วยคีย์ `image` แต่ `/api/scan-bill` และ `/api/scan-po` ต้องการ `imageBase64` จึงตอบกลับว่าไม่ได้รับข้อมูลรูปภาพ
+- การอ่านซ้ำตามประเภทส่ง `docType` แทน `targetDocType` ทำให้ endpoint ไม่ได้รับประเภทที่ผู้ใช้เลือก
+
+### การแก้ไข
+- เปลี่ยน payload ของทั้ง endpoint อ่านบิลและ PO ให้ใช้ `imageBase64`
+- เปลี่ยนคำขอ `/api/scan-bill` ให้ส่งประเภทผ่าน `targetDocType` ตามสัญญา API
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] LINE OCR: High-Accuracy Rescue for Document Numbers
 
 ### ปัญหาและจุดอ่อนที่พบ

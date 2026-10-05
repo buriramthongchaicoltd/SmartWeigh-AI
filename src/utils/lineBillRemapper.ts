@@ -245,7 +245,7 @@ export async function rescanBillForTargetDocType(
     const resp = await fetch('/api/scan-po', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: imageBase64, mimeType })
+      body: JSON.stringify({ imageBase64, mimeType })
     });
     const result = await resp.json();
     if (!resp.ok || !result.success) {
@@ -303,9 +303,9 @@ export async function rescanBillForTargetDocType(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      image: imageBase64,
+      imageBase64,
       mimeType,
-      docType: targetDocType
+      targetDocType
     })
   });
   const result = await resp.json();
