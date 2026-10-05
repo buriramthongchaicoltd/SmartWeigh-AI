@@ -54,6 +54,17 @@ export function remapLineBillToDocType(
     grossKg > 0 && tareKg > 0
       ? grossKg - tareKg
       : Number(snap.rawNetWeightKg) || Number(currentData.col15) || Number(currentData.col20) || 0;
+  let destGrossKg =
+    Number(snap.rawDestGrossWeightKg) || Number(currentData.col18) || 0;
+  let destTareKg =
+    Number(snap.rawDestTareWeightKg) || Number(currentData.col19) || 0;
+  if (destGrossKg > 0 && destTareKg > 0 && destGrossKg < destTareKg) {
+    [destGrossKg, destTareKg] = [destTareKg, destGrossKg];
+  }
+  const destNetKg =
+    destGrossKg > 0 && destTareKg > 0
+      ? destGrossKg - destTareKg
+      : Number(snap.rawDestNetWeightKg) || Number(currentData.col20) || 0;
 
   const docDate =
     snap.rawDate ||
@@ -119,6 +130,19 @@ export function remapLineBillToDocType(
     next.col4 = primaryBillNo || refPoNo;
     next.col6 = primaryBillNo;
     next.col7 = docDate;
+  } else if (targetDocType === 'full_logistics') {
+    next.col4 = refPoNo !== primaryBillNo ? refPoNo : (currentData.col4 || '');
+    next.col6 = primaryBillNo;
+    next.col7 = docDate;
+    next.col13 = grossKg;
+    next.col14 = tareKg;
+    next.col15 = netKg;
+    next.col16 = snap.rawDestDate || currentData.col16 || '';
+    next.col17 = snap.rawDestDocNo || currentData.col17 || '';
+    next.col18 = destGrossKg;
+    next.col19 = destTareKg;
+    next.col20 = destNetKg;
+    next.col21 = netKg > 0 && destNetKg > 0 ? netKg - destNetKg : 0;
   }
 
   // Strictly preserve col2 as entered by verifier (never copy lineGroupName into col2!)

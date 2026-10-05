@@ -126,10 +126,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setProjectMissingError(false);
       setRemappedNotice(null);
 
-      // Intelligent detection of document type if not specified (Origin store weighbridge & concrete are unified under delivery_order / DO)
-      let detectedType: DocumentType = (normalized.docType === 'weighbridge' || normalized.docType === 'concrete')
-        ? 'delivery_order'
-        : (normalized.docType || 'delivery_order');
+      // Preserve a document type already classified by the shared OCR pipeline.
+      let detectedType: DocumentType = normalized.docType || 'delivery_order';
       if (!normalized.docType) {
         const netO = Number(normalized.col13) || Number(normalized.col15) || 0;
         const netD = Number(normalized.col18) || Number(normalized.col20) || 0;
@@ -212,10 +210,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   if (!isOpen || !orderData) return null;
 
-  // Document type flags (Origin store weighbridge & concrete are unified as Delivery Order / DO)
-  const isWeighbridge = false;
+  // Document type flags keep the OCR classification aligned with the selected form.
+  const isWeighbridge = selectedDocType === 'weighbridge';
   const isDestWeighbridge = selectedDocType === 'dest_weighbridge';
-  const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete' || selectedDocType === 'weighbridge';
+  const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete';
   const isTaxInvoice = selectedDocType === 'tax_invoice';
   const isPO = selectedDocType === 'purchase_order';
   const isFullLogistics = selectedDocType === 'full_logistics';

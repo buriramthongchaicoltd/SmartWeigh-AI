@@ -50,9 +50,11 @@
 - **Cascade Unlink Cleanup:** เมื่อลบตั๋วชั่งปลายทาง ลบ DO หรือลบ PO ระบบใน `App.tsx` (`handleDeleteOrder`, `handleDeletePO`) จะล้างค่าการผูกบิล (`linkedViaDocNo`, `matchedDestTicketId`, ช่อง 16–21) อัตโนมัติเพื่อไม่ให้เกิดลิงก์ค้าง (Orphaned Links)
 
 ### กฎข้อที่ 3: มาตรฐาน AI สแกนบิลเดียวกันทั้งระบบ (`server.ts`)
-- ทั้งการสแกนผ่านหน้าเว็บ (`/api/scan-bill`) และการรับบิลผ่าน LINE Webhook (`/api/line/webhook`) ใช้โมเดลตระกูล **`FLASH_LITE_MODELS = ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite']`** ผ่านฟังก์ชัน `callGeminiWithResilience()` เหมือนกัน 100%
-- **กฎอ่านเลขที่บิล (`เล่มที่/เลขที่`):** หากบิลมีทั้ง "เล่มที่" และ "เลขที่" ระบบจะจัดรูปแบบเป็น `เล่มที่/เลขที่` เสมอ (เช่น `02/0045`)
-- **กฎน้ำหนักชั่ง (`Gross >= Tare`):** น้ำหนักรถหนัก (`col13` / `col18`) ต้องมากกว่าน้ำหนักรถเบา (`col14` / `col19`) เสมอ หากบิลโรงโม่พิมพ์น้ำหนักรถเปล่าบรรทัดแรก ระบบจะสลับค่าให้อัตโนมัติ
+- `/api/scan-bill`, `/api/scan-po` และ OCR จาก LINE Webhook ใช้ `requestOcrWithSharedPolicy()` ครอบการเรียก `callGeminiWithResilience()` เพื่อส่งกฎการจำแนก/อ่านข้อมูลกลางชุดเดียวกันและ parse JSON ด้วยวิธีเดียวกัน
+- Schema และ adapter ผลลัพธ์ยังแยกตามเอกสารเพื่อคง contract ของ Order (39 คอลัมน์), PO (`items/orderedQty`) และ LINE Inbox; `/api/scan-po` ระบุประเภท `purchase_order` จากบริบทของ endpoint ส่วน `VerifyModal` คงประเภทที่ OCR จำแนกไว้แทนการเปลี่ยน `weighbridge`/`concrete` เป็น `delivery_order`
+- ชุดประเภทเอกสารกลางคือ `delivery_order`, `weighbridge`, `dest_weighbridge`, `concrete`, `tax_invoice`, `purchase_order` และ `full_logistics`
+- ใช้ `normalizeOcrDocumentNumber()` และ `normalizeOcrWeightPair()` ร่วมกันสำหรับเลขเล่ม/เลขที่และการจัด Gross/Tare/Net; full-logistics จาก LINE มีฟิลด์น้ำหนักปลายทางแยกจากต้นทาง
+- `remapLineBillToDocType()` คง snapshot น้ำหนัก/เลขที่ปลายทางเมื่อผู้ตรวจสลับรายการ LINE ไปเป็น `full_logistics`
 
 ### กฎข้อที่ 4: การแยก "ชื่อกลุ่ม LINE" ออกจาก "ชื่อโครงการ (ช่อง 2)"
 - เมื่อรับบิลจาก LINE OA ชื่อกลุ่ม LINE จะถูกเก็บไว้ใน `lineGroupName` เท่านั้น **ห้ามนำ `lineGroupName` ไปใส่ใน `col2` (ชื่อโครงการ) เด็ดขาด**

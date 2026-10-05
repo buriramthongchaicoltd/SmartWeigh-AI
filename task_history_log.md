@@ -2088,7 +2088,14 @@ UI Open Settings → loadConfigs → isConfigured? → runSilentAutoTest() → u
      - เพิ่มช่องกรอก `Google Apps Script Web App URL` พร้อมการ์ดแนะนำวิธีติดตั้งและปุ่ม **"คัดลอกโค้ด Code.gs"** ใน 1 คลิก
 - **สถานะ:** ทดสอบ Build ผ่านสมบูรณ์ และ Push ขึ้น GitHub เพื่อ Auto-Deploy ไปยัง Render เรียบร้อย
 
-
+## มาตรฐาน OCR ร่วมกันทุกช่องทาง
+- เพิ่ม `requestOcrWithSharedPolicy()` ใน `server.ts` ให้ `/api/scan-bill`, `/api/scan-po` และ OCR ของ LINE ใช้ชุดกฎ classification/extraction กลางชุดเดียวกัน พร้อม JSON parsing/error handling ที่สอดคล้องกัน
+- เพิ่มชนิดเอกสารมาตรฐานทั้ง 7 ประเภท และใช้ตัว normalize ร่วมกันสำหรับเลขเล่ม/เลขที่เอกสารและน้ำหนัก Gross/Tare/Net; คง schema/output adapter เฉพาะ Order, PO และ LINE ไว้เพื่อรักษา contract ของแต่ละหน้าจอ
+- LINE รองรับการจำแนก `weighbridge`, `concrete` และ `full_logistics`; เพิ่มค่าปลายทางแยกใน snapshot/form mapping สำหรับเอกสาร full-logistics
+- ปรับ `remapLineBillToDocType()` ให้การสลับประเภทเป็น `full_logistics` คืนค่าน้ำหนักและเลขเอกสารปลายทางจาก snapshot ได้
+- ปรับ `VerifyModal` ให้รักษาประเภทเอกสารที่ OCR จำแนกและใช้ฟอร์มตั๋วชั่งต้นทางตรงกับประเภท `weighbridge`
+- อัปเดต `HANDOVER_DOCUMENTATION.md`; ตรวจ `npm.cmd run lint` และ `npm.cmd run build` ผ่าน (ยังมีคำเตือน bundle JavaScript ใหญ่กว่า 500 kB)
+- **ข้อจำกัดการตรวจสอบ:** ยังไม่ได้ทดสอบเรียก Gemini/Supabase/LINE จริง
 
 
 

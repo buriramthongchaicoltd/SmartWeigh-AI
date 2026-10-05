@@ -22,6 +22,7 @@ import {
   mapLineInboxToSupabase,
   mapSupabaseToLineInbox
 } from './src/utils/supabaseClient';
+import type { DocumentType } from './src/types';
 
 dotenv.config();
 
@@ -136,6 +137,65 @@ const getGeminiClient = () => {
 // (with 'gemini-3.1-flash-lite' as same-family fallback) so the system automatically updates when a newer
 // flash-lite version is released while keeping 100% consistent flash-lite extraction behavior.
 const FLASH_LITE_MODELS = ['gemini-flash-lite-latest', 'gemini-3.1-flash-lite'];
+const OCR_DOCUMENT_TYPES: DocumentType[] = [
+  'delivery_order',
+  'weighbridge',
+  'dest_weighbridge',
+  'concrete',
+  'tax_invoice',
+  'purchase_order',
+  'full_logistics'
+];
+
+const SHARED_OCR_POLICY = `มาตรฐาน OCR กลางของระบบ (ใช้กับทุกช่องทาง):
+- จำแนกประเภทเอกสารให้ตรงหลักฐานบนภาพ: delivery_order, weighbridge (ตั๋วชั่งต้นทาง), dest_weighbridge (ตั๋วชั่งปลายทาง), concrete, tax_invoice, purchase_order หรือ full_logistics
+- ห้ามเดา: ข้อมูลที่อ่านไม่ชัดหรือไม่มีบนภาพให้เว้นว่าง/ใส่ 0 ตามชนิดข้อมูล และอย่าอนุมานชื่อโครงการจากชื่อกลุ่มหรือบริบทภายนอก
+- เลขเอกสารที่มีทั้งเล่มที่และเลขที่ให้เรียงเป็น เล่มที่/เลขที่ เช่น 02/0045; เก็บเล่มที่ใน bookNo แยกด้วย
+- น้ำหนักรถหนัก (Gross) ต้องไม่น้อยกว่าน้ำหนักรถเปล่า (Tare); Net = Gross - Tare เมื่อทั้งคู่มีข้อมูล
+- แยกชื่อสินค้าออกจากหมายเหตุ เงื่อนไขส่งของ และข้อความติดต่อ; ให้รายการจริงอยู่ใน lineItems/items และข้อความอื่นอยู่ใน notes
+- วันที่ใช้ YYYY-MM-DD เมื่ออ่านได้; รายการสินค้าเก็บชื่อ, สเปก, ปริมาณ, หน่วย, ราคาต่อหน่วย และยอดตามที่พิมพ์จริง
+- หากช่องทางหรือผู้ใช้ระบุประเภทเอกสารไว้ชัดเจน ให้คงประเภทนั้นและจัดข้อมูลลงฟิลด์เฉพาะของประเภทนั้น โดยไม่คัดลอกน้ำหนักไปคนละโซน`;
+
+function normalizeOcrDocumentNumber(rawDoc?: string, rawBook?: string): string {
+  const doc = (rawDoc || '').trim();
+  const book = (rawBook || '')
+    .replace(/^(?:เล่มที่|เล่ม|book\s*no\.?|book|vol\.?)\s*[:#.]?\s*/i, '')
+    .trim();
+  if (!doc && !book) return '';
+
+  if (/เล่ม/i.test(doc) && /เลข/i.test(doc)) {
+    const bookMatch = /เล่ม(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(doc);
+    const numberMatch = /เลข(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(doc);
+    if (bookMatch?.[1] && numberMatch?.[1]) return `${bookMatch[1]}/${numberMatch[1]}`;
+  }
+
+  const cleanDoc = doc.replace(/^(?:เลขที่|เลข|no\.?|invoice\s*no\.?|po\s*no\.?|do\s*no\.?)\s*[:#.]?\s*/i, '').trim();
+  if (!book || book === '-' || book === '0') return cleanDoc;
+  if (!cleanDoc) return book;
+  if (cleanDoc.includes('/')) {
+    const parts = cleanDoc.split('/').map(part => part.trim());
+    if (parts.length === 2 && parts[1] === book && parts[0] !== book) {
+      return `${parts[1]}/${parts[0]}`;
+    }
+    return cleanDoc;
+  }
+  return `${book}/${cleanDoc}`;
+}
+
+function normalizeOcrDocumentType(value: unknown, fallback: DocumentType = 'delivery_order'): DocumentType {
+  return OCR_DOCUMENT_TYPES.find(type => type === value) || fallback;
+}
+
+function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValue: unknown = 0) {
+  let gross = Number(grossValue) || 0;
+  let tare = Number(tareValue) || 0;
+  if (gross > 0 && tare > 0 && gross < tare) [gross, tare] = [tare, gross];
+  return {
+    gross,
+    tare,
+    net: gross > 0 && tare > 0 ? gross - tare : Number(netValue) || 0
+  };
+}
 
 /**
  * Executes a Gemini request strictly using the 'flash-lite' model family ('gemini-flash-lite-latest')
@@ -189,6 +249,26 @@ async function callGeminiWithResilience(ai: GoogleGenAI, requestPayload: any, ov
   }
 
   throw lastError;
+}
+
+async function requestOcrWithSharedPolicy(ai: GoogleGenAI, payload: Record<string, any>) {
+  const parts = payload.contents?.parts;
+  const promptPart = Array.isArray(parts)
+    ? parts.find((part: any) => typeof part?.text === 'string')
+    : undefined;
+  if (!promptPart) {
+    throw new Error('OCR request ไม่มี prompt สำหรับแนบมาตรฐานการอ่านเอกสาร');
+  }
+  promptPart.text = `${SHARED_OCR_POLICY}\n\n${promptPart.text}`;
+  const result = await callGeminiWithResilience(ai, payload);
+  const output = result.response.text || '{}';
+  let data: Record<string, any>;
+  try {
+    data = JSON.parse(output);
+  } catch (error) {
+    throw new Error(`ผลลัพธ์ OCR ไม่ใช่ JSON ที่ถูกต้อง: ${(error as Error).message}`);
+  }
+  return { ...result, data };
 }
 
 // Health & Status endpoint
@@ -428,7 +508,7 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
 - สินค้าทั่วไปที่ไม่มีการชั่งน้ำหนัก (เช่น ปูนถุง, เหล็ก, ท่อ, สี, สายไฟ) ให้ใส่หน่วยนับจริงใน col23 และใส่ค่าน้ำหนักในโซน 3 และ 4 เป็น 0 เสมอ
 - ตรวจสอบความถูกต้องของการคำนวณราคาและยอดรวม`;
 
-    const { response, usedModel } = await callGeminiWithResilience(ai, {
+    const { data: parsedData, usedModel } = await requestOcrWithSharedPolicy(ai, {
       contents: {
         parts: [
           {
@@ -449,7 +529,7 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
           properties: {
             docType: { 
               type: Type.STRING, 
-              description: "ประเภทเอกสาร: 'delivery_order' (ใบส่งของสินค้าทั่วไปไม่ชั่งน้ำหนัก), 'weighbridge' (ตั๋วชั่งน้ำหนักหินดินทราย), 'concrete' (คอนกรีตผสมเสร็จ), 'tax_invoice' (ใบกำกับภาษี), 'purchase_order' (ใบสั่งซื้อ), หรือ 'full_logistics'" 
+              description: "ประเภทเอกสารกลาง: delivery_order, weighbridge, dest_weighbridge, concrete, tax_invoice, purchase_order หรือ full_logistics"
             },
             referenceDocNo: {
               type: Type.STRING,
@@ -533,80 +613,23 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
       }
     });
 
-    const textOutput = response.text || "{}";
-    const parsedData = JSON.parse(textOutput);
-
-    // Helper to deterministically format book number + document number as "เล่มที่/เลขที่"
-    const formatDocNoWithBook = (rawDoc?: string, rawBook?: string): string => {
-      if (!rawDoc && !rawBook) return '';
-      const docStr = (rawDoc || '').trim();
-      const bookStr = (rawBook || '')
-        .replace(/^(?:เล่มที่|เล่ม|book\s*no\.?|book|vol\.?)\s*[:#.]?\s*/i, '')
-        .trim();
-
-      // Case 1: String explicitly contains Thai labels "เล่ม..." and "เลข..."
-      if (/เล่ม/i.test(docStr) && /เลข/i.test(docStr)) {
-        const bMatch = /เล่ม(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(docStr);
-        const nMatch = /เลข(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(docStr);
-        if (bMatch?.[1] && nMatch?.[1]) {
-          return `${bMatch[1]}/${nMatch[1]}`;
-        }
-      }
-
-      const cleanDoc = docStr
-        .replace(/^(?:เลขที่|เลข|no\.?)\s*[:#.]?\s*/i, '')
-        .trim();
-
-      if (!bookStr || bookStr === '-' || bookStr === '0') {
-        return cleanDoc;
-      }
-
-      if (!cleanDoc) return bookStr;
-
-      // Check if cleanDoc already contains slash
-      if (cleanDoc.includes('/')) {
-        const parts = cleanDoc.split('/').map(s => s.trim());
-        if (parts.length === 2) {
-          // If AI accidentally formatted as "เลขที่/เล่มที่" (bookStr is on the right), flip to "เล่มที่/เลขที่"
-          if (parts[1] === bookStr && parts[0] !== bookStr) {
-            return `${parts[1]}/${parts[0]}`;
-          }
-          return `${parts[0]}/${parts[1]}`;
-        }
-        return cleanDoc;
-      }
-
-      return `${bookStr}/${cleanDoc}`;
-    };
-
     if (parsedData.bookNo || /เล่ม/i.test(parsedData.col6 || '') || /เล่ม/i.test(parsedData.col4 || '')) {
       if (parsedData.docType === 'purchase_order') {
-        parsedData.col4 = formatDocNoWithBook(parsedData.col4 || parsedData.col6, parsedData.bookNo);
+        parsedData.col4 = normalizeOcrDocumentNumber(parsedData.col4 || parsedData.col6, parsedData.bookNo);
       } else {
         if (parsedData.col6) {
-          parsedData.col6 = formatDocNoWithBook(parsedData.col6, parsedData.bookNo);
+          parsedData.col6 = normalizeOcrDocumentNumber(parsedData.col6, parsedData.bookNo);
         }
         if (/เล่ม/i.test(parsedData.col4 || '')) {
-          parsedData.col4 = formatDocNoWithBook(parsedData.col4, '');
+          parsedData.col4 = normalizeOcrDocumentNumber(parsedData.col4, '');
         }
       }
     }
 
-    // Auto-calculate any un-calculated values & enforce physical invariant: Gross >= Tare
-    let col13 = Number(parsedData.col13) || 0;
-    let col14 = Number(parsedData.col14) || 0;
-    if (col13 > 0 && col14 > 0 && col13 < col14) {
-      // Origin DOs/tickets often print Tare first ("น้ำหนักเข้า" = empty truck) and Gross second ("น้ำหนักออก" = loaded truck).
-      // Swap so col13 is always Gross (heavy) and col14 is always Tare (light).
-      const tmp = col13;
-      col13 = col14;
-      col14 = tmp;
-      parsedData.col13 = col13;
-      parsedData.col14 = col14;
-    }
-    if (col13 > 0 && col14 > 0) {
-      parsedData.col15 = col13 - col14;
-    }
+    const originWeights = normalizeOcrWeightPair(parsedData.col13, parsedData.col14, parsedData.col15);
+    parsedData.col13 = originWeights.gross;
+    parsedData.col14 = originWeights.tare;
+    parsedData.col15 = originWeights.net;
 
     // If DO has origin net weight (col15 > 0) and col22 is missing or still in raw kg (> 500 when unit is tons), convert to tons automatically
     if (Number(parsedData.col15) > 0 && parsedData.docType !== 'dest_weighbridge') {
@@ -621,18 +644,10 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
       }
     }
 
-    let col18 = Number(parsedData.col18) || 0;
-    let col19 = Number(parsedData.col19) || 0;
-    if (col18 > 0 && col19 > 0 && col18 < col19) {
-      const tmp = col18;
-      col18 = col19;
-      col19 = tmp;
-      parsedData.col18 = col18;
-      parsedData.col19 = col19;
-    }
-    if (col18 > 0 && col19 > 0) {
-      parsedData.col20 = col18 - col19;
-    }
+    const destinationWeights = normalizeOcrWeightPair(parsedData.col18, parsedData.col19, parsedData.col20);
+    parsedData.col18 = destinationWeights.gross;
+    parsedData.col19 = destinationWeights.tare;
+    parsedData.col20 = destinationWeights.net;
     if (parsedData.col15 && parsedData.col20) {
       parsedData.col21 = Number(parsedData.col15) - Number(parsedData.col20);
     }
@@ -650,13 +665,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
       parsedData.col29 = (Number(parsedData.col25) || 0) + (Number(parsedData.col28) || 0);
     }
 
-    // Strictly enforce user's selected document type over any AI hallucination/guessing
-    // Unify origin store weighbridge ('weighbridge') and 'concrete' into 'delivery_order' (DO)
-    if (targetDocType && targetDocType !== 'auto') {
-      parsedData.docType = (targetDocType === 'concrete' || targetDocType === 'weighbridge') ? 'delivery_order' : targetDocType;
-    } else if (parsedData.docType === 'weighbridge' || parsedData.docType === 'concrete') {
-      parsedData.docType = 'delivery_order';
-    }
+    parsedData.docType = targetDocType && targetDocType !== 'auto'
+      ? normalizeOcrDocumentType(targetDocType, normalizeOcrDocumentType(parsedData.docType))
+      : normalizeOcrDocumentType(parsedData.docType);
 
     // Capture rawAiSnapshot BEFORE clearing Zone 3 or Zone 4 so switching docType in VerifyModal never loses scale weights
     const rawGrossSnapshot = Number(parsedData.col13) || Number(parsedData.col18) || 0;
@@ -882,7 +893,7 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
 13. approvedBy: ผู้อนุมัติใบสั่งซื้อ
 14. notes: เงื่อนไขหรือหมายเหตุเพิ่มเติม (รวมถึงข้อความหมายเหตุที่เขียนแทรกอยู่ในตารางรายการสินค้าด้วย)`;
 
-    const { response, usedModel } = await callGeminiWithResilience(ai, {
+    const { data: parsedPO, usedModel } = await requestOcrWithSharedPolicy(ai, {
       contents: {
         parts: [
           {
@@ -935,35 +946,10 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
       }
     });
 
-    const parsedPO = JSON.parse(response.text || "{}");
-
-    // Format bookNo + poNumber into "เล่มที่/เลขที่" if bookNo is present
     if (parsedPO.bookNo || /เล่ม/i.test(parsedPO.poNumber || '')) {
-      const rawDoc = (parsedPO.poNumber || '').trim();
-      const rawBook = (parsedPO.bookNo || '')
-        .replace(/^(?:เล่มที่|เล่ม|book\s*no\.?|book|vol\.?)\s*[:#.]?\s*/i, '')
-        .trim();
-
-      if (/เล่ม/i.test(rawDoc) && /เลข/i.test(rawDoc)) {
-        const bMatch = /เล่ม(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(rawDoc);
-        const nMatch = /เลข(?:ที่)?\s*[:#.]?\s*([A-Za-z0-9\-_]+)/i.exec(rawDoc);
-        if (bMatch?.[1] && nMatch?.[1]) {
-          parsedPO.poNumber = `${bMatch[1]}/${nMatch[1]}`;
-        }
-      } else if (rawBook && rawBook !== '-' && rawBook !== '0') {
-        const cleanDoc = rawDoc.replace(/^(?:เลขที่|เลข|no\.?)\s*[:#.]?\s*/i, '').trim();
-        if (cleanDoc.includes('/')) {
-          const parts = cleanDoc.split('/').map((s: string) => s.trim());
-          if (parts.length === 2 && parts[1] === rawBook && parts[0] !== rawBook) {
-            parsedPO.poNumber = `${parts[1]}/${parts[0]}`;
-          } else {
-            parsedPO.poNumber = cleanDoc;
-          }
-        } else if (cleanDoc) {
-          parsedPO.poNumber = `${rawBook}/${cleanDoc}`;
-        }
-      }
+      parsedPO.poNumber = normalizeOcrDocumentNumber(parsedPO.poNumber, parsedPO.bookNo);
     }
+    parsedPO.docType = 'purchase_order';
 
     // Sanitize items: Separate any remarks/notes mixed into item rows or appended to itemDescription
     let totalQty = 0;
@@ -1354,7 +1340,7 @@ async function analyzeLineBillWithGemini(
 ): Promise<{
   isBillDocument: boolean;
   nonBillReason?: string;
-  detectedDocType: 'delivery_order' | 'dest_weighbridge' | 'tax_invoice' | 'purchase_order';
+  detectedDocType: DocumentType;
   extractedData: Record<string, any>;
   rawAiSnapshot: Record<string, any>;
   storeSuggestion?: Record<string, any>;
@@ -1373,10 +1359,13 @@ async function analyzeLineBillWithGemini(
    - ถ้าเป็นรูปถ่ายหน้างานก่อสร้างทั่วไป รูปคน เซลฟี่ รูปอาหาร สติกเกอร์ หรือแชท ให้ตั้งค่า isBillDocument = false และระบุเหตุผลใน nonBillReason
 2. ถ้าเป็นเอกสารบิล (isBillDocument = true):
    - จำแนกประเภทเอกสาร (docType):
-     * 'delivery_order': ใบส่งของ / ใบส่งสินค้า / บัตรชั่งน้ำหนักต้นทางจากร้านค้าหรือโรงโม่ / ใบส่งคอนกรีต
+     * 'delivery_order': ใบส่งของหรือใบส่งสินค้าทั่วไปที่ไม่ได้จำแนกเป็นเอกสารเฉพาะด้านล่าง
+     * 'weighbridge': ตั๋วชั่งน้ำหนักต้นทางจากร้านค้าหรือโรงโม่
      * 'dest_weighbridge': ตั๋วชั่งน้ำหนักปลายทางของไซต์งานเรา (เพื่อนำมาชนกับ DO)
+     * 'concrete': ใบส่งคอนกรีตผสมเสร็จ
      * 'tax_invoice': ใบเสร็จรับเงิน / ใบกำกับภาษี
      * 'purchase_order': ใบสั่งซื้อสินค้า (PO)
+     * 'full_logistics': เอกสารโลจิสติกส์ที่มีข้อมูลชั่งต้นทางและปลายทางครบในแผ่นเดียว
    - กฎเหล็กการอ่านเลขที่เอกสาร (PO / DO / ใบเสร็จ):
      * กรณีเอกสารมีทั้ง "เล่มที่ (Book No. / Vol.)" และ "เลขที่ (No.)" แยกกันบนหัวบิล ให้สกัดและจัดเก็บเป็นรูปแบบ 'เล่มที่/เลขที่' เสมอ (เช่น บนบิลพิมพ์ 'เล่มที่ 02 เลขที่ 0045' ให้บันทึกเป็น '02/0045' พร้อมระบุเล่มที่ใน bookNo)
      * กรณีไม่มีเล่มที่ ให้อ่านตามที่ปรากฏตรงๆ
@@ -1387,7 +1376,7 @@ async function analyzeLineBillWithGemini(
    - จัดหมวดหมู่วัสดุ (category) ตามมาตรฐานงานโยธา/ทล./ทช. เช่น 'หิน/ดิน/ทราย (ชั้นทาง & พื้นทาง)', 'ยางมะตอย & ผิวทางลาดยาง (ทล./ทช.)', 'คอนกรีตผสมเสร็จ & ผิวทางคอนกรีต', 'งานสะพาน & คอนกรีตอัดแรง', 'เหล็กเส้น & เหล็กโครงสร้างสะพาน/ถนน', 'งานท่อระบายน้ำ & รางระบายน้ำ', 'งานอำนวยความปลอดภัย & จราจร (ทล./ทช.)', 'งานป้องกันการกัดเซาะ & กำแพงกันดิน', 'ปูนซีเมนต์ & เคมีภัณฑ์ก่อสร้าง', 'ไม้แบบ นั่งร้าน & วัสดุสิ้นเปลือง', 'เครื่องจักรกลหนัก & น้ำมันเชื้อเพลิง', 'งานขนส่ง & โลจิสติกส์', 'ระบบไฟฟ้า & ประปาสนาม', หรือ 'วัสดุก่อสร้างทั่วไป'
    - ห้ามเดาชื่อโครงการ (col2) จากชื่อกลุ่ม LINE เด็ดขาด และแยกข้อความหมายเหตุออกจากชื่อสินค้าหลักเสมอ`;
 
-  const { response } = await callGeminiWithResilience(ai, {
+  const { data: raw } = await requestOcrWithSharedPolicy(ai, {
     contents: {
       parts: [
         { inlineData: { mimeType: mimeType || 'image/jpeg', data: cleanBase64 } },
@@ -1403,10 +1392,13 @@ async function analyzeLineBillWithGemini(
           nonBillReason: { type: Type.STRING, description: 'เหตุผลกรณีไม่ใช่เอกสารบิล เช่น รูปถ่ายหน้างานทั่วไป' },
           docType: {
             type: Type.STRING,
-            enum: ['delivery_order', 'dest_weighbridge', 'tax_invoice', 'purchase_order']
+            enum: OCR_DOCUMENT_TYPES
           },
           bookNo: { type: Type.STRING, description: 'เล่มที่ของบิล (ถ้ามี)' },
           docNumber: { type: Type.STRING, description: 'เลขที่เอกสารหลักบนหัวบิล (เลข DO / เลขตั๋วชั่ง / เลขใบเสร็จ / เลข PO)' },
+          destBookNo: { type: Type.STRING, description: 'เล่มที่ของตั๋วชั่งปลายทาง หากแยกจากเอกสารหลัก' },
+          destDocNumber: { type: Type.STRING, description: 'เลขที่ตั๋วชั่งปลายทาง' },
+          destDocDate: { type: Type.STRING, description: 'วันที่ชั่งปลายทาง YYYY-MM-DD' },
           referencePoNo: { type: Type.STRING, description: 'เลขที่ใบสั่งซื้อ (PO) ที่อ้างอิงในบิล (ถ้ามี)' },
           referenceDoNo: { type: Type.STRING, description: 'เลขที่ใบส่งของ (DO) ที่อ้างอิงในบิล (ถ้ามี)' },
           referenceSource: { type: Type.STRING, enum: ['form_field', 'notes', 'handwritten'] },
@@ -1423,6 +1415,9 @@ async function analyzeLineBillWithGemini(
           GrossWeightKg: { type: Type.NUMBER, description: 'น้ำหนักรถหนัก (Gross Weight) กก.' },
           TareWeightKg: { type: Type.NUMBER, description: 'น้ำหนักรถเบา (Tare Weight) กก.' },
           NetWeightKg: { type: Type.NUMBER, description: 'น้ำหนักสุทธิ (Net Weight) กก.' },
+          DestGrossWeightKg: { type: Type.NUMBER, description: 'น้ำหนัก Gross ปลายทาง กก.' },
+          DestTareWeightKg: { type: Type.NUMBER, description: 'น้ำหนัก Tare ปลายทาง กก.' },
+          DestNetWeightKg: { type: Type.NUMBER, description: 'น้ำหนัก Net ปลายทาง กก.' },
           qty: { type: Type.NUMBER, description: 'ปริมาณสินค้า' },
           unit: { type: Type.STRING, description: 'หน่วยนับ เช่น ตัน, คิว, ชิ้น, ถุง' },
           unitPrice: { type: Type.NUMBER, description: 'ราคาต่อหน่วย' },
@@ -1452,7 +1447,6 @@ async function analyzeLineBillWithGemini(
     }
   });
 
-  const raw = JSON.parse(response.text || '{}');
   if (raw.isBillDocument === false) {
     return {
       isBillDocument: false,
@@ -1464,38 +1458,25 @@ async function analyzeLineBillWithGemini(
     };
   }
 
-  const detectedDocType: 'delivery_order' | 'dest_weighbridge' | 'tax_invoice' | 'purchase_order' =
-    raw.docType && ['delivery_order', 'dest_weighbridge', 'tax_invoice', 'purchase_order'].includes(raw.docType)
-      ? raw.docType
-      : 'delivery_order';
-
-  // Format bookNo + docNumber into "เล่มที่/เลขที่" if bookNo is present
-  let formattedDocNo = (raw.docNumber || '').toString().trim();
-
-  // Regex fallback: strip label prefix if Gemini returned "เลขที่ 12345" or "No. 0045"
-  if (formattedDocNo) {
-    formattedDocNo = formattedDocNo
-      .replace(/^(?:เลขที่|เลขที่:|เลข|no\.|no:|invoice\s*no\.?|po\s*no\.?|do\s*no\.?)\s*/i, '')
-      .trim();
-  }
+  const detectedDocType = normalizeOcrDocumentType(raw.docType);
+  const formattedDocNo = normalizeOcrDocumentNumber(raw.docNumber, raw.bookNo);
+  const formattedDestDocNo = normalizeOcrDocumentNumber(raw.destDocNumber, raw.destBookNo);
 
   const rawBook = (raw.bookNo || '')
     .toString()
     .replace(/^(?:เล่มที่|เล่ม|book\s*no\.?|book|vol\.?)\s*[:#.]?\s*/i, '')
     .trim();
-  if (rawBook && rawBook !== '-' && rawBook !== '0' && formattedDocNo && !formattedDocNo.includes('/')) {
-    formattedDocNo = `${rawBook}/${formattedDocNo.replace(/^(?:เลขที่|เลข|no\.?)\s*[:#.]?\s*/i, '').trim()}`;
-  }
 
-  // Normalize weights (Gross >= Tare)
-  let grossKg = Number(raw.GrossWeightKg) || 0;
-  let tareKg = Number(raw.TareWeightKg) || 0;
-  if (grossKg > 0 && tareKg > 0 && grossKg < tareKg) {
-    const tmp = grossKg;
-    grossKg = tareKg;
-    tareKg = tmp;
-  }
-  const netKg = grossKg > 0 && tareKg > 0 ? grossKg - tareKg : (Number(raw.NetWeightKg) || 0);
+  const { gross: grossKg, tare: tareKg, net: netKg } = normalizeOcrWeightPair(
+    raw.GrossWeightKg,
+    raw.TareWeightKg,
+    raw.NetWeightKg
+  );
+  const { gross: destGrossKg, tare: destTareKg, net: destNetKg } = normalizeOcrWeightPair(
+    raw.DestGrossWeightKg,
+    raw.DestTareWeightKg,
+    raw.DestNetWeightKg
+  );
 
   const unitStr = (raw.unit || (netKg > 0 ? 'ตัน' : 'รายการ')).toString().trim();
   const effectiveQty = Number(raw.qty) > 0
@@ -1524,6 +1505,11 @@ async function analyzeLineBillWithGemini(
     rawGrossWeightKg: grossKg,
     rawTareWeightKg: tareKg,
     rawNetWeightKg: netKg,
+    rawDestDocNo: formattedDestDocNo,
+    rawDestDate: (raw.destDocDate || '').toString().trim(),
+    rawDestGrossWeightKg: destGrossKg,
+    rawDestTareWeightKg: destTareKg,
+    rawDestNetWeightKg: destNetKg,
     rawQty: effectiveQty,
     rawUnit: unitStr,
     rawUnitPrice: unitPrice,
@@ -1537,6 +1523,7 @@ async function analyzeLineBillWithGemini(
 
   // Build extractedData strictly keeping col2 (Project Name) EMPTY so lineGroupName is never mixed into col2!
   const isDestWB = detectedDocType === 'dest_weighbridge';
+  const isOriginWB = detectedDocType === 'weighbridge' || detectedDocType === 'full_logistics';
   const extractedData: Record<string, any> = {
     docType: detectedDocType,
     col1: `TR-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
@@ -1551,15 +1538,15 @@ async function analyzeLineBillWithGemini(
     col10: rawAiSnapshot.rawLicensePlate,
     col11: rawAiSnapshot.rawItemDescription,
     col12: rawAiSnapshot.rawSpecCode,
-    col13: isDestWB ? 0 : grossKg,
-    col14: isDestWB ? 0 : tareKg,
-    col15: isDestWB ? 0 : netKg,
-    col16: isDestWB ? rawAiSnapshot.rawDate : '',
-    col17: isDestWB ? formattedDocNo : '',
-    col18: isDestWB ? grossKg : 0,
-    col19: isDestWB ? tareKg : 0,
-    col20: isDestWB ? netKg : 0,
-    col21: 0,
+    col13: isOriginWB ? grossKg : 0,
+    col14: isOriginWB ? tareKg : 0,
+    col15: isOriginWB ? netKg : 0,
+    col16: isDestWB ? rawAiSnapshot.rawDate : (detectedDocType === 'full_logistics' ? rawAiSnapshot.rawDestDate : ''),
+    col17: isDestWB ? formattedDocNo : (detectedDocType === 'full_logistics' ? formattedDestDocNo : ''),
+    col18: isDestWB ? grossKg : (detectedDocType === 'full_logistics' ? destGrossKg : 0),
+    col19: isDestWB ? tareKg : (detectedDocType === 'full_logistics' ? destTareKg : 0),
+    col20: isDestWB ? netKg : (detectedDocType === 'full_logistics' ? destNetKg : 0),
+    col21: detectedDocType === 'full_logistics' ? netKg - destNetKg : 0,
     col22: effectiveQty,
     col23: unitStr,
     col24: unitPrice,
