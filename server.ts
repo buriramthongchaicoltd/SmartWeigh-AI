@@ -188,6 +188,18 @@ function normalizeOcrDocumentType(value: unknown, fallback: DocumentType = 'deli
   return OCR_DOCUMENT_TYPES.find(type => type === value) || fallback;
 }
 
+function getLineInboxPrimaryDocumentNumber(
+  docType: DocumentType,
+  extractedData: Record<string, any>
+): string {
+  const value = docType === 'dest_weighbridge'
+    ? extractedData.col17
+    : docType === 'purchase_order'
+      ? extractedData.col4
+      : extractedData.col6;
+  return (value || '').toString().trim();
+}
+
 function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValue: unknown = 0) {
   let gross = Number(grossValue) || 0;
   let tare = Number(tareValue) || 0;
@@ -2079,7 +2091,7 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           continue;
         }
 
-        const billNo = analysis.extractedData.col17 || analysis.extractedData.col6 || analysis.extractedData.col4 || '';
+        const billNo = getLineInboxPrimaryDocumentNumber(analysis.detectedDocType, analysis.extractedData);
         const storeName = analysis.extractedData.col8 || '';
 
         // กฎใหม่: เก็บบิลไว้เสมอ ไม่ว่าจะอ่านเลขที่ได้หรือไม่
@@ -2239,7 +2251,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         return res.json({ success: true, item: nonBillItem });
       }
 
-      const billNo = analysis.extractedData.col17 || analysis.extractedData.col6 || analysis.extractedData.col4 || '';
+      const billNo = getLineInboxPrimaryDocumentNumber(analysis.detectedDocType, analysis.extractedData);
       const storeName = analysis.extractedData.col8 || '';
 
       // Check duplicates against existingOrders / existingPOs / existingInbox passed from client
@@ -4542,12 +4554,14 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     const receivedAfter =
       lookbackDays === undefined ? undefined : new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
 
-    // Only process inbox items that are not verified and have not yet been linked to Drive.
+    // Retry unresolved OCR rows within the requested lookback even when their image is already in Drive.
+    const pendingOcrFilter = 'drive_file_id.is.null,drive_file_id.eq.,status.eq.scan_failed,doc_number.is.null,doc_number.eq.';
     let countQuery = client
       .from('line_inbox')
       .select('id', { count: 'exact', head: true })
       .neq('status', 'verified')
-      .or('drive_file_id.is.null,drive_file_id.eq.');
+      .neq('status', 'ignored_non_bill')
+      .or(pendingOcrFilter);
 
     if (receivedAfter) countQuery = countQuery.gte('received_at', receivedAfter);
     if (cursorId) countQuery = countQuery.gt('id', cursorId);
@@ -4560,9 +4574,10 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     // Use a stable ID cursor so failed rows are reported once per run rather than retried endlessly.
     let query = client
       .from('line_inbox')
-      .select('id, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
+      .select('id, status, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_file_location, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
       .neq('status', 'verified')
-      .or('drive_file_id.is.null,drive_file_id.eq.')
+      .neq('status', 'ignored_non_bill')
+      .or(pendingOcrFilter)
       .order('id', { ascending: true })
       .limit(batchSize);
 
@@ -4690,7 +4705,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
 
         // Re-scan each unprocessed inbox image before storing its Drive reference.
         let updatedExtractedData = row.extracted_data || {};
-        let updatedDocNo = row.doc_number;
+        let updatedDocNo = row.status === 'scan_failed' ? '' : row.doc_number;
         let updatedDocType = row.detected_doc_type || 'delivery_order';
         let updatedStore = row.store_name;
         let isBillDocument = false;
@@ -4717,11 +4732,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
               lineReceivedAt: row.received_at
             };
             updatedDocType = aiResult.detectedDocType;
-            const rawDocNo =
-              updatedExtractedData.col17 ||
-              updatedExtractedData.col6 ||
-              updatedExtractedData.col4 ||
-              '';
+            const rawDocNo = getLineInboxPrimaryDocumentNumber(updatedDocType, updatedExtractedData);
             if (rawDocNo) updatedDocNo = rawDocNo;
             if (aiResult.storeSuggestion?.name) updatedStore = aiResult.storeSuggestion.name;
           } else {
@@ -4748,10 +4759,12 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
         const fileName = `LINE_${dateStr}_${safeInboxId}.jpg`;
 
-        let driveResult: any = null;
-        let reusedExistingFile = false;
+        let driveResult: any = row.drive_file_id
+          ? { fileId: row.drive_file_id, webViewLink: row.drive_web_view_link }
+          : null;
+        let reusedExistingFile = Boolean(row.drive_file_id);
 
-        if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
+        if (!driveResult && driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
           const matchResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
             action: 'match_inbox_image',
             rootFolderId: driveCfg.rootFolderId,
@@ -4779,7 +4792,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
             });
             reusedExistingFile = Boolean(driveResult?.alreadyExists);
           }
-        } else if (driveToken && zone00Id) {
+        } else if (!driveResult && driveToken && zone00Id) {
           driveResult = await findDriveFileByName(driveToken, zone00Id, fileName);
           reusedExistingFile = Boolean(driveResult);
           if (driveResult && unreferencedCandidateIds.includes(driveResult.fileId)) {
@@ -4836,7 +4849,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
           // Update Supabase with Drive info and clear base64 from image_url
           const { data: updatedRow, error: updateError } = await client.from('line_inbox').update({
             drive_file_id: fileId || null,
-            drive_file_location: 'zone_00',
+            drive_file_location: row.drive_file_id ? (row.drive_file_location || 'zone_00') : 'zone_00',
             drive_web_view_link: webViewLink,
             doc_number: updatedDocNo || null,
             detected_doc_type: updatedDocType,
@@ -4844,7 +4857,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
             ...(aiConfidence !== undefined ? { ai_confidence: aiConfidence } : {}),
             is_bill_document: isBillDocument,
             image_hash: imageHash,
-            ...(isBillDocument ? {} : { status: 'ignored_non_bill' }),
+            status: isBillDocument ? (updatedDocNo ? 'pending_review' : 'scan_failed') : 'ignored_non_bill',
             extracted_data: updatedExtractedData,
             image_url: aiConfidence !== undefined ? null : base64Image
           }).eq('id', row.id).select('id').maybeSingle();

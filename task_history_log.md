@@ -25,6 +25,26 @@
 
 ---
 
+## [2026-10-05] Daily LINE Recovery: Retry OCR Failures Within LINE Retention
+
+### ปัญหา
+- Daily job ทำงานทุกวัน 06:00 น. และส่ง `lookbackDays: 3` แต่ endpoint เลือกเฉพาะรายการที่ไม่มี `drive_file_id`
+- Webhook อัปโหลดรูปขึ้น Drive ได้แม้ OCR ล้มเหลว ดังนั้นแถว `scan_failed` ที่มี Drive ID จะไม่ถูก daily job retry และเสี่ยงพ้นช่วงที่ LINE Content API ดึงรูปได้
+
+### การแก้ไข
+- ให้ sync เลือกแถวที่ไม่มี Drive ID หรือสถานะ `scan_failed` หรือไม่มี `doc_number`; ยังคงข้าม `verified` และ `ignored_non_bill`
+- แถวที่มี Drive ID แล้วจะสแกน LINE ต้นฉบับซ้ำโดยใช้ Drive ID เดิม ไม่สร้างหรืออัปโหลดรูปซ้ำ
+- เมื่อ OCR สำเร็จและมีเลขเอกสาร เปลี่ยนสถานะเป็น `pending_review`; ถ้ายังไม่มีเลขคง `scan_failed` ให้ daily check ภายใน 3 วัน retry รอบถัดไป
+- ตรวจเลขหลักตามประเภทเอกสาร (`dest_weighbridge.col17`, `purchase_order.col4`, อื่น ๆ `.col6`) เพื่อไม่ให้เลข PO/DO อ้างอิงถูกเข้าใจผิดว่าเป็นเลขบิลหลักที่อ่านได้
+- อัปเดตคู่มือ handover และ blueprint ให้ตรงกับพฤติกรรมของคิวรายวัน
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน; มีคำเตือน bundle JavaScript เกิน 500 kB
+- `git diff --check` ผ่าน
+
+---
+
 ## [2026-10-05] LINE Inbox Drive Audit: Direct Reference Reconciliation
 
 ### ปัญหา
