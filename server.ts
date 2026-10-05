@@ -2183,8 +2183,7 @@ app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
   return res.json({ success: true, remaining: lineWebhookInboxQueue.length });
 });
 
-// 2.5 Check Duplicate Bill Number at Verify Time (POST /api/line/check-duplicate)
-// เรียกจาก Frontend ก่อนกด "บันทึกตรวจรับ" เพื่อป้องกันบิลซ้ำใน orders / line_inbox
+// 2.5 Legacy duplicate lookup endpoint; current review flow leaves duplicate decisions to the user.
 app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
   try {
     const { billNo, storeName, excludeInboxId } = req.body || {};
@@ -2483,8 +2482,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
       image,
       mimeType,
       senderName = 'ช่างสมชาย (หน้างาน)',
-      groupName = 'กลุ่มรับบิลสโตร์กลาง',
-      existingDocs = []
+      groupName = 'กลุ่มรับบิลสโตร์กลาง'
     } = req.body || {};
 
     if (!image) {
@@ -2532,36 +2530,13 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
       const billNo = getLineInboxPrimaryDocumentNumber(analysis.detectedDocType, analysis.extractedData);
       const storeName = analysis.extractedData.col8 || '';
 
-      // Check duplicates against existingOrders / existingPOs / existingInbox passed from client
-      let matchedDup: { code: string; billNo: string; vendor: string; reason: string } | null = null;
-      if (billNo && Array.isArray(existingDocs)) {
-        for (const doc of existingDocs) {
-          const docNo = doc.billNo || doc.col6 || doc.col17 || doc.poNumber || '';
-          const docVendor = (doc.vendor || doc.col8 || doc.storeName || '').trim();
-          if (
-            docNo &&
-            isServerDocMatch(docNo, billNo) &&
-            (!storeName || !docVendor || docVendor.toLowerCase() === storeName.trim().toLowerCase())
-          ) {
-            matchedDup = {
-              code: doc.code || doc.col1 || doc.poNumber || 'ในระบบ',
-              billNo: docNo,
-              vendor: docVendor || storeName,
-              reason: `บิลเลขที่ ${billNo} (ร้าน ${docVendor || storeName}) มีอยู่ในระบบแล้ว (${doc.code || doc.col1 || 'คิวตรวจสอบ'})`
-            };
-            break;
-          }
-        }
-      }
-
       const replyText = buildLineQuoteReplyText({
         isBillDocument: true,
         billNo,
         docType: analysis.detectedDocType,
         storeName,
         senderName,
-        isDuplicate: Boolean(matchedDup),
-        duplicateMatchedCode: matchedDup?.code,
+        isDuplicate: false,
         scanFailed: !billNo
       });
 
@@ -2574,7 +2549,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         lineGroupName: groupName, // Strictly separate from col2 Project Name!
         receivedAt,
         image,
-        status: matchedDup ? 'duplicate_warning' : 'pending_review',
+        status: 'pending_review',
         detectedDocType: analysis.detectedDocType,
         extractedData: {
           ...analysis.extractedData,
@@ -2592,15 +2567,6 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         isBillDocument: true,
         botReplyText: replyText,
         botReplySent: true,
-        duplicateInfo: matchedDup
-          ? {
-              isDuplicate: true,
-              matchedCode: matchedDup.code,
-              matchedBillNo: matchedDup.billNo,
-              matchedVendor: matchedDup.vendor,
-              reason: matchedDup.reason
-            }
-          : undefined
       };
 
       // Persist to Supabase (same as real webhook)
@@ -4775,6 +4741,13 @@ app.post('/api/drive/quarantine-line-inbox-orphan', async (req: Request, res: Re
         fileId
       });
       if (!result?.success) {
+        if (result?.error?.includes('ไม่ได้อยู่ในโฟลเดอร์ 00')) {
+          return res.json({
+            success: true,
+            quarantined: false,
+            message: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงข้ามการย้าย; ลบเฉพาะรายการในกล่องพักได้'
+          });
+        }
         throw new Error(result?.error || 'ย้ายไฟล์ไปถังกักกันผ่าน Google Apps Script ไม่สำเร็จ');
       }
       return res.json({ success: true, fileId, message: 'ย้ายไฟล์ไปโฟลเดอร์ 99_ถังขยะ_รอทำลาย_30วันแล้ว' });
@@ -4846,7 +4819,13 @@ app.post('/api/drive/quarantine-line-inbox-item', async (req: Request, res: Resp
       if (!result?.success) {
         throw new Error(result?.error || 'ย้ายไฟล์ไปถังกักกันผ่าน Google Apps Script ไม่สำเร็จ');
       }
-      return res.json({ success: true, quarantined: true, message: 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว' });
+      return res.json({
+        success: true,
+        quarantined: result.quarantined === true,
+        message: result.message || (result.quarantined === true
+          ? 'ย้ายรูปไปโฟลเดอร์กักกันแล้ว'
+          : 'ไม่ได้ย้ายไฟล์; ลบเฉพาะรายการในกล่องพักได้')
+      });
     }
 
     if (!driveToken) {
@@ -4961,7 +4940,6 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     // Ensure ZONE_00 folder exists
     let zone00Id: string | undefined;
     let driveToken: string | undefined;
-    let zone00Files: Array<{ id: string; name: string; mimeType?: string; webViewLink?: string }> = [];
     if (driveCfg.connectionMode !== 'gas') {
       driveToken = await getDriveAccessToken() || undefined;
       if (driveToken) {
@@ -4969,54 +4947,6 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         zone00Id = zones.ZONE_00;
       }
     }
-    const linkedDriveFileIds = await getDriveLinkedFileIds(client);
-    if (driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
-      const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-        action: 'list_zone_files',
-        rootFolderId: driveCfg.rootFolderId
-      });
-      if (!result?.success) throw new Error(result?.error || 'อ่านไฟล์เดิมในโฟลเดอร์ 00 ไม่สำเร็จ');
-      if (result.hasMore) throw new Error('โฟลเดอร์ 00 มีไฟล์เกินขีดจำกัดการตรวจจับรูปเดิม');
-      zone00Files = Array.isArray(result.files) ? result.files : [];
-    } else if (driveToken && zone00Id) {
-      let pageToken: string | undefined;
-      do {
-        const params = new URLSearchParams({
-          q: `'${zone00Id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
-          pageSize: '1000',
-          fields: 'nextPageToken,files(id,name,mimeType,webViewLink)'
-        });
-        if (pageToken) params.set('pageToken', pageToken);
-        const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
-          headers: { Authorization: 'Bearer ' + driveToken }
-        });
-        if (!response.ok) {
-          throw new Error(`อ่านไฟล์เดิมในโฟลเดอร์ 00 ไม่สำเร็จ (${response.status}): ${await response.text()}`);
-        }
-        const page = await response.json() as {
-          nextPageToken?: string;
-          files?: Array<{ id?: string; name?: string; mimeType?: string; webViewLink?: string }>;
-        };
-        zone00Files.push(...(page.files || []).filter(file => file.id && file.name).map(file => ({
-          id: file.id!,
-          name: file.name!,
-          mimeType: file.mimeType,
-          webViewLink: file.webViewLink
-        })));
-        pageToken = page.nextPageToken;
-        if (zone00Files.length > 5000) {
-          throw new Error('โฟลเดอร์ 00 มีไฟล์เกิน 5,000 รายการ ระบบหยุดเพื่อป้องกันการตรวจไม่ครบ');
-        }
-      } while (pageToken);
-    }
-    const unreferencedCandidateIds = zone00Files
-      .filter(file => !linkedDriveFileIds.has(file.id) && file.mimeType?.startsWith('image/'))
-      .map(file => file.id);
-    if (unreferencedCandidateIds.length > 200) {
-      throw new Error('พบไฟล์ภาพที่ไม่มี reference เกิน 200 ไฟล์ จึงหยุดก่อนจับคู่เพื่อป้องกันการสแกน Drive จำนวนมาก; กรุณาตรวจ audit และจัดการ orphan ก่อน');
-    }
-    const candidateFileIdsInUse = new Set<string>();
-    const driveFileHashCache = new Map<string, Promise<string>>();
 
     for (const row of pending) {
       try {
@@ -5107,74 +5037,40 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         const dateStr = row.received_at ? new Date(row.received_at).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
         const fileName = `LINE_${dateStr}_${safeInboxId}.jpg`;
 
-        let driveResult: any = row.drive_file_id
+        let canReuseRowDriveFile = Boolean(row.drive_file_id);
+        if (row.drive_file_id) {
+          const { data: otherRows, error: driveReferenceError } = await client
+            .from('line_inbox')
+            .select('id')
+            .eq('drive_file_id', row.drive_file_id)
+            .neq('id', row.id)
+            .limit(1);
+          if (driveReferenceError) {
+            throw new Error(`ตรวจสอบเจ้าของไฟล์ Drive ${row.drive_file_id} ไม่ได้: ${driveReferenceError.message}`);
+          }
+          canReuseRowDriveFile = !otherRows?.length;
+          if (!canReuseRowDriveFile) {
+            console.warn(`[Drive Sync] Drive file ${row.drive_file_id} is referenced by another LINE inbox row; creating a row-specific file for ${row.id}`);
+          }
+        }
+
+        let driveResult: any = canReuseRowDriveFile
           ? { fileId: row.drive_file_id, webViewLink: row.drive_web_view_link }
           : null;
-        let reusedExistingFile = Boolean(row.drive_file_id);
+        let reusedExistingFile = canReuseRowDriveFile;
 
         if (!driveResult && driveCfg.connectionMode === 'gas' && driveCfg.gasWebAppUrl) {
-          const matchResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-            action: 'match_inbox_image',
+          driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+            action: 'upload',
             rootFolderId: driveCfg.rootFolderId,
-            contentHash: imageHash,
-            candidateFileIds: unreferencedCandidateIds.filter(fileId => !candidateFileIdsInUse.has(fileId))
+            targetZone: 'zone_00',
+            fileName,
+            base64Image
           });
-          if (!matchResult?.success) {
-            throw new Error(matchResult?.error || 'ตรวจหารูปเดิมใน Google Drive ไม่สำเร็จ');
-          }
-          if (matchResult.match?.id) {
-            driveResult = {
-              fileId: matchResult.match.id,
-              webViewLink: matchResult.match.webViewLink
-            };
-            candidateFileIdsInUse.add(matchResult.match.id);
-            reusedExistingFile = true;
-          }
-          if (!driveResult) {
-            driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-              action: 'upload',
-              rootFolderId: driveCfg.rootFolderId,
-              targetZone: 'zone_00',
-              fileName,
-              base64Image
-            });
-            reusedExistingFile = Boolean(driveResult?.alreadyExists);
-          }
+          reusedExistingFile = Boolean(driveResult?.alreadyExists);
         } else if (!driveResult && driveToken && zone00Id) {
           driveResult = await findDriveFileByName(driveToken, zone00Id, fileName);
           reusedExistingFile = Boolean(driveResult);
-          if (driveResult && unreferencedCandidateIds.includes(driveResult.fileId)) {
-            candidateFileIdsInUse.add(driveResult.fileId);
-          }
-          if (!driveResult) {
-            for (const candidateId of unreferencedCandidateIds) {
-              if (candidateFileIdsInUse.has(candidateId)) continue;
-              let candidateHashPromise = driveFileHashCache.get(candidateId);
-              if (!candidateHashPromise) {
-                candidateHashPromise = (async () => {
-                  const response = await fetch(
-                    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(candidateId)}?alt=media`,
-                    { headers: { Authorization: 'Bearer ' + driveToken } }
-                  );
-                  if (!response.ok) {
-                    throw new Error(`อ่านไฟล์ผู้สมัคร ${candidateId} ไม่สำเร็จ (${response.status})`);
-                  }
-                  const bytes = Buffer.from(await response.arrayBuffer());
-                  return crypto.createHash('sha256').update(bytes).digest('hex');
-                })();
-                driveFileHashCache.set(candidateId, candidateHashPromise);
-              }
-              if (await candidateHashPromise === imageHash) {
-                const matchedFile = zone00Files.find(file => file.id === candidateId);
-                driveResult = {
-                  fileId: candidateId,
-                  webViewLink: matchedFile?.webViewLink
-                };
-                candidateFileIdsInUse.add(candidateId);
-                break;
-              }
-            }
-          }
           if (!driveResult) {
             driveResult = await uploadFileToDrive({
               accessToken: driveToken,
@@ -5197,7 +5093,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
           // Update Supabase with Drive info and clear base64 from image_url
           const { data: updatedRow, error: updateError } = await client.from('line_inbox').update({
             drive_file_id: fileId || null,
-            drive_file_location: row.drive_file_id ? (row.drive_file_location || 'zone_00') : 'zone_00',
+            drive_file_location: canReuseRowDriveFile ? (row.drive_file_location || 'zone_00') : 'zone_00',
             drive_web_view_link: webViewLink,
             doc_number: updatedDocNo || null,
             detected_doc_type: updatedDocType,

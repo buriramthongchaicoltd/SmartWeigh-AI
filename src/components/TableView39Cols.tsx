@@ -19,7 +19,7 @@ import {
   Flag
 } from 'lucide-react';
 import { OrderRecord, PurchaseOrder, StoreMerchant } from '../types';
-import { getDuplicateOrderMap, isDocNumberMatch, extractDocReferences } from '../utils/poReconciliation';
+import { isDocNumberMatch, extractDocReferences } from '../utils/poReconciliation';
 import { hasUnverifiedAutoActions, getOrderAutoFlagSummary } from '../utils/systemConfig';
 
 interface TableView39ColsProps {
@@ -497,17 +497,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     return Array.from(new Set(orders.map(o => o.col8).filter(Boolean)));
   }, [orders]);
 
-  // Duplicate detection map across all orders
-  const duplicateOrderMap = useMemo(() => {
-    return getDuplicateOrderMap(orders);
-  }, [orders]);
-
-  const duplicateDOCount = useMemo(() => {
-    return orders.filter(
-      o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice' && Boolean(duplicateOrderMap[o.id])
-    ).length;
-  }, [orders, duplicateOrderMap]);
-
   const autoFlaggedDOCount = useMemo(() => {
     return orders.filter(
       o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice' && hasUnverifiedAutoActions(o)
@@ -569,7 +558,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       if (selectedStatus === 'paid' && Number(row.col36) > 0) return false;
       if (selectedStatus === 'unpaid' && Number(row.col36) <= 0) return false;
       if (selectedStatus === 'diff_alert' && Number(row.col21) === 0) return false;
-      if (selectedStatus === 'duplicates' && !duplicateOrderMap[row.id]) return false;
       if (selectedStatus === 'auto_flagged' && !hasUnverifiedAutoActions(row)) return false;
       if (selectedStatus === 'weighbridge' && !hasWeighing) return false;
 
@@ -581,7 +569,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
       return true;
     });
-  }, [orders, selectedDocTypeFilter, selectedProject, selectedStore, selectedCategory, selectedStatus, searchTerm, duplicateOrderMap, isWeighedOrderRow]);
+  }, [orders, selectedDocTypeFilter, selectedProject, selectedStore, selectedCategory, selectedStatus, searchTerm, isWeighedOrderRow]);
 
   // Handle Preset Switching (Syncs both visible column zones and DO type filter)
   const applyPreset = (preset: ViewPreset, syncDocFilter = true) => {
@@ -858,14 +846,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                             <span>{ticket.col1}</span>
                             {ticket.image && <FileImage className="w-3.5 h-3.5 text-teal-600" />}
                           </button>
-                          {duplicateOrderMap[ticket.id] && (
-                            <span
-                              className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-800 border border-rose-300"
-                              title={`เข้าข่ายบิลซ้ำกับ ${duplicateOrderMap[ticket.id].matchedTRs.join(', ')}`}
-                            >
-                              🚨 ซ้ำกับ {duplicateOrderMap[ticket.id].matchedTRs[0]}
-                            </span>
-                          )}
                         </td>
                          <td className="py-2.5 px-3">
                           {ticket.linkedViaDocNo ? (
@@ -1073,14 +1053,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                             <span>{inv.col1}</span>
                             {inv.image && <FileImage className="w-3.5 h-3.5 text-amber-600" />}
                           </button>
-                          {duplicateOrderMap[inv.id] && (
-                            <span
-                              className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-rose-100 text-rose-800 border border-rose-300"
-                              title={`เข้าข่ายบิลซ้ำกับ ${duplicateOrderMap[inv.id].matchedTRs.join(', ')}`}
-                            >
-                              🚨 ซ้ำกับ {duplicateOrderMap[inv.id].matchedTRs[0]}
-                            </span>
-                          )}
                         </td>
                         <td className="py-2.5 px-3">
                           {inv.linkedViaDocNo ? (
@@ -1292,23 +1264,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               </button>
             )}
 
-            {/* Quick Duplicate Alert Pill (Only shown when duplicates exist) */}
-            {duplicateDOCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setSelectedStatus(selectedStatus === 'duplicates' ? '' : 'duplicates')}
-                className={`text-xs px-2.5 py-1 border rounded-lg flex items-center gap-1.5 transition cursor-pointer font-bold ${
-                  selectedStatus === 'duplicates'
-                    ? 'bg-rose-600 text-white border-rose-700 shadow-xs'
-                    : 'bg-rose-50 text-rose-700 border-rose-300 hover:bg-rose-100 animate-pulse'
-                }`}
-                title="คลิกเพื่อกรองดูเฉพาะบิลที่ระบบตรวจพบว่าซ้ำซ้อน"
-              >
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>พบเข้าข่ายบิลซ้ำ ({duplicateDOCount})</span>
-              </button>
-            )}
-
             {/* Toggle Zone Customization Bar */}
             <button
               type="button"
@@ -1505,9 +1460,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
             <option value="unpaid">⚠️ มียอดค้างชำระ</option>
             <option value="paid">✅ ชำระครบถ้วนแล้ว</option>
             <option value="diff_alert">⚖️ มีผลต่างน้ำหนัก</option>
-            {duplicateDOCount > 0 && (
-              <option value="duplicates">🚨 เข้าข่ายบิลซ้ำ ({duplicateDOCount})</option>
-            )}
           </select>
         </div>
 
@@ -2040,16 +1992,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                             >
                               {row.col1 || '-'}
                             </button>
-
-                            {duplicateOrderMap[row.id] && (
-                              <span
-                                onClick={() => onInspectOrder(row)}
-                                className="inline-flex items-center px-1 py-0.2 rounded text-[9px] font-bold bg-rose-100 text-rose-800 border border-rose-300 cursor-pointer hover:bg-rose-200 shrink-0"
-                                title={`🚨 เข้าข่ายบิลซ้ำกับ ${duplicateOrderMap[row.id].matchedTRs.join(', ')}`}
-                              >
-                                🚨
-                              </span>
-                            )}
 
                             {hasUnverifiedAutoActions(row) && (
                               <span className="inline-flex items-center gap-0.5 shrink-0">

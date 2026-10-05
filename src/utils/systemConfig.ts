@@ -252,21 +252,10 @@ export function computeSystemNotifications(
   const notifications: SystemNotification[] = [];
   const nowIso = new Date().toISOString();
 
-  // 1. LINE OA Inbox Pending & Duplicate Warnings
-  const pendingLineBills = lineInbox.filter(i => i.status === 'pending_review' || i.status === 'queued');
-  const duplicateLineBills = lineInbox.filter(i => i.status === 'duplicate_warning');
-
-  if (duplicateLineBills.length > 0) {
-    notifications.push({
-      id: `notif-line-dup-${duplicateLineBills.length}`,
-      type: 'duplicate',
-      severity: 'critical',
-      title: `พบการส่งบิลซ้ำในกลุ่ม LINE (${duplicateLineBills.length} ใบ)`,
-      message: `มีบิลในกล่องพัก LINE ที่เลขที่บิลซ้ำกับในระบบ รอการตรวจสอบ (${duplicateLineBills.map(d => d.extractedData?.col6 || d.lineSenderName).slice(0, 2).join(', ')})`,
-      targetTab: 'line_inbox',
-      createdAt: duplicateLineBills[0]?.receivedAt || nowIso
-    });
-  }
+  // LINE bills always remain for visual review; legacy duplicate_warning rows count as pending.
+  const pendingLineBills = lineInbox.filter(i =>
+    i.status === 'pending_review' || i.status === 'queued' || i.status === 'duplicate_warning'
+  );
 
   if (pendingLineBills.length > 0) {
     notifications.push({

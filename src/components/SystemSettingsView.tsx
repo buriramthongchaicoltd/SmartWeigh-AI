@@ -3085,7 +3085,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <td className="py-2 px-3 font-bold text-slate-900">กล่องพักบิลจาก LINE</td>
                     <td className="py-2 px-3 font-mono text-[11px] text-slate-500">LineInboxView.tsx / server.ts</td>
                     <td className="py-2 px-3"><span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">พร้อมใช้งาน</span></td>
-                    <td className="py-2 px-3">รับรูปบิลจากกลุ่ม LINE OA ผ่าน Webhook (/api/line/webhook), AI สแกนแยกประเภทอัตโนมัติ, ดักบิลซ้ำ, ตอบกลับด้วย Quote Reply (0 โควตา), แยกชื่อกลุ่ม LINE ออกจากชื่อโครงการ</td>
+                    <td className="py-2 px-3">รับรูปบิลจากกลุ่ม LINE OA ผ่าน Webhook (/api/line/webhook), AI สแกนแยกประเภทอัตโนมัติ, ผู้ใช้ตรวจเทียบรูปเองโดยไม่ติดป้ายซ้ำอัตโนมัติ, ตอบกลับด้วย Quote Reply (0 โควตา), แยกชื่อกลุ่ม LINE ออกจากชื่อโครงการ</td>
                   </tr>
                   <tr>
                     <td className="py-2 px-3 font-mono font-bold">02</td>

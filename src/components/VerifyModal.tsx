@@ -3,7 +3,6 @@ import {
   X, 
   Save, 
   Sparkles, 
-  CheckCircle2, 
   FileText,
   Truck,
   Boxes,
@@ -23,7 +22,7 @@ import {
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
-import { checkDuplicateOrder, DuplicateCheckMatch, isExactDocNumberReference } from '../utils/poReconciliation';
+import { isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
 import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
@@ -64,9 +63,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [selectedDocType, setSelectedDocType] = useState<DocumentType>('delivery_order');
   const [showAllCols, setShowAllCols] = useState(false);
   const [showDocTypeSwitcher, setShowDocTypeSwitcher] = useState(false);
-  const [confirmDuplicateOverride, setConfirmDuplicateOverride] = useState(false);
-  const [duplicateMatches, setDuplicateMatches] = useState<DuplicateCheckMatch[]>([]);
-  const [duplicateInboxMatches, setDuplicateInboxMatches] = useState<LineBillInboxItem[]>([]);
   const [enableDestScale, setEnableDestScale] = useState(false);
   const [enableWeighbridgePricing, setEnableWeighbridgePricing] = useState(false);
   const [enableDOWeighing, setEnableDOWeighing] = useState(false);
@@ -121,9 +117,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
       setForm(normalized);
       setCurrentImage(billImage || normalized.image || null);
-      setConfirmDuplicateOverride(false);
-      setDuplicateMatches([]);
-      setDuplicateInboxMatches([]);
       setProjectMissingError(false);
       setRemappedNotice(null);
       setHasAttachedImage(false);
@@ -170,12 +163,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
   }, [billImage]);
 
-  useEffect(() => {
-    setConfirmDuplicateOverride(false);
-    setDuplicateMatches([]);
-    setDuplicateInboxMatches([]);
-  }, [form, selectedDocType, currentImage]);
-
   const dbCatalog = React.useMemo(
     () => buildDatabaseCatalog(stores, projects, pos, existingOrders),
     [stores, projects, pos, existingOrders]
@@ -215,9 +202,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isPO = selectedDocType === 'purchase_order';
   const isFullLogistics = selectedDocType === 'full_logistics';
 
-  const blockingDuplicates = duplicateMatches.filter(m => m.level === 'exact' || m.level === 'suspected');
-  const primaryDuplicate = duplicateMatches[0];
-  const hasPotentialDuplicates = blockingDuplicates.length > 0 || duplicateInboxMatches.length > 0;
   const validationWarnings = React.useMemo(() => {
     const warnings: string[] = [];
     const isValidDate = (value?: string) => {
@@ -589,20 +573,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     return { finalizedOrder, storeToSave };
   };
 
-  const handleOverwriteExistingDuplicate = (existingOrder: OrderRecord) => {
-    const { finalizedOrder, storeToSave } = buildFinalizedOrder(existingOrder);
-    if (onSaveOrder(finalizedOrder, storeToSave, true)) onClose();
-  };
-
-  const handleInspectExistingDuplicate = (existingOrder: OrderRecord) => {
-    setForm({ ...existingOrder });
-    setCurrentImage(existingOrder.image || null);
-    if (existingOrder.docType) {
-      setSelectedDocType(existingOrder.docType);
-    }
-    setConfirmDuplicateOverride(false);
-  };
-
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -612,38 +582,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       return;
     }
 
-    const matches = checkDuplicateOrder({ ...form, docType: selectedDocType }, existingOrders, currentImage);
-    const blocking = matches.filter(m => m.level === 'exact' || m.level === 'suspected');
-    const candidateInboxItem = lineInboxItems.find(item => item.id === form.lineInboxId);
-    const candidateDocNo = selectedDocType === 'purchase_order'
-      ? form.col4
-      : selectedDocType === 'dest_weighbridge'
-        ? form.col17 || form.col6
-        : form.col6;
-    const inboxMatches = lineInboxItems.filter(item => {
-      if (item.id === form.lineInboxId) return false;
-      const otherDocNo = item.detectedDocType === 'purchase_order'
-        ? item.extractedData.col4 || item.rawAiSnapshot.col4
-        : item.detectedDocType === 'dest_weighbridge'
-          ? item.extractedData.col17 || item.rawAiSnapshot.col17
-          : item.extractedData.col6 || item.rawAiSnapshot.col6;
-      const sameImage = Boolean(
-        candidateInboxItem?.imageHash &&
-        item.imageHash &&
-        candidateInboxItem.imageHash === item.imageHash
-      );
-      const sameDocumentNumber = isExactDocNumberReference(candidateDocNo, otherDocNo);
-      return sameImage || sameDocumentNumber;
-    });
-    setDuplicateMatches(matches);
-    setDuplicateInboxMatches(inboxMatches);
-    if ((blocking.length > 0 || inboxMatches.length > 0) && !confirmDuplicateOverride) {
-      setConfirmDuplicateOverride(true);
-      return;
-    }
-
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
-    if (onSaveOrder(finalizedOrder, storeToSave, blocking.length > 0 || inboxMatches.length > 0)) onClose();
+    if (onSaveOrder(finalizedOrder, storeToSave, true)) onClose();
   };
 
   return (
@@ -961,159 +901,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   <ul className="mt-1.5 ml-6 list-disc space-y-0.5 text-[11px]">
                     {validationWarnings.map(warning => <li key={warning}>{warning}</li>)}
                   </ul>
-                </div>
-              )}
-
-              {duplicateInboxMatches.length > 0 && (
-                <div
-                  role="alert"
-                  aria-live="polite"
-                  className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950"
-                >
-                  <div className="flex items-center gap-2 font-bold text-xs sm:text-sm">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                    <span>พบรายการ LINE ที่มีรูปหรือเลขเอกสารเดียวกัน — ตรวจสอบก่อนบันทึก</span>
-                  </div>
-                  <ul className="mt-1.5 ml-6 list-disc space-y-0.5 text-[11px]">
-                    {duplicateInboxMatches.slice(0, 5).map(item => (
-                      <li key={item.id}>
-                        <strong>
-                          {item.detectedDocType === 'purchase_order'
-                            ? item.extractedData.col4 || item.rawAiSnapshot.col4
-                            : item.detectedDocType === 'dest_weighbridge'
-                              ? item.extractedData.col17 || item.rawAiSnapshot.col17
-                              : item.extractedData.col6 || item.rawAiSnapshot.col6 || item.id}
-                        </strong>
-                        {' • '}{item.lineGroupName || item.lineSenderName || 'LINE'}
-                        {' • '}{item.status === 'verified' ? `ตรวจรับแล้ว (${item.verifiedOrderId || '-'})` : 'ยังอยู่ในกล่องพัก'}
-                      </li>
-                    ))}
-                    {duplicateInboxMatches.length > 5 && <li>และอีก {duplicateInboxMatches.length - 5} รายการ</li>}
-                  </ul>
-                  <p className="mt-1 text-[11px] font-semibold">
-                    ระบบไม่ลบหรือปฏิเสธรายการให้อัตโนมัติ; หากตรวจแล้วว่าเป็นคนละเอกสาร ให้กดยืนยันอีกครั้งเพื่อบันทึก
-                  </p>
-                </div>
-              )}
-
-              {/* ==================== DUPLICATE BILL DETECTION ALERT BANNER ==================== */}
-              {primaryDuplicate && (
-                <div className={`p-3.5 rounded-xl border-2 space-y-2.5 animate-fadeIn ${
-                  primaryDuplicate.level === 'exact'
-                    ? 'bg-rose-50/90 border-rose-400 text-rose-950 shadow-sm'
-                    : primaryDuplicate.level === 'suspected'
-                    ? 'bg-amber-50/90 border-amber-400 text-amber-950 shadow-sm'
-                    : 'bg-emerald-50/90 border-emerald-400 text-emerald-950'
-                }`}>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2.5">
-                      {primaryDuplicate.level === 'cross_vendor' ? (
-                        <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5 text-emerald-600" />
-                      ) : (
-                        <AlertTriangle className={`w-5 h-5 shrink-0 mt-0.5 ${
-                          primaryDuplicate.level === 'exact' ? 'text-rose-600' : 'text-amber-600'
-                        }`} />
-                      )}
-                      <div>
-                        <div className="font-bold text-xs sm:text-sm">
-                          {primaryDuplicate.reasonTitle}
-                        </div>
-                        <p className="text-[11px] opacity-90 mt-0.5 leading-relaxed">
-                          {primaryDuplicate.reasonDetail}
-                        </p>
-                      </div>
-                    </div>
-                    <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold shrink-0 ${
-                      primaryDuplicate.level === 'exact'
-                        ? 'bg-rose-600 text-white'
-                        : primaryDuplicate.level === 'suspected'
-                        ? 'bg-amber-600 text-white'
-                        : 'bg-emerald-600 text-white'
-                    }`}>
-                      {primaryDuplicate.level === 'exact'
-                        ? '⚠️ เลขเอกสาร/รูปอาจซ้ำ'
-                        : primaryDuplicate.level === 'suspected'
-                        ? '⚠️ ข้อมูลอาจซ้ำ'
-                        : '✅ คนละร้านค้า — บันทึกได้ปกติ'}
-                    </span>
-                  </div>
-
-                  {/* Comparison summary of the existing record in the system */}
-                  <div className="bg-white/95 p-2.5 rounded-lg border border-slate-200/90 text-[11px] grid grid-cols-2 sm:grid-cols-5 gap-2">
-                    <div>
-                      <span className="text-slate-400 block text-[10px]">รหัสในระบบเดิม</span>
-                      <span className="font-mono font-bold text-slate-900">{primaryDuplicate.matchedOrder.col1}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px]">เลขที่บิล / ตั๋ว</span>
-                      <span className="font-mono font-bold text-blue-800">
-                        {primaryDuplicate.matchedOrder.col6 || primaryDuplicate.matchedOrder.col17 || '-'}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px]">วันที่ / ทะเบียน</span>
-                      <span className="font-mono text-slate-800">
-                        {primaryDuplicate.matchedOrder.col7 || primaryDuplicate.matchedOrder.col16 || '-'}
-                        {primaryDuplicate.matchedOrder.col10 ? ` (${primaryDuplicate.matchedOrder.col10})` : ''}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px]">ร้านค้าในระบบเดิม</span>
-                      <span className="font-semibold text-slate-800 truncate block">
-                        {primaryDuplicate.matchedOrder.col8} • {primaryDuplicate.matchedOrder.col11}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px]">น้ำหนักสุทธิ / ยอดรวม</span>
-                      <span className="font-mono font-bold text-emerald-800">
-                        {Number(primaryDuplicate.matchedOrder.col15) > 0
-                          ? `${Number(primaryDuplicate.matchedOrder.col15).toLocaleString()} กก.`
-                          : Number(primaryDuplicate.matchedOrder.col20) > 0
-                          ? `${Number(primaryDuplicate.matchedOrder.col20).toLocaleString()} กก.`
-                          : `฿${(Number(primaryDuplicate.matchedOrder.col29) || 0).toLocaleString()}`}
-                      </span>
-                    </div>
-                  </div>
-
-                  {primaryDuplicate.level === 'cross_vendor' ? (
-                    <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px] text-emerald-900 font-semibold">
-                      <span>💡 เลขเอกสารนี้อยู่กับร้านอื่นด้วย จึงแจ้งไว้เพื่อให้ตรวจสอบ แต่อนุญาตให้บันทึกได้</span>
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={onClose}
-                          className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shadow-xs transition cursor-pointer flex items-center gap-1.5"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                          <span>ยกเลิกการนำเข้าบิลซ้ำนี้ (ไม่บันทึกเข้าระบบ)</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleInspectExistingDuplicate(primaryDuplicate.matchedOrder)}
-                          className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition cursor-pointer"
-                        >
-                          👁️ เปิดดูบิลเดิมที่มีอยู่ในระบบ ({primaryDuplicate.matchedOrder.col1})
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleOverwriteExistingDuplicate(primaryDuplicate.matchedOrder)}
-                          className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 rounded-lg text-[11px] font-semibold transition cursor-pointer"
-                          title="กรณีต้องการอัปเดตข้อมูลหรือรูปภาพใหม่ทับลงในบิลเดิมโดยไม่เพิ่มแถวใหม่"
-                        >
-                          🔄 อัปเดตทับบิลเดิม ({primaryDuplicate.matchedOrder.col1})
-                        </button>
-                      </div>
-
-                      <span className="text-[11px] font-bold text-amber-900 bg-amber-100/90 px-2.5 py-1 rounded-lg border border-amber-300">
-                        {confirmDuplicateOverride
-                          ? 'ตรวจแล้ว: กดยืนยันด้านล่างเพื่อบันทึกเป็นเอกสารแยก'
-                          : 'ระบบจะแจ้งเตือนเท่านั้น ไม่ลบหรือปฏิเสธบิลอัตโนมัติ'}
-                      </span>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -3283,18 +3070,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    className={`px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm ${
-                      hasPotentialDuplicates && confirmDuplicateOverride
-                        ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-200'
-                        : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200'
-                    }`}
+                    className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
                   >
                     <Save className="w-4 h-4" />
-                    <span>
-                      {hasPotentialDuplicates && confirmDuplicateOverride
-                        ? 'ยืนยันบันทึกเป็นเอกสารแยก'
-                        : 'ยืนยันบันทึกข้อมูลเอกสาร'}
-                    </span>
+                    <span>ยืนยันบันทึกข้อมูลเอกสาร</span>
                   </button>
                 </div>
               </div>

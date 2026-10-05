@@ -77,7 +77,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   showToast
 }) => {
   const [statusFilter, setStatusFilter] = useState<
-    'all' | 'pending_review' | 'duplicate_warning' | 'scan_failed' | 'verified' | 'ignored_non_bill'
+    'all' | 'pending_review' | 'scan_failed' | 'verified' | 'ignored_non_bill'
   >('all');
   const [docTypeFilter, setDocTypeFilter] = useState<DocumentType | 'all'>('all');
   const [groupFilter, setGroupFilter] = useState<string>('all');
@@ -366,8 +366,9 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const webhookUrl = `${window.location.origin}/api/line/webhook`;
 
   // Counts by status
-  const pendingCount = inboxItems.filter(i => i.status === 'pending_review' || i.status === 'queued').length;
-  const duplicateCount = inboxItems.filter(i => i.status === 'duplicate_warning').length;
+  const pendingCount = inboxItems.filter(i =>
+    i.status === 'pending_review' || i.status === 'queued' || i.status === 'duplicate_warning'
+  ).length;
   const failedCount = inboxItems.filter(i => i.status === 'scan_failed').length;
   const verifiedCount = inboxItems.filter(i => i.status === 'verified').length;
   const ignoredCount = inboxItems.filter(i => i.status === 'ignored_non_bill').length;
@@ -396,7 +397,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
     if (statusFilter !== 'all') {
       if (statusFilter === 'pending_review') {
-        if (item.status !== 'pending_review' && item.status !== 'queued') return false;
+        if (item.status !== 'pending_review' && item.status !== 'queued' && item.status !== 'duplicate_warning') return false;
       } else if (item.status !== statusFilter) {
         return false;
       }
@@ -610,18 +611,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
             >
               <Clock className="w-3.5 h-3.5" />
               <span>รอตรวจสอบ ({pendingCount})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter('duplicate_warning')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
-                statusFilter === 'duplicate_warning'
-                  ? 'bg-rose-600 text-white shadow-2xs'
-                  : 'bg-rose-50 text-rose-800 border border-rose-200 hover:bg-rose-100'
-              }`}
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>บิลซ้ำ ({duplicateCount})</span>
             </button>
             {failedCount > 0 && (
               <button
@@ -1038,9 +1027,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   const currentProject = (item.extractedData?.col2 || '').trim();
 
                   const rowBg =
-                    item.status === 'duplicate_warning'
-                      ? 'bg-rose-50/40 hover:bg-rose-50/80'
-                      : item.status === 'verified'
+                    item.status === 'verified'
                       ? 'bg-emerald-50/30 hover:bg-emerald-50/60'
                       : item.status === 'ignored_non_bill'
                       ? 'bg-slate-50/70 opacity-75'
@@ -1155,11 +1142,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 font-bold text-[11px]">
                             <CheckCircle2 className="w-3 h-3 shrink-0" />
                             <span>บันทึกแล้ว ({item.verifiedOrderId || 'สำเร็จ'})</span>
-                          </span>
-                        ) : item.status === 'duplicate_warning' ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 font-bold text-[11px]">
-                            <AlertTriangle className="w-3 h-3 shrink-0" />
-                            <span>ซ้ำ ({item.duplicateInfo?.matchedCode || 'ในระบบ'})</span>
                           </span>
                         ) : item.status === 'ignored_non_bill' ? (
                           <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-semibold text-[11px]">
@@ -1315,9 +1297,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                       {/* 11. Actions */}
                       <td
                         className={`py-2 px-3 align-middle text-center sticky right-0 z-10 shadow-[-4px_0_8px_-2px_rgba(0,0,0,0.05)] ${
-                          item.status === 'duplicate_warning'
-                            ? 'bg-rose-50'
-                            : item.status === 'verified'
+                          item.status === 'verified'
                             ? 'bg-emerald-50'
                             : 'bg-white'
                         }`}

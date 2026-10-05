@@ -345,7 +345,7 @@ export interface ScanApiResponse {
 export type LineInboxItemStatus =
   | 'queued'             // เพิ่งรับรูปเข้าคิว กำลังรอ AI สแกน
   | 'pending_review'     // AI สแกนเสร็จแล้ว รอผู้ตรวจสอบตรวจทานและระบุชื่อโครงการ (ช่อง 2)
-  | 'duplicate_warning'  // AI ตรวจพบว่าเลขบิล+ร้านค้าซ้ำกับบิลที่มีอยู่แล้ว
+  | 'duplicate_warning'  // Legacy status; shown as pending review and no longer assigned automatically
   | 'verified'           // ผู้ตรวจสอบกดยืนยันบันทึกเข้าตารางหลัก 39 คอลัมน์ / PO แล้ว
   | 'ignored_non_bill'   // AI คัดกรองแล้วว่าเป็นรูปถ่ายทั่วไปในกลุ่ม (ไม่ใช่บิล)
   | 'scan_failed';       // AI อ่านไม่สำเร็จ แต่เก็บรูปและชื่อผู้ส่งไว้ครบ รอกดสแกนซ้ำหรือคีย์มือ
@@ -362,7 +362,7 @@ export interface LineBillInboxItem {
   lineGroupName: string;           // ชื่อกลุ่ม LINE (เก็บแยกจาก col2 ชื่อโครงการ 100%)
   receivedAt: string;              // วัน-เวลาที่ส่งเข้ากลุ่ม LINE (ISO)
   image: string;                   // Base64 image data
-  imageHash?: string;              // SHA-256 digital fingerprint to catch 100% duplicate photos even without billNo
+  imageHash?: string;              // SHA-256 of the exact image bytes; stored for audit, not used to auto-mark duplicates
   status: LineInboxItemStatus;
   detectedDocType: DocumentType;   // ประเภทเอกสารที่ AI จำแนก (หรือที่ผู้ตรวจสอบสลับเปลี่ยน)
   extractedData: Partial<OrderRecord>; // ข้อมูลที่พร้อมส่งเข้า VerifyModal / POEditModal (col2 จะว่างไว้ให้ผู้ตรวจระบุ)
@@ -405,7 +405,7 @@ export interface LineBotConfig {
   channelAccessToken: string;
   channelSecret: string;
   autoQuoteReply: boolean;         // ตอบกลับอ้างอิงรูปบิลด้วย replyToken + quoteToken (ฟรี 0 โควตา)
-  replyOnDuplicate: boolean;       // แจ้งเตือนในกลุ่มทันทีเมื่อส่งบิลซ้ำ
+  replyOnDuplicate: boolean;       // Legacy setting; duplicate decisions are left to the reviewer
   replyOnUnclearImage: boolean;    // แจ้งยืนยันรับรูปเข้ากล่องพักแม้เลขบิลไม่ชัด
   filterNonBillImages: boolean;    // คัดกรองรูปทั่วไปที่ไม่ใช่บิลออกอัตโนมัติ
   strictZeroPushQuota: boolean;    // บล็อกการใช้ Push Message 100% เพื่อไม่ให้กินโควตารายเดือน

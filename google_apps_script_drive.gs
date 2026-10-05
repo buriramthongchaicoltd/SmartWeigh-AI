@@ -40,8 +40,6 @@ function doPost(e) {
       return handleCleanup(payload);
     } else if (action === 'list_zone_files') {
       return handleListZoneFiles(payload);
-    } else if (action === 'match_inbox_image') {
-      return handleMatchInboxImage(payload);
     } else if (action === 'quarantine_inbox_file') {
       return handleQuarantineInboxFile(payload);
     } else {
@@ -369,51 +367,6 @@ function handleListZoneFiles(payload) {
   });
 }
 
-function handleMatchInboxImage(payload) {
-  var rootFolderId = payload.rootFolderId;
-  var contentHash = String(payload.contentHash || '').toLowerCase();
-  var candidateFileIds = Array.isArray(payload.candidateFileIds) ? payload.candidateFileIds : [];
-  if (!rootFolderId || !/^[a-f0-9]{64}$/.test(contentHash) || candidateFileIds.length > 200) {
-    return jsonResponse({ success: false, error: 'ข้อมูลค้นหารูปไม่ถูกต้องหรือเกินขีดจำกัด' });
-  }
-
-  var root = DriveApp.getFolderById(rootFolderId);
-  var zone00Folders = root.getFoldersByName(ZONE_NAMES.ZONE_00);
-  if (!zone00Folders.hasNext()) {
-    return jsonResponse({ success: true, match: null });
-  }
-  var zone00Id = zone00Folders.next().getId();
-
-  for (var i = 0; i < candidateFileIds.length; i++) {
-    var file = DriveApp.getFileById(candidateFileIds[i]);
-    var parents = file.getParents();
-    var isInZone00 = false;
-    while (parents.hasNext()) {
-      if (parents.next().getId() === zone00Id) {
-        isInZone00 = true;
-        break;
-      }
-    }
-    if (!isInZone00 || file.isTrashed()) continue;
-
-    var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, file.getBlob().getBytes());
-    var fileHash = digest.map(function(byte) {
-      return ('0' + ((byte + 256) % 256).toString(16)).slice(-2);
-    }).join('');
-    if (fileHash === contentHash) {
-      return jsonResponse({
-        success: true,
-        match: {
-          id: file.getId(),
-          name: file.getName(),
-          webViewLink: file.getUrl()
-        }
-      });
-    }
-  }
-  return jsonResponse({ success: true, match: null });
-}
-
 function handleQuarantineInboxFile(payload) {
   var rootFolderId = payload.rootFolderId;
   var fileId = payload.fileId;
@@ -425,7 +378,11 @@ function handleQuarantineInboxFile(payload) {
   var zone00Folders = root.getFoldersByName(ZONE_NAMES.ZONE_00);
   var quarantineFolder = getOrCreateSubfolder(root, ZONE_NAMES.ZONE_99);
   if (!zone00Folders.hasNext()) {
-    return jsonResponse({ success: false, error: 'ไม่พบโฟลเดอร์กล่องพักบิล LINE' });
+    return jsonResponse({
+      success: true,
+      quarantined: false,
+      message: 'ไม่พบโฟลเดอร์ 00 จึงข้ามการย้ายไฟล์; ลบเฉพาะรายการในกล่องพักได้'
+    });
   }
 
   var zone00 = zone00Folders.next();
@@ -439,7 +396,11 @@ function handleQuarantineInboxFile(payload) {
     }
   }
   if (!isInInboxZone) {
-    return jsonResponse({ success: false, error: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงไม่ย้ายไปกักกัน' });
+    return jsonResponse({
+      success: true,
+      quarantined: false,
+      message: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ 00 จึงข้ามการย้ายไฟล์; ลบเฉพาะรายการในกล่องพักได้'
+    });
   }
 
   file.moveTo(quarantineFolder);
