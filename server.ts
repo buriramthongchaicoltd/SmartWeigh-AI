@@ -3581,13 +3581,15 @@ function saveStoredDriveConfig(cfg: Partial<ServerDriveConfig>) {
 }
 
 // Helper to call Google Apps Script Web App (Zero-Junk & Verified-Only Move without Service Account)
-async function callGasDriveApi(gasUrl: string, payload: any): Promise<any> {
+async function callGasDriveApi(gasUrl: string, payload: any, signal?: AbortSignal): Promise<any> {
   const resp = await fetch(gasUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     redirect: 'follow',
-    signal: AbortSignal.timeout(45000)
+    signal: signal
+      ? AbortSignal.any([AbortSignal.timeout(45000), signal])
+      : AbortSignal.timeout(45000)
   });
   if (!resp.ok) {
     throw new Error(`Google Apps Script ตอบกลับด้วยรหัส HTTP ${resp.status}`);
@@ -4524,17 +4526,20 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
 
 async function getDriveLinkedFileIds(
   client: any,
-  tables: string[] = ['line_inbox', 'orders', 'purchase_orders']
+  tables: string[] = ['line_inbox', 'orders', 'purchase_orders'],
+  signal?: AbortSignal
 ): Promise<Map<string, string[]>> {
   const linkedFileIds = new Map<string, string[]>();
   for (const table of tables) {
     const pageSize = 500;
     for (let offset = 0; ; offset += pageSize) {
-      const { data, error } = await client
+      let query = client
         .from(table)
         .select('drive_file_id')
         .not('drive_file_id', 'is', null)
         .range(offset, offset + pageSize - 1);
+      if (signal) query = query.abortSignal(signal);
+      const { data, error } = await query;
       if (error) {
         throw new Error(`ตรวจรายการเชื่อมโยง Drive ใน ${table} ไม่สำเร็จ: ${error.message}`);
       }
@@ -4553,6 +4558,17 @@ async function getDriveLinkedFileIds(
 }
 
 app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => {
+  const auditController = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) auditController.abort();
+  });
+  const throwIfAuditCancelled = () => {
+    if (auditController.signal.aborted) {
+      const error = new Error('ผู้ใช้ยกเลิกการตรวจไฟล์ใน Google Drive');
+      error.name = 'AbortError';
+      throw error;
+    }
+  };
   try {
     const cfg = getStoredDriveConfig();
     if (!cfg.isEnabled || !cfg.rootFolderId) {
@@ -4563,7 +4579,12 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
       return res.status(400).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase กรุณาตั้งค่าก่อน' });
     }
 
-    const linkedFileIds = await getDriveLinkedFileIds(client);
+    const linkedFileIds = await getDriveLinkedFileIds(
+      client,
+      ['line_inbox', 'orders', 'purchase_orders'],
+      auditController.signal
+    );
+    throwIfAuditCancelled();
     const lineRows: Array<{
       id: string;
       status?: string;
@@ -4579,8 +4600,10 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
         .from('line_inbox')
         .select('id,status,drive_file_id,drive_file_location,received_at,doc_number,store_name')
         .order('id', { ascending: true })
-        .range(offset, offset + linePageSize - 1);
+        .range(offset, offset + linePageSize - 1)
+        .abortSignal(auditController.signal);
       if (error) throw new Error(`อ่านรายการกล่องพัก LINE ไม่สำเร็จ: ${error.message}`);
+      throwIfAuditCancelled();
       lineRows.push(...(data || []));
       if (!data || data.length < linePageSize) break;
     }
@@ -4593,7 +4616,8 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
       const result = await callGasDriveApi(cfg.gasWebAppUrl, {
         action: 'list_zone_files',
         rootFolderId: cfg.rootFolderId
-      });
+      }, auditController.signal);
+      throwIfAuditCancelled();
       if (!result?.success) {
         throw new Error(result?.error || 'อ่านรายการไฟล์จาก Google Apps Script ไม่สำเร็จ');
       }
@@ -4618,8 +4642,10 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
         });
         if (pageToken) params.set('pageToken', pageToken);
         const response = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
-          headers: { Authorization: 'Bearer ' + driveToken }
+          headers: { Authorization: 'Bearer ' + driveToken },
+          signal: auditController.signal
         });
+        throwIfAuditCancelled();
         if (!response.ok) {
           throw new Error(`อ่านไฟล์ในโฟลเดอร์ Drive ไม่สำเร็จ (${response.status}): ${await response.text()}`);
         }
@@ -4709,6 +4735,7 @@ app.post('/api/drive/audit-line-inbox', async (_req: Request, res: Response) => 
       message: 'จับคู่ไฟล์ในโฟลเดอร์ 00 กับ line_inbox ด้วย drive_file_id โดยตรง; แยกไฟล์ที่อ้างอิงโดย orders/PO และไฟล์ที่ไม่มีการอ้างอิงก่อนเสนอให้กักกัน'
     });
   } catch (err: any) {
+    if (auditController.signal.aborted) return;
     console.error('[Drive Inbox Audit] Failed:', err);
     return res.status(500).json({ success: false, error: err?.message || 'ตรวจสอบรายการไฟล์ Drive ไม่สำเร็จ' });
   }

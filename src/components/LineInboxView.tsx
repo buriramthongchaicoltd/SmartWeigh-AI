@@ -15,7 +15,8 @@ import {
   Search,
   Cloud,
   Archive,
-  ShieldAlert
+  ShieldAlert,
+  X
 } from 'lucide-react';
 import {
   DocumentType,
@@ -117,6 +118,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [, setPreloadedImageVersion] = useState(0);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [isAuditingDrive, setIsAuditingDrive] = useState(false);
+  const auditAbortController = useRef<AbortController | null>(null);
   const [driveAuditError, setDriveAuditError] = useState<string | null>(null);
   const [driveAudit, setDriveAudit] = useState<{
     scannedAt: string;
@@ -162,13 +164,20 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   } | null>(null);
   const [selectedOrphanIds, setSelectedOrphanIds] = useState<Set<string>>(new Set());
   const [quarantiningIds, setQuarantiningIds] = useState<Set<string>>(new Set());
+  const cancelQuarantineRequested = useRef(false);
+  const [isCancellingQuarantine, setIsCancellingQuarantine] = useState(false);
   const [deletingInboxId, setDeletingInboxId] = useState<string | null>(null);
 
   const handleAuditDriveInbox = async () => {
+    const controller = new AbortController();
+    auditAbortController.current = controller;
     setIsAuditingDrive(true);
     setDriveAuditError(null);
     try {
-      const response = await fetch('/api/drive/audit-line-inbox', { method: 'POST' });
+      const response = await fetch('/api/drive/audit-line-inbox', {
+        method: 'POST',
+        signal: controller.signal
+      });
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.error || `ตรวจสอบ Google Drive ไม่สำเร็จ (${response.status})`);
@@ -176,10 +185,25 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       setDriveAudit(data);
       setSelectedOrphanIds(new Set());
     } catch (error: any) {
-      setDriveAuditError(error?.message || 'ตรวจสอบ Google Drive ไม่สำเร็จ');
+      if (error?.name !== 'AbortError') {
+        setDriveAuditError(error?.message || 'ตรวจสอบ Google Drive ไม่สำเร็จ');
+      }
     } finally {
+      if (auditAbortController.current === controller) {
+        auditAbortController.current = null;
+      }
       setIsAuditingDrive(false);
     }
+  };
+
+  const handleCancelAuditDriveInbox = () => {
+    auditAbortController.current?.abort();
+    showToast('ยกเลิกการตรวจไฟล์แล้ว', 'info');
+  };
+
+  const handleCancelQuarantine = () => {
+    cancelQuarantineRequested.current = true;
+    setIsCancellingQuarantine(true);
   };
 
   const handleQuarantineSelected = async () => {
@@ -189,8 +213,15 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
     const completed = new Set<string>();
     const failed: string[] = [];
+    let cancelled = false;
+    cancelQuarantineRequested.current = false;
+    setIsCancellingQuarantine(false);
     setQuarantiningIds(new Set(selectedFiles.map(file => file.id)));
     for (const file of selectedFiles) {
+      if (cancelQuarantineRequested.current) {
+        cancelled = true;
+        break;
+      }
       try {
         const response = await fetch('/api/drive/quarantine-line-inbox-orphan', {
           method: 'POST',
@@ -204,7 +235,18 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         failed.push(`${file.name}: ${error?.message || 'ย้ายไม่สำเร็จ'}`);
       }
     }
+    cancelled = cancelled || cancelQuarantineRequested.current;
     setQuarantiningIds(new Set());
+    setIsCancellingQuarantine(false);
+    cancelQuarantineRequested.current = false;
+    if (cancelled) {
+      setSelectedOrphanIds(new Set(selectedFiles.filter(file => !completed.has(file.id)).map(file => file.id)));
+      showToast(
+        `หยุดทำงานแล้ว: ย้ายสำเร็จ ${completed.size} รูป เหลือที่ยังไม่ได้ย้าย ${selectedFiles.length - completed.size} รูป`,
+        'info'
+      );
+      return;
+    }
     setSelectedOrphanIds(new Set());
     await handleAuditDriveInbox();
     if (failed.length) {
@@ -756,7 +798,23 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
             <RefreshCw className={`h-3.5 w-3.5 ${isAuditingDrive ? 'animate-spin' : ''}`} />
             {isAuditingDrive ? 'กำลังตรวจสอบ...' : 'ตรวจเทียบไฟล์ใน Drive'}
           </button>
+          {isAuditingDrive && (
+            <button
+              type="button"
+              onClick={handleCancelAuditDriveInbox}
+              className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              aria-label="ยกเลิกการตรวจไฟล์ใน Google Drive"
+            >
+              <X className="h-3.5 w-3.5" />
+              ยกเลิกการตรวจ
+            </button>
+          )}
         </div>
+        {isAuditingDrive && (
+          <p role="status" className="mt-2 text-xs text-amber-900">
+            กำลังอ่านข้อมูลจาก Drive และฐานข้อมูล; ยกเลิกได้ทุกเมื่อ
+          </p>
+        )}
 
         {driveAuditError && (
           <p role="alert" className="mt-3 rounded-lg bg-rose-100 px-3 py-2 text-xs font-medium text-rose-800">
@@ -824,6 +882,17 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                     <Archive className="h-3.5 w-3.5" />
                     {quarantiningIds.size > 0 ? 'กำลังย้ายไฟล์...' : `ย้ายที่เลือกเข้าถังกักกัน (${selectedOrphanIds.size})`}
                   </button>
+                  {quarantiningIds.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleCancelQuarantine}
+                      disabled={isCancellingQuarantine}
+                      className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-800 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      {isCancellingQuarantine ? 'กำลังหยุดหลังไฟล์ปัจจุบัน...' : 'ยกเลิกการย้าย'}
+                    </button>
+                  )}
                 </div>
                 <ul className="mt-3 max-h-64 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200">
                   {driveAudit.orphanFiles.map(file => (
