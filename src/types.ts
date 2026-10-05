@@ -24,6 +24,9 @@ export interface OrderItemDetail {
 export interface OrderRecord {
   id: string;
   docType?: DocumentType;
+  documentTitle?: string;        // ชื่อเอกสารที่ OCR อ่านจากหัว/ป้ายบนภาพ
+  docTypeEvidence?: string;      // หลักฐานจากภาพที่ใช้ประกอบการจำแนกประเภท
+  docTypeConfidence?: number;    // ความมั่นใจในการจำแนกประเภท 0-100
   lineItems?: OrderItemDetail[];
   referenceDocNo?: string;     // เลขที่เอกสารอ้างอิง เช่น เลข DO ที่ตั๋วชั่งอ้างถึง หรือ เลข PO
   referenceSource?: 'form_field' | 'notes' | 'handwritten'; // แหล่งที่พบ: ในช่องฟอร์ม, ในช่องหมายเหตุ, หรือลายมือเขียน

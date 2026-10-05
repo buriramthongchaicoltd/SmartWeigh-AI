@@ -44,7 +44,7 @@ interface LineInboxViewProps {
 const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
   {
     value: 'delivery_order',
-    shortLabel: '📦 เอกสารส่งมอบ (DO / ตั๋วชั่งต้นทาง)'
+    shortLabel: '📦 ใบส่งของ / ตั๋วชั่งต้นทาง'
   },
   {
     value: 'dest_weighbridge',
@@ -1180,37 +1180,53 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                       {/* 6. Document Type Switcher */}
                       <td className="py-2 px-3 border-r border-slate-200 align-middle">
                         {item.status !== 'ignored_non_bill' ? (
-                          <div className="flex items-center gap-1">
-                            <select
-                              value={item.detectedDocType === 'weighbridge' ? 'delivery_order' : item.detectedDocType}
-                              onChange={e =>
-                                handleInstantDocTypeChange(item, e.target.value as DocumentType)
-                              }
-                              className={`flex-1 px-2 py-1 rounded-lg border text-xs font-bold cursor-pointer outline-none ${
-                                item.detectedDocType === 'dest_weighbridge'
-                                  ? 'bg-teal-50 text-teal-900 border-teal-300'
-                                  : item.detectedDocType === 'tax_invoice'
-                                  ? 'bg-amber-50 text-amber-900 border-amber-300'
-                                  : item.detectedDocType === 'purchase_order'
-                                  ? 'bg-indigo-50 text-indigo-900 border-indigo-300'
-                                  : 'bg-sky-50 text-sky-900 border-sky-300'
-                              }`}
-                            >
-                              {DOC_TYPE_OPTIONS.map(opt => (
-                                <option key={opt.value} value={opt.value}>
-                                  {opt.shortLabel}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              disabled={rescanningId === item.id}
-                              onClick={() => handleCardAIRescan(item)}
-                              className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 transition cursor-pointer shrink-0"
-                              title="สั่ง AI สแกนรูปนี้ซ้ำ"
-                            >
-                              <RefreshCw className={`w-3.5 h-3.5 ${rescanningId === item.id ? 'animate-spin text-indigo-600' : ''}`} />
-                            </button>
+                          <div className="space-y-1">
+                            {(item.extractedData.documentTitle || item.extractedData.docTypeEvidence) && (
+                              <div
+                                className={`text-[10px] leading-tight ${
+                                  Number(item.extractedData.docTypeConfidence) > 0 &&
+                                  Number(item.extractedData.docTypeConfidence) < 70
+                                    ? 'text-amber-800 font-semibold'
+                                    : 'text-slate-500'
+                                }`}
+                                title={`ชื่อเอกสาร: ${item.extractedData.documentTitle || 'อ่านไม่ชัด'} | หลักฐาน: ${item.extractedData.docTypeEvidence || 'ไม่มี'}`}
+                              >
+                                <div className="truncate">{item.extractedData.documentTitle || 'อ่านชื่อเอกสารไม่ชัด'}</div>
+                                <div className="truncate">{item.extractedData.docTypeEvidence || 'ไม่มีหลักฐานข้อความ'}</div>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-1">
+                              <select
+                                value={item.detectedDocType === 'weighbridge' ? 'delivery_order' : item.detectedDocType}
+                                onChange={e =>
+                                  handleInstantDocTypeChange(item, e.target.value as DocumentType)
+                                }
+                                className={`flex-1 px-2 py-1 rounded-lg border text-xs font-bold cursor-pointer outline-none ${
+                                  item.detectedDocType === 'dest_weighbridge'
+                                    ? 'bg-teal-50 text-teal-900 border-teal-300'
+                                    : item.detectedDocType === 'tax_invoice'
+                                    ? 'bg-amber-50 text-amber-900 border-amber-300'
+                                    : item.detectedDocType === 'purchase_order'
+                                    ? 'bg-indigo-50 text-indigo-900 border-indigo-300'
+                                    : 'bg-sky-50 text-sky-900 border-sky-300'
+                                }`}
+                              >
+                                {DOC_TYPE_OPTIONS.map(opt => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.shortLabel}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={rescanningId === item.id}
+                                onClick={() => handleCardAIRescan(item)}
+                                className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border border-slate-200 transition cursor-pointer shrink-0"
+                                title="สั่ง AI สแกนรูปนี้ซ้ำ"
+                              >
+                                <RefreshCw className={`w-3.5 h-3.5 ${rescanningId === item.id ? 'animate-spin text-indigo-600' : ''}`} />
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <span className="text-slate-400">-</span>

@@ -382,7 +382,12 @@ const OCR_DOCUMENT_TYPES: DocumentType[] = [
 ];
 
 const SHARED_OCR_POLICY = `มาตรฐาน OCR กลางของระบบ (ใช้กับทุกช่องทาง):
+- อ่านและส่งคืน documentTitle ตามชื่อ/หัวเอกสารที่เห็นจริง และ docTypeEvidence เป็นข้อความสั้นๆ ที่ยกหลักฐานจากภาพมาอธิบายประเภทที่เลือก
+- จัดประเภทตามลำดับหลักฐาน: (1) ชื่อเอกสารที่พิมพ์บนเอกสาร (2) ป้ายชื่อช่องและรูปแบบฟอร์ม (3) เนื้อหา/รายการในเอกสาร แล้วจึงใช้คำอธิบายประเภทด้านล่างช่วยแยกกรณีที่ยังคล้ายกัน; ห้ามใช้ชนิดสินค้า หรือตัวเลข Gross/Tare/Net เพียงอย่างเดียวตัดสินประเภท
+- ถ้าเอกสารพิมพ์ว่า ใบส่งสินค้า/ใบส่งของ/Delivery Note/Delivery Receipt ให้เป็น delivery_order แม้มีตารางน้ำหนักหรือ Gross/Tare/Net; อ่านน้ำหนักจากเอกสารลงช่องต้นทางด้วย
+- เลือก weighbridge เมื่อชื่อ/ป้ายบนเอกสารระบุชัดว่าเป็นใบชั่งหรือตั๋วชั่ง และรูปแบบเอกสารสนับสนุนการจัดประเภทนั้น ไม่ใช่เพียงเพราะมีตัวเลขน้ำหนัก
 - จำแนกประเภทเอกสารให้ตรงหลักฐานบนภาพ: delivery_order, weighbridge (ตั๋วชั่งต้นทาง), dest_weighbridge (ตั๋วชั่งปลายทาง), concrete, tax_invoice, purchase_order หรือ full_logistics
+- ส่ง docTypeConfidence เป็นความมั่นใจในการจำแนกประเภท 0–100 แยกจากความมั่นใจอ่านเลขเอกสาร; หากชื่อ/หลักฐานในภาพไม่ชัดหรือขัดกัน ให้คะแนนต่ำและอธิบายความไม่ชัดใน docTypeEvidence ห้ามสร้างชื่อเอกสารที่ไม่มีหลักฐาน
 - ห้ามเดาหรือเติมค่า: ข้อมูลที่อ่านไม่ชัดหรือไม่มีบนภาพให้เว้นว่าง/ใส่ 0 ตามชนิดข้อมูล; ห้ามใช้วันที่ปัจจุบัน, จำนวน 1, ชื่อสินค้าทั่วไป หรือการคำนวณจากช่องอื่นแทนค่าที่อ่านไม่ได้
 - เลขเอกสารที่มีทั้งเล่มที่และเลขที่ให้เรียงเป็น เล่มที่/เลขที่ เช่น 02/0045; เก็บเล่มที่ใน bookNo แยกด้วย
 - สำหรับ PO ให้แยกผู้ขาย (Vendor) ออกจากผู้ซื้อ/บริษัทผู้ออก PO (Buyer/Issuer): ชื่อหัวกระดาษหรือชื่อบริษัทผู้ออก PO ไม่ใช่ผู้ขาย; ใส่ col8 เฉพาะชื่อที่ระบุว่าเป็นผู้ขาย/ผู้จำหน่าย และถ้าแยกไม่ได้ให้เว้นว่าง ห้ามย้ายชื่อ Buyer มาเป็น Vendor
@@ -763,8 +768,9 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
 ${specificTargetInstructions}
 
 ${!specificTargetInstructions ? `กรุณาตรวจสอบรูปภาพเอกสารนี้อย่างละเอียด และระบุประเภทเอกสาร (docType) ให้ถูกต้อง:
-- 'delivery_order': ใบส่งสินค้า / ใบส่งของทั่วไป (สินค้าจัดซื้อทั่วไปที่ไม่ชั่งน้ำหนัก เช่น เหล็ก, ท่อ, ปูนถุง, สี, ไม้, อุปกรณ์ช่าง, สายไฟ, กระเบื้อง, สุขภัณฑ์, อะไหล่ มีหน่วยนับเป็น เส้น/ท่อน/ถุง/ถัง/แผ่น/กล่อง/ม้วน/ชิ้น/ชุด)
-- 'weighbridge': ตั๋วชั่งน้ำหนักรถบรรทุก (สินค้าเทกอง เช่น หิน, ดิน, ทราย, ยางมะตอย ที่มีตัวเลขน้ำหนัก Gross หนัก / Tare เบา / Net สุทธิ กก.)
+- ก่อนเลือก docType ให้คัดชื่อที่พิมพ์บนเอกสารลง documentTitle และยกข้อความ/ป้ายชื่อช่องที่มองเห็นจริงเป็น docTypeEvidence; จากนั้นจึงใช้คำอธิบายประเภทนี้ช่วยตัดสิน
+- 'delivery_order': ใบส่งสินค้า / ใบส่งของ / Delivery Note / Delivery Receipt จากผู้ขาย รวมถึงเอกสารส่งของที่มีน้ำหนักชั่งอยู่ในใบเดียวกัน
+- 'weighbridge': เอกสารที่ระบุชัดว่าเป็นใบชั่ง/ตั๋วชั่งต้นทาง ไม่ใช่ใบส่งของที่มีน้ำหนักประกอบ
 - 'concrete': ใบส่งคอนกรีตผสมเสร็จ (ระบุเกรดคอนกรีต KSC, Slump, ปริมาณเป็นคิว/m3)
 - 'tax_invoice': ใบเสร็จรับเงิน / ใบกำกับภาษีซื้อ (มีเลขผู้เสียภาษี 13 หลัก, ตาราง VAT 7%)
 - 'purchase_order': ใบสั่งซื้อสินค้า (PO / Purchase Order ออกโดยฝ่ายจัดซื้อ มีตารางรายการสั่งซื้อ เงื่อนไขชำระ และช่องอนุมัติ)
@@ -811,6 +817,18 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
             docType: { 
               type: Type.STRING, 
               description: "ประเภทเอกสารกลาง: delivery_order, weighbridge, dest_weighbridge, concrete, tax_invoice, purchase_order หรือ full_logistics"
+            },
+            documentTitle: {
+              type: Type.STRING,
+              description: "ชื่อหรือหัวเอกสารตามที่พิมพ์/เขียนอยู่บนภาพจริง; ถ้าอ่านไม่ชัดให้เว้นว่าง"
+            },
+            docTypeEvidence: {
+              type: Type.STRING,
+              description: "ข้อความบนหัวบิล/ป้ายช่อง/รูปแบบฟอร์มที่เห็นจริงและใช้สนับสนุนประเภทเอกสาร; ห้ามอธิบายจากการเดา"
+            },
+            docTypeConfidence: {
+              type: Type.NUMBER,
+              description: "ความมั่นใจในการจำแนกประเภทจากชื่อและหลักฐานบนเอกสาร 0-100 ไม่ใช่ความมั่นใจอ่านเลขที่"
             },
             referenceDocNo: {
               type: Type.STRING,
@@ -922,6 +940,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
     parsedData.docType = targetDocType && targetDocType !== 'auto'
       ? normalizeOcrDocumentType(targetDocType, normalizeOcrDocumentType(parsedData.docType))
       : normalizeOcrDocumentType(parsedData.docType);
+    parsedData.documentTitle = (parsedData.documentTitle || '').toString().trim();
+    parsedData.docTypeEvidence = (parsedData.docTypeEvidence || '').toString().trim();
+    parsedData.docTypeConfidence = Math.max(0, Math.min(100, Number(parsedData.docTypeConfidence) || 0));
 
     if (
       parsedData.docType === 'purchase_order' &&
@@ -946,6 +967,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
         : 0);
 
     parsedData.rawAiSnapshot = {
+      documentTitle: parsedData.documentTitle,
+      docTypeEvidence: parsedData.docTypeEvidence,
+      docTypeConfidence: parsedData.docTypeConfidence,
       rawDocNo: parsedData.col17 || parsedData.col6 || '',
       rawRefPoNo: parsedData.col4 || '',
       rawRefDoNo: parsedData.referenceDocNo || '',
@@ -1620,14 +1644,19 @@ async function analyzeLineBillWithGemini(
 1. ตรวจสอบก่อนว่าภาพนี้เป็น "เอกสารบิล/ตั๋วชั่ง/ใบส่งของ/ใบเสร็จ/ใบสั่งซื้อ" จริงหรือไม่ (isBillDocument: true/false)
    - ถ้าเป็นรูปถ่ายหน้างานก่อสร้างทั่วไป รูปคน เซลฟี่ รูปอาหาร สติกเกอร์ หรือแชท ให้ตั้งค่า isBillDocument = false และระบุเหตุผลใน nonBillReason
 2. ถ้าเป็นเอกสารบิล (isBillDocument = true):
+   - อ่านชื่อ/หัวเอกสารตามที่เห็นจริงลง documentTitle และบันทึกคำหรือป้ายชื่อช่องที่ใช้เป็นหลักฐานลง docTypeEvidence ก่อนเลือก docType
+   - ใช้ชื่อที่พิมพ์บนเอกสารเป็นหลัก แล้วใช้รูปแบบฟอร์มและเนื้อหาช่วยเทียบกับคำอธิบายประเภท; ตัวเลข Gross/Tare/Net หรือชนิดสินค้าเพียงอย่างเดียวห้ามใช้ฟันธง
+   - ถ้าเอกสารระบุ ใบส่งสินค้า / ใบส่งของ / Delivery Note / Delivery Receipt ให้เลือก 'delivery_order' แม้มีน้ำหนักชั่งอยู่ในเอกสาร แล้วอ่านน้ำหนักต้นทางลงช่องที่เกี่ยวข้อง
+   - เลือก 'weighbridge' เมื่อชื่อหรือป้ายบนเอกสารระบุชัดว่าเป็นใบชั่ง/ตั๋วชั่งต้นทาง ไม่ใช่เพียงเพราะมีข้อมูลน้ำหนัก
    - จำแนกประเภทเอกสาร (docType):
-     * 'delivery_order': ใบส่งของหรือใบส่งสินค้าทั่วไปที่ไม่ได้จำแนกเป็นเอกสารเฉพาะด้านล่าง
-     * 'weighbridge': ตั๋วชั่งน้ำหนักต้นทางจากร้านค้าหรือโรงโม่
+     * 'delivery_order': ใบส่งของ/ใบส่งสินค้า/Delivery Note หรือ Delivery Receipt จากผู้ขาย
+     * 'weighbridge': เอกสารตั๋วชั่งต้นทางที่ระบุชัดว่าเป็นใบชั่ง
      * 'dest_weighbridge': ตั๋วชั่งน้ำหนักปลายทางของไซต์งานเรา (เพื่อนำมาชนกับ DO)
      * 'concrete': ใบส่งคอนกรีตผสมเสร็จ
      * 'tax_invoice': ใบเสร็จรับเงิน / ใบกำกับภาษี
      * 'purchase_order': ใบสั่งซื้อสินค้า (PO)
      * 'full_logistics': เอกสารโลจิสติกส์ที่มีข้อมูลชั่งต้นทางและปลายทางครบในแผ่นเดียว
+   - ให้คะแนน docTypeConfidence 0–100 ตามความชัดของชื่อและหลักฐานบนภาพ แยกจาก docNumberConfidence; หากชื่อไม่ชัดหรือหลักฐานขัดกันให้คะแนนต่ำและบอกข้อสงสัยตามจริง
    - กฎเหล็กการอ่านเลขที่เอกสาร (PO / DO / ใบเสร็จ):
      * กรณีเอกสารมีทั้ง "เล่มที่ (Book No. / Vol.)" และ "เลขที่ (No.)" แยกกันบนหัวบิล ให้สกัดและจัดเก็บเป็นรูปแบบ 'เล่มที่/เลขที่' เสมอ (เช่น บนบิลพิมพ์ 'เล่มที่ 02 เลขที่ 0045' ให้บันทึกเป็น '02/0045' พร้อมระบุเล่มที่ใน bookNo)
      * กรณีไม่มีเล่มที่ ให้อ่านตามที่ปรากฏตรงๆ
@@ -1656,6 +1685,18 @@ async function analyzeLineBillWithGemini(
           docType: {
             type: Type.STRING,
             enum: OCR_DOCUMENT_TYPES
+          },
+          documentTitle: {
+            type: Type.STRING,
+            description: 'ชื่อหรือหัวเอกสารตามที่เห็นจริงบนภาพ; ถ้าอ่านไม่ชัดให้เว้นว่าง'
+          },
+          docTypeEvidence: {
+            type: Type.STRING,
+            description: 'ข้อความหรือป้ายบนเอกสารจริงที่ใช้สนับสนุนประเภท; ไม่ใช้การคาดเดา'
+          },
+          docTypeConfidence: {
+            type: Type.NUMBER,
+            description: 'ความมั่นใจการจำแนกประเภทจากชื่อ/หลักฐาน 0-100 แยกจากความมั่นใจเลขเอกสาร'
           },
           bookNo: { type: Type.STRING, description: 'เล่มที่ของบิล (ถ้ามี)' },
           docNumber: { type: Type.STRING, description: 'เลขที่เอกสารหลักบนหัวบิล (เลข DO / เลขตั๋วชั่ง / เลขใบเสร็จ / เลข PO)' },
@@ -1804,6 +1845,9 @@ async function analyzeLineBillWithGemini(
   }
 
   const detectedDocType = normalizeOcrDocumentType(raw.docType);
+  const documentTitle = (raw.documentTitle || '').toString().trim();
+  const docTypeEvidence = (raw.docTypeEvidence || '').toString().trim();
+  const docTypeConfidence = Math.max(0, Math.min(100, Number(raw.docTypeConfidence) || 0));
   const formattedDocNo = normalizeOcrDocumentNumber(raw.docNumber, raw.bookNo);
   const formattedDestDocNo = normalizeOcrDocumentNumber(raw.destDocNumber, raw.destBookNo);
   const rawBuyerName = (raw.buyerName || '').toString().trim();
@@ -1839,6 +1883,9 @@ async function analyzeLineBillWithGemini(
   // Build comprehensive rawAiSnapshot (keeps all fields across all zones for 0-second document type switching)
   const rawAiSnapshot: Record<string, any> = {
     docType: detectedDocType,
+    documentTitle,
+    docTypeEvidence,
+    docTypeConfidence,
     rawDocNo: formattedDocNo,
     rawDocNoCandidate: initialDocNumber || '',
     rawBookNo: rawBook,
@@ -1879,6 +1926,9 @@ async function analyzeLineBillWithGemini(
   const isOriginWB = detectedDocType === 'weighbridge' || detectedDocType === 'full_logistics';
   const extractedData: Record<string, any> = {
     docType: detectedDocType,
+    documentTitle,
+    docTypeEvidence,
+    docTypeConfidence,
     col1: `TR-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
     col2: '', // STRICT RULE: Never auto-fill col2 from LINE Group Name! Verifier must select/input Project Name before saving.
     col3: rawAiSnapshot.rawCategory,

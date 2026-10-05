@@ -397,7 +397,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   const handleDocTypeSelect = (docType: DocumentType) => {
     if (docType === 'delivery_order' && selectedDocType === 'weighbridge') {
-      setRemappedNotice('เอกสารส่งมอบจากร้านค้าเหมือนกัน ระบบคงชนิดย่อย “ตั๋วชั่งต้นทาง” จาก OCR และเก็บน้ำหนักช่อง 13–15 โดยไม่แปลงข้อมูลซ้ำ');
+      setRemappedNotice('ใบส่งของจากร้านค้าและตั๋วชั่งต้นทางใช้แบบฟอร์มรับของกลุ่มเดียวกัน ระบบคงชนิดเอกสาร “ตั๋วชั่งต้นทาง” จาก OCR และเก็บน้ำหนักช่อง 13–15');
       return;
     }
     setSelectedDocType(docType);
@@ -491,6 +491,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     const finalizedOrder: OrderRecord = {
       id: overrideExistingOrder ? overrideExistingOrder.id : (form.id || 'ord-' + Date.now()),
       docType: selectedDocType,
+      documentTitle: form.documentTitle || overrideExistingOrder?.documentTitle,
+      docTypeEvidence: form.docTypeEvidence || overrideExistingOrder?.docTypeEvidence,
+      docTypeConfidence: form.docTypeConfidence ?? overrideExistingOrder?.docTypeConfidence,
       col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || 'TR-' + new Date().getFullYear() + '-' + Math.floor(100 + Math.random() * 900)),
       col2: (form.col2 || '').trim(),
       col3: form.col3 || (selectedDocType === 'concrete' ? 'คอนกรีต' : 'ทั่วไป'),
@@ -803,7 +806,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     >
                       <div className="flex items-center gap-1.5 font-bold text-xs">
                         <Boxes className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                        <span className="truncate">เอกสารส่งมอบ</span>
+                        <span className="truncate">ใบส่งของ / ตั๋วชั่งต้นทาง</span>
                       </div>
                       <div className="text-[10px] text-slate-500 mt-0.5 truncate">DO หรือ ตั๋วชั่งต้นทาง (ช่อง 13–15)</div>
                     </button>
@@ -1167,6 +1170,25 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                 </div>
               )}
 
+              {(form.documentTitle || form.docTypeEvidence) && (
+                <div className={`p-2.5 rounded-xl border text-xs space-y-1 ${
+                  Number(form.docTypeConfidence) > 0 && Number(form.docTypeConfidence) < 70
+                    ? 'bg-amber-50 border-amber-300 text-amber-950'
+                    : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <div className="font-bold">
+                    ชื่อเอกสารจากภาพ: {form.documentTitle || 'อ่านชื่อหัวเอกสารไม่ชัด'}
+                    {Number(form.docTypeConfidence) > 0 && (
+                      <span className="ml-2 font-medium">คะแนนที่ AI ประเมิน {form.docTypeConfidence}/100 (ไม่ใช่ค่าความแม่นยำที่สอบเทียบแล้ว)</span>
+                    )}
+                  </div>
+                  {form.docTypeEvidence && <div>หลักฐานที่ AI ใช้: {form.docTypeEvidence}</div>}
+                  {Number(form.docTypeConfidence) > 0 && Number(form.docTypeConfidence) < 70 && (
+                    <div className="font-semibold">หลักฐานประเภทเอกสารยังไม่ชัด กรุณาตรวจชื่อบนบิลและเลือกประเภทให้ตรงกับเอกสารจริง</div>
+                  )}
+                </div>
+              )}
+
               {/* Active Document Type Banner */}
               <div className={`p-2.5 rounded-xl border flex items-center justify-between text-xs ${
                 selectedDocType === 'delivery_order' ? 'bg-sky-50 border-sky-200 text-sky-900' :
@@ -1183,9 +1205,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {selectedDocType === 'purchase_order' && <FileText className="w-4 h-4 text-indigo-600 shrink-0" />}
                   <div>
                     <span className="font-bold block">
-                      {selectedDocType === 'delivery_order' ? 'ฟอร์มเอกสารส่งมอบ (DO) — เก็บตารางหลัก 39 คอลัมน์ (น้ำหนักต้นทาง ช่อง 13, 14, 15)' :
+                      {selectedDocType === 'delivery_order' ? 'ฟอร์มใบส่งของ (DO) — เก็บตารางหลัก 39 คอลัมน์ (น้ำหนักต้นทาง ช่อง 13, 14, 15)' :
                        selectedDocType === 'dest_weighbridge' ? 'ฟอร์มตั๋วชั่งน้ำหนักปลายทาง — เก็บลง [โซน 4: ช่อง 18, 19, 20] เพื่อชนบิลกับ DO' :
-                       selectedDocType === 'weighbridge' ? 'ฟอร์มเอกสารส่งมอบ: ตั๋วชั่งต้นทาง (ใช้แทน DO — เก็บลงช่อง 13, 14, 15; ระบบคงชนิดย่อยจาก OCR)' :
+                       selectedDocType === 'weighbridge' ? 'ฟอร์มตั๋วชั่งต้นทาง (ใช้แบบฟอร์มรับใบส่งของ — เก็บลงช่อง 13, 14, 15; ระบบคงชนิดเอกสารจาก OCR)' :
                        selectedDocType === 'tax_invoice' ? 'ฟอร์มใบเสร็จรับเงิน / ใบกำกับภาษี (Tax Invoice)' :
                        selectedDocType === 'purchase_order' ? 'ฟอร์มใบสั่งซื้อสินค้า (PO)' : 'ฟอร์มโลจิสติกส์เต็มรูปแบบ'}
                     </span>
@@ -1193,7 +1215,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       {showAllCols ? 'แสดงทุกฟิลด์ (ครบ 39 คอลัมน์)' :
                        selectedDocType === 'delivery_order' ? 'แสดงฟิลด์ใบส่งของ (DO) และน้ำหนักต้นทาง ช่อง 13 (หนัก Gross), 14 (เบา Tare), 15 (สุทธิ Net)' :
                        selectedDocType === 'dest_weighbridge' ? 'บันทึก 18. หนักเข้า (Gross), 19. เบาออก (Tare), 20. น้ำหนักสุทธิ (Net) เพื่อนำไปชนกับใบส่งของ (DO)' :
-                       selectedDocType === 'weighbridge' ? 'เป็นเอกสารส่งมอบเช่นเดียวกับ DO; เก็บน้ำหนักต้นทางช่อง 13-15 และคงชนิดเอกสารตั๋วชั่งที่ OCR ตรวจพบ' :
+                       selectedDocType === 'weighbridge' ? 'ใช้ข้อมูลต้นทางช่อง 13-15 และคงชนิดเอกสารตั๋วชั่งที่ OCR ตรวจพบ' :
                        selectedDocType === 'tax_invoice' ? 'แสดงเฉพาะเลขผู้เสียภาษี 13 หลัก รายการสินค้า และยอดเงิน (ซ่อนน้ำหนักตราชั่ง)' :
                        'ระบบปรับฟิลด์ตามบริบทเอกสาร'}
                     </span>
