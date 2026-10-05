@@ -1691,15 +1691,61 @@ app.get('/api/line/inbox/image/:id', async (req: Request, res: Response) => {
     }
     const { data, error } = await client
       .from('line_inbox')
-      .select('id, image_url')
+      .select('id, image_url, line_message_id, drive_web_view_link')
       .eq('id', id)
       .single();
     if (error || !data) return res.status(404).json({ success: false, error: 'ไม่พบรูปบิล' });
-    return res.json({ success: true, image: data.image_url || '' });
+
+    // Case 1: image_url still has base64 data → return directly
+    if (data.image_url && data.image_url.length > 100) {
+      return res.json({
+        success: true,
+        image: data.image_url,
+        driveWebViewLink: data.drive_web_view_link || null
+      });
+    }
+
+    // Case 2: image_url is null (cleared after Drive upload) → fallback to LINE Messaging API
+    if (data.line_message_id && lineBotConfig.channelAccessToken) {
+      try {
+        const imgResp = await fetch(
+          `https://api-data.line.me/v2/bot/message/${data.line_message_id}/content`,
+          { headers: { Authorization: `Bearer ${lineBotConfig.channelAccessToken}` } }
+        );
+        if (imgResp.ok) {
+          const mimeType = imgResp.headers.get('content-type') || 'image/jpeg';
+          const arrayBuf = await imgResp.arrayBuffer();
+          const b64 = Buffer.from(arrayBuf).toString('base64');
+          const base64Image = `data:${mimeType};base64,${b64}`;
+          return res.json({
+            success: true,
+            image: base64Image,
+            driveWebViewLink: data.drive_web_view_link || null,
+            source: 'line_api'
+          });
+        }
+      } catch (lineErr: any) {
+        console.warn(`[inbox/image] LINE API fallback failed for ${data.line_message_id}:`, lineErr?.message);
+      }
+    }
+
+    // Case 3: Both image_url and LINE API unavailable → return drive link so client can open it
+    if (data.drive_web_view_link) {
+      return res.json({
+        success: false,
+        image: null,
+        driveWebViewLink: data.drive_web_view_link,
+        error: 'รูปภาพถูกเก็บใน Google Drive แล้ว กรุณาเปิดดูจากลิงก์ Drive',
+        canOpenInDrive: true
+      });
+    }
+
+    return res.json({ success: false, image: null, error: 'ไม่พบรูปภาพบิลนี้ในระบบ' });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
+
 
 app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
   const { ids } = req.body || {};
@@ -3779,7 +3825,127 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
   }
 });
 
-// 6. Zero-Junk Cleanup Endpoint (POST /api/drive/cleanup-file)
+// 6. Rename + Move File Atomically (POST /api/drive/rename-and-move)
+// ใช้ตอน verify บิลจาก LINE inbox เพื่อตั้งชื่อตามประเภท/วันที่/เลขที่เอกสาร แล้วย้ายไป Zone ที่ถูกต้อง
+app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
+  try {
+    const token = await getDriveAccessToken();
+    const cfg = getStoredDriveConfig();
+    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+
+    if (!token && !isGasMode) {
+      return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
+    }
+
+    const {
+      fileId,
+      docType = 'delivery_order',
+      docDate = '',  // วันที่ในเอกสาร (YYYY-MM-DD)
+      docNumber = '' // เลขที่เอกสาร เช่น DO-01-0045, WB-0012
+    } = req.body;
+
+    if (!fileId) {
+      return res.status(400).json({ success: false, error: 'กรุณาระบุ fileId ของไฟล์ที่ต้องการเปลี่ยนชื่อ' });
+    }
+
+    // --- Build new filename and target zone from docType ---
+    const safeDate   = sanitizeDriveName(docDate || new Date().toISOString().slice(0, 10));
+    const safeDocNo  = sanitizeDriveName(docNumber || 'NEW');
+
+    let prefix: string;
+    let targetZone: string;
+
+    switch (docType) {
+      case 'purchase_order':
+        prefix     = 'PO';
+        targetZone = 'zone_01';
+        break;
+      case 'dest_weighbridge':
+        prefix     = 'WB';
+        targetZone = 'zone_03';
+        break;
+      case 'tax_invoice':
+        prefix     = 'INV';
+        targetZone = 'zone_04';
+        break;
+      default: // delivery_order
+        prefix     = 'DO';
+        targetZone = 'zone_02';
+    }
+
+    const newFileName = `${prefix}_${safeDate}_${safeDocNo}.jpg`;
+
+    // A) GAS Mode
+    if (isGasMode && cfg.gasWebAppUrl) {
+      const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'rename_and_move',
+        rootFolderId: cfg.rootFolderId,
+        fileId,
+        newFileName,
+        targetZone
+      });
+
+      if (!gasResult || !gasResult.success) {
+        throw new Error(gasResult?.error || 'เปลี่ยนชื่อไฟล์ผ่าน Google Apps Script ขัดข้อง');
+      }
+
+      return res.json({
+        success: true,
+        fileId: gasResult.fileId || fileId,
+        newFileName,
+        targetZone,
+        message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ (GAS)`
+      });
+    }
+
+    // B) Service Account Flow
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'ไม่พบ Token เชื่อมต่อ Google Drive' });
+    }
+
+    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    const zoneMapping: Record<string, string> = {
+      zone_01: zones.ZONE_01,
+      zone_02: zones.ZONE_02,
+      zone_03: zones.ZONE_03,
+      zone_04: zones.ZONE_04
+    };
+    const toFolderId = zoneMapping[targetZone] || zones.ZONE_02;
+
+    // 1. Rename via PATCH
+    const renameResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ name: newFileName })
+    });
+    if (!renameResp.ok) {
+      const errText = await renameResp.text();
+      throw new Error(`Rename failed: ${errText}`);
+    }
+    const renamedData: any = await renameResp.json();
+
+    // 2. Move: remove from zone_00, add to target zone
+    const fromFolderId = zones.ZONE_00;
+    await moveDriveFile(token, fileId, fromFolderId, toFolderId);
+
+    return res.json({
+      success: true,
+      fileId,
+      newFileName: renamedData.name,
+      targetZone,
+      message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ`
+    });
+
+  } catch (err: any) {
+    console.error('[Drive Rename+Move Error]', err);
+    res.status(500).json({ success: false, error: err?.message || 'เปลี่ยนชื่อหรือย้ายไฟล์บน Google Drive ขัดข้อง' });
+  }
+});
+
+// 7. Zero-Junk Cleanup Endpoint (POST /api/drive/cleanup-file)
 app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   try {
     const token = await getDriveAccessToken();
@@ -3888,10 +4054,11 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     const rescanAi = Boolean(req.body?.rescanAi);
     const batchSize = Math.min(Math.max(Number(req.body?.batchSize) || 5, 1), 10);
 
-    // Count remaining pending items
+    // Count remaining pending items (always exclude verified bills — already imported to system)
     let countQuery = client
       .from('line_inbox')
-      .select('id', { count: 'exact', head: true });
+      .select('id', { count: 'exact', head: true })
+      .neq('status', 'verified'); // ข้ามบิลที่บันทึกตรวจรับเข้าระบบแล้ว
 
     if (!forceAll) {
       countQuery = countQuery.or('drive_file_id.is.null,drive_file_id.eq.');
@@ -3900,9 +4067,11 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     const { count: totalPendingCount } = await countQuery;
 
     // Fetch inbox items in small safe batch (default 5 items to avoid Render 100s timeout / OOM)
+    // Always skip verified bills — they are already imported and their Drive file has been renamed+moved
     let query = client
       .from('line_inbox')
       .select('id, image_url, detected_doc_type, doc_number, doc_date, store_name, received_at, drive_file_id, drive_web_view_link, line_message_id, line_sender_name, line_group_name, extracted_data')
+      .neq('status', 'verified') // ข้ามบิลที่บันทึกตรวจรับเข้าระบบแล้ว
       .order('received_at', { ascending: false })
       .limit(batchSize);
 

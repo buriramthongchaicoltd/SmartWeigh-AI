@@ -1289,12 +1289,12 @@ export default function App() {
 
     // If this order was verified from the LINE OA Bot Inbox, mark the inbox item as verified
     if (order.lineInboxId) {
-      setLineInbox(prev =>
-        prev.map(item =>
+      setLineInbox(prev => {
+        const updatedInbox = prev.map(item =>
           item.id === order.lineInboxId
             ? {
                 ...item,
-                status: 'verified',
+                status: 'verified' as const,
                 verifiedOrderId: order.col1,
                 verifiedBy: currentUser.fullName,
                 verifiedAt: new Date().toISOString(),
@@ -1304,9 +1304,43 @@ export default function App() {
                 }
               }
             : item
-        )
-      );
+        );
+
+        // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
+        const inboxItem = prev.find(i => i.id === order.lineInboxId);
+        if (inboxItem?.driveFileId) {
+          // ใช้ col6 สำหรับ DO/WB/INV, col4 สำหรับ PO; ถ้าว่างใช้ col17 (ตั๋วปลายทาง)
+          const docNumber = order.col6 || order.col4 || order.col17 || order.col1 || '';
+          // ใช้ col7 (วันที่รับสินค้า) เป็นหลัก, col16 (วันที่ปลายทาง) สำหรับ dest_weighbridge
+          const docDate = (order.docType === 'dest_weighbridge' && order.col16)
+            ? order.col16
+            : order.col7 || new Date().toISOString().slice(0, 10);
+
+          fetch('/api/drive/rename-and-move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileId: inboxItem.driveFileId,
+              docType: order.docType || 'delivery_order',
+              docDate,
+              docNumber
+            })
+          })
+            .then(r => r.json())
+            .then(result => {
+              if (result.success) {
+                console.log(`[Drive] Renamed & moved: ${result.newFileName} → ${result.targetZone}`);
+              } else {
+                console.warn('[Drive] rename-and-move failed:', result.error);
+              }
+            })
+            .catch(err => console.warn('[Drive] rename-and-move error:', err));
+        }
+
+        return updatedInbox;
+      });
     }
+
 
     if (order.docType === 'dest_weighbridge' && !autoMatchedNote) {
       setActiveTab('dest_wb');
@@ -2247,7 +2281,7 @@ export default function App() {
   };
 
   // Open Verification / PO Modal from LINE OA Bot Inbox
-  const handleOpenVerifyFromInbox = (item: LineBillInboxItem) => {
+  const handleOpenVerifyFromInbox = async (item: LineBillInboxItem) => {
     const dataWithLineMeta: Partial<OrderRecord> = {
       ...item.extractedData,
       docType: item.detectedDocType,
@@ -2264,18 +2298,46 @@ export default function App() {
       image: item.image
     };
 
+    // Resolve image: ใช้ item.image ถ้ามี ถ้าไม่มีให้ fetch จาก server on-demand
+    let resolvedImage = item.image || '';
+    if (!resolvedImage || resolvedImage.length < 50) {
+      // Try Drive link first (open in new tab as preview)
+      if (item.driveWebViewLink) {
+        // Open drive in new tab so user can see the bill
+        window.open(item.driveWebViewLink, '_blank', 'noopener');
+        // Continue to open verify modal without image
+      } else {
+        // Fetch from server (which will fallback to LINE API or Drive link)
+        try {
+          showToast('กำลังโหลดรูปภาพบิล...', 'info');
+          const resp = await fetch(`/api/line/inbox/image/${item.id}`);
+          const data = await resp.json();
+          if (data.success && data.image) {
+            resolvedImage = data.image;
+          } else if (data.canOpenInDrive && data.driveWebViewLink) {
+            // Image is in Drive, open it in new tab
+            window.open(data.driveWebViewLink, '_blank', 'noopener');
+            showToast('เปิดรูปภาพจาก Google Drive ในแท็บใหม่แล้ว', 'info');
+          }
+        } catch {
+          // Silent fallback — open verify without image
+        }
+      }
+    }
+
     if (item.detectedDocType === 'purchase_order') {
-      const draftPO = convertOrderDraftToPODraft(dataWithLineMeta, item.image);
+      const draftPO = convertOrderDraftToPODraft(dataWithLineMeta, resolvedImage);
       setEditingPO(draftPO);
       setIsPOEditOpen(true);
       return;
     }
 
-    setVerifyOrderData(dataWithLineMeta);
-    setVerifyImage(item.image || null);
+    setVerifyOrderData({ ...dataWithLineMeta, image: resolvedImage || undefined });
+    setVerifyImage(resolvedImage || null);
     setVerifyStoreSuggestion(item.storeSuggestion);
     setIsVerifyOpen(true);
   };
+
 
   // Cloud Database Synchronization handler
   const handleSyncFromCloud = (cloudData: {

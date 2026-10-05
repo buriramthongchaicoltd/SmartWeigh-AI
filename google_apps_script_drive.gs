@@ -34,6 +34,8 @@ function doPost(e) {
       return handleUploadFile(payload);
     } else if (action === 'sync_verified_move') {
       return handleMoveFile(payload);
+    } else if (action === 'rename_and_move') {
+      return handleRenameAndMoveFile(payload);
     } else if (action === 'cleanup') {
       return handleCleanup(payload);
     } else {
@@ -208,6 +210,58 @@ function handleMoveFile(payload) {
     fileId: file.getId(),
     targetFolderId: targetFolder.getId(),
     message: 'ย้ายไฟล์ไปยังโฟลเดอร์เป้าหมายสำเร็จ'
+  });
+}
+
+// Rename a file and optionally move it to a target zone in one atomic call
+function handleRenameAndMoveFile(payload) {
+  var fileId       = payload.fileId;        // Drive file ID to rename+move
+  var newFileName  = payload.newFileName;   // New filename including extension
+  var rootFolderId = payload.rootFolderId;
+  var targetZone   = payload.targetZone;    // 'zone_01' | 'zone_02' | 'zone_03' | 'zone_04'
+  var subfolderName = payload.subfolderName; // optional sub-folder inside zone (e.g. TR-xxx_DO-xxx)
+
+  if (!fileId || !newFileName) {
+    return jsonResponse({ success: false, error: 'ระบุ fileId และ newFileName ไม่ครบ' });
+  }
+
+  var file;
+  try {
+    file = DriveApp.getFileById(fileId);
+  } catch (e) {
+    return jsonResponse({ success: false, error: 'ไม่พบไฟล์: ' + e.toString() });
+  }
+
+  // 1. Rename
+  file.setName(newFileName);
+
+  // 2. Move (optional)
+  if (rootFolderId && targetZone && ZONE_KEY_MAP[targetZone]) {
+    try {
+      var rootFolder = DriveApp.getFolderById(rootFolderId);
+      var zoneName   = ZONE_NAMES[ZONE_KEY_MAP[targetZone]];
+      var targetFolder = getOrCreateSubfolder(rootFolder, zoneName);
+      if (subfolderName) {
+        targetFolder = getOrCreateSubfolder(targetFolder, subfolderName);
+      }
+      file.moveTo(targetFolder);
+      return jsonResponse({
+        success: true,
+        fileId: file.getId(),
+        fileName: file.getName(),
+        targetFolderId: targetFolder.getId(),
+        message: 'เปลี่ยนชื่อและย้ายไฟล์สำเร็จ'
+      });
+    } catch (e) {
+      return jsonResponse({ success: false, error: 'เปลี่ยนชื่อสำเร็จแต่ย้ายโฟลเดอร์ไม่ได้: ' + e.toString() });
+    }
+  }
+
+  return jsonResponse({
+    success: true,
+    fileId: file.getId(),
+    fileName: file.getName(),
+    message: 'เปลี่ยนชื่อไฟล์สำเร็จ (ไม่ได้ย้ายโฟลเดอร์)'
   });
 }
 

@@ -4,7 +4,100 @@
 
 ---
 
+## [2026-10-05] Fix: ภาพบิลไม่แสดงเมื่อกดตรวจรับจาก LINE Inbox
+
+### สาเหตุ
+- หลัง **sync รูปขึ้น Drive** → `image_url: null` ถูก set ใน Supabase (ตามสถาปัตยกรรม Drive-First)
+- `item.image` ใน React state = `''` เพราะ list API ไม่ return `image_url`
+- `handleOpenVerifyFromInbox` → `setVerifyImage(item.image || null)` → `null` → VerifyModal แสดง "ไม่มีภาพเอกสารแนบ"
+
+### การแก้ไข (เจาะจง 2 ไฟล์)
+
+**1. [server.ts] แก้ `GET /api/line/inbox/image/:id`** — เพิ่ม 3-step fallback:
+- **Step 1** ถ้า `image_url` มีข้อมูล → ส่งกลับทันที (เดิม)
+- **Step 2** ถ้า `image_url = null` แต่มี `line_message_id` → download จาก LINE Content API แล้วส่งกลับเป็น base64 (ใหม่)
+- **Step 3** ถ้า LINE API ก็ไม่ได้ แต่มี `drive_web_view_link` → ส่ง `{ canOpenInDrive: true, driveWebViewLink }` กลับ (ใหม่)
+
+**2. [src/App.tsx] แก้ `handleOpenVerifyFromInbox`** — เปลี่ยนเป็น `async`:
+- ถ้า `item.image` มีข้อมูล → ใช้โดยตรง (เดิม)
+- ถ้า `item.driveWebViewLink` มีอยู่ → เปิด Drive ใน tab ใหม่ทันที แล้วเปิด VerifyModal ต่อ
+- ถ้าไม่มีทั้งคู่ → `fetch('/api/line/inbox/image/:id')` → ได้ base64 จาก LINE API หรือเปิด Drive link
+
+### สถานะ
+- ✅ TypeScript type-check ผ่านสมบูรณ์ (0 errors)
+
+---
+
+## [2026-10-05] Fix: sync-inbox-images ข้ามบิลที่ Verify แล้วเสมอ
+
+
+### ปัญหา
+- ปุ่ม **📁 ซิงก์รูปเข้า Google Drive** และ **🔄 ดึงรูป LINE & สแกนใหม่ & ขึ้น Drive ทั้งหมด**
+- ทั้งสองปุ่มเรียก `POST /api/drive/sync-inbox-images`
+- เมื่อกด `force: true` (ดึงรูปใหม่ทั้งหมด) จะ fetch ทุก row ใน `line_inbox` รวมถึงบิลที่ `status='verified'` แล้ว
+- ทำให้บิลที่บันทึกตรวจรับเข้าระบบแล้ว ถูก re-upload / re-scan ซ้ำโดยไม่จำเป็น
+
+### แก้ไขที่ทำ (เจาะจง)
+
+**[server.ts]** — แก้ `POST /api/drive/sync-inbox-images` บรรทัด ~4012–4031:
+- เพิ่ม `.neq('status', 'verified')` ใน **countQuery** (count ที่ค้างอยู่จริง)
+- เพิ่ม `.neq('status', 'verified')` ใน **fetchQuery** (รายการที่จะ process)
+- ผลลัพธ์: ไม่ว่า `force=true` หรือ `false` จะ **ข้ามบิลที่ verified เสมอ** 100%
+
+### กฎทำงานหลังแก้ไข
+| Scenario | ทำงาน? |
+|---|---|
+| บิลใหม่ยังไม่มี drive_file_id | ✅ sync ขึ้น Drive |
+| บิลที่ scan_failed / pending_review + force=true | ✅ re-download + re-scan |
+| บิล verified (บันทึกตรวจรับแล้ว) | ❌ ข้ามเสมอ (ไม่แตะ) |
+
+### สถานะ
+- ✅ TypeScript type-check ผ่านสมบูรณ์ (0 errors)
+
+---
+
+## [2026-10-05] Auto-Rename + Auto-Move Drive File ตอนบันทึกตรวจรับบิล LINE Inbox
+
+
+### วัตถุประสงค์งาน
+- เมื่อกด **บันทึกตรวจรับ** บิลจาก LINE Inbox (มี `lineInboxId`):
+  - เปลี่ยนชื่อไฟล์ใน Google Drive ตาม pattern: `{prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg`
+  - ย้ายไฟล์จาก Zone 00 (กล่องพักบิล LINE) → Zone ที่ถูกต้องตามประเภทเอกสาร
+- **ตารางชื่อและ Zone:**
+
+| ประเภทเอกสาร | prefix | Zone ปลายทาง |
+|---|---|---|
+| `delivery_order` | `DO` | zone_02 (02_ใบงานหลัก_DO) |
+| `dest_weighbridge` | `WB` | zone_03 (03_ตั๋วชั่งปลายทาง) |
+| `tax_invoice` | `INV` | zone_04 (04_ใบเสร็จกำกับภาษี) |
+| `purchase_order` | `PO` | zone_01 (01_ใบสั่งซื้อ_PO) |
+
+### การเปลี่ยนแปลงที่ทำแบบเจาะจง (Targeted Changes)
+
+1. **[google_apps_script_drive.gs]** — เพิ่ม action `rename_and_move`:
+   - เพิ่มใน `doPost` dispatcher บรรทัด ~36: `} else if (action === 'rename_and_move') {`
+   - เพิ่ม function `handleRenameAndMoveFile(payload)`: `file.setName()` + `file.moveTo(targetFolder)`
+   - ⚠️ ต้องนำไป **Re-Deploy ใหม่** ที่ Google Apps Script เพื่อให้ action ใหม่ใช้งานได้
+
+2. **[server.ts]** — เพิ่ม endpoint `POST /api/drive/rename-and-move` (หัวข้อ #6):
+   - รับ `{ fileId, docType, docDate, docNumber }`
+   - สร้าง `newFileName` = `{prefix}_{safeDate}_{safeDocNo}.jpg` และกำหนด `targetZone` จาก docType
+   - รองรับทั้ง GAS Mode (callGasDriveApi) และ Service Account Flow (PATCH rename + moveDriveFile)
+
+3. **[src/App.tsx]** — แก้เฉพาะ `if (order.lineInboxId)` block ใน `handleSaveOrder()`:
+   - แปลง `setLineInbox(prev => prev.map(...))` → `setLineInbox(prev => { ...; return updatedInbox; })`
+   - เพิ่ม fire-and-forget `fetch('/api/drive/rename-and-move', ...)` หลัง mark verified
+   - `docNumber` = `col6 || col4 || col17 || col1`
+   - `docDate` = `col7` (หรือ `col16` สำหรับ dest_weighbridge)
+
+### สถานะ
+- ✅ TypeScript type-check ผ่านสมบูรณ์ (0 errors)
+- ⚠️ GAS Script ต้องนำไปวางใหม่และ Deploy ที่ Google Apps Script
+
+---
+
 ## [2026-10-03] ปรับระบบ LINE เป็น Collect-First Mode — เก็บบิลก่อน, เช็คซ้ำตอนตรวจรับ
+
 
 ### วัตถุประสงค์งาน
 - ผู้ใช้ต้องการให้ระบบ LINE เน้น **เก็บรูปบิลก่อนเสมอ** ไม่ว่าจะอ่านข้อมูลจากภาพได้มากหรือน้อย
