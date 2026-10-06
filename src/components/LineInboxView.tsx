@@ -431,6 +431,9 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   // Filtered items
   const filteredItems = inboxItems.filter(item => {
+    if (statusFilter === 'all' && item.status === 'verified') {
+      return false;
+    }
     if (
       docTypeFilter !== 'all' &&
       item.detectedDocType !== docTypeFilter &&
@@ -641,7 +644,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
               }`}
             >
-              ทั้งหมด ({inboxItems.length})
+              คิวที่ยังไม่บันทึก ({inboxItems.length - verifiedCount})
             </button>
             <button
               type="button"
