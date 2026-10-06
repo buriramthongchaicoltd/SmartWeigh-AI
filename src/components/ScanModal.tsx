@@ -181,9 +181,10 @@ export const ScanModal: React.FC<ScanModalProps> = ({
     setScanStatusText(`กำลังเชื่อมต่อ Gemini 3.8 Flash Vision (โหมด: ${docLabel})...`);
 
     const abortController = new AbortController();
+    const requestTimeoutMs = selectedDocType === 'purchase_order' ? 100000 : 45000;
     const timeoutId = setTimeout(() => {
       abortController.abort();
-    }, 45000);
+    }, requestTimeoutMs);
 
     try {
       setTimeout(() => {

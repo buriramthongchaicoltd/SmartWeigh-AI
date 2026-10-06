@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-06] Extend PO Scan Timeout Without Changing Other OCR Flows
+
+### การเปลี่ยนแปลง
+- ขยาย timeout เฉพาะ `/api/scan-po` เป็น 90 วินาทีโดยรวม และไม่เกิน 40 วินาทีต่อการเรียก Gemini แต่ละครั้ง; ยังคงลำดับโมเดลและ retry เดิม
+- จำกัดเวลาของแต่ละครั้งตามเวลารวมที่เหลือ เพื่อให้ endpoint ตอบ timeout ได้ภายในงบเวลาที่กำหนด
+- ขยาย timeout ฝั่ง ScanModal เฉพาะ PO เป็น 100 วินาทีเพื่อให้ server ส่งผลลัพธ์หรือ error กลับมาก่อน browser ยกเลิกคำขอ; flow สแกนประเภทอื่นยังคง 45 วินาที
+
+### การตรวจสอบ
+- ตรวจ `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- ยังไม่ได้ทดสอบกับภาพ PO จริงหรือยืนยันเวลาตอบสนองของ Gemini ใน production
+
 ## [2026-10-06] Close Security and UI Confirmation Follow-ups
 
 ### การเปลี่ยนแปลง

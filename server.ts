@@ -607,12 +607,14 @@ async function callGeminiWithResilience(
           ...requestPayload,
           model: model
         });
+        const remainingOverallMs = overallTimeoutMs - (Date.now() - overallStartTime);
+        const currentAttemptTimeoutMs = Math.min(attemptTimeoutMs, remainingOverallMs);
 
         let timeoutId: ReturnType<typeof setTimeout> | undefined;
         const attemptTimeout = new Promise<never>((_, reject) => {
           timeoutId = setTimeout(
-            () => reject(new Error(`Timeout: โมเดล ${model} ใช้เวลาเกิน ${attemptTimeoutMs / 1000} วินาที`)),
-            attemptTimeoutMs
+            () => reject(new Error(`Timeout: โมเดล ${model} ใช้เวลาเกิน ${currentAttemptTimeoutMs / 1000} วินาที`)),
+            currentAttemptTimeoutMs
           );
         });
         let response: Awaited<typeof attemptCall>;
@@ -623,6 +625,9 @@ async function callGeminiWithResilience(
         }
         return { response, usedModel: model };
       } catch (err: any) {
+        if (Date.now() - overallStartTime >= overallTimeoutMs) {
+          throw new Error('การประมวลผล Gemini หมดเวลา (Request Timeout) กรุณาลองใหม่อีกครั้ง');
+        }
         lastError = err;
         const errMsg = err?.message || JSON.stringify(err);
         const isRetryable =
@@ -1358,6 +1363,9 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
           },
         }
       }
+    }, {
+      overallTimeoutMs: 90000,
+      attemptTimeoutMs: 40000
     });
 
     if (parsedPO.bookNo || /เล่ม/i.test(parsedPO.poNumber || '')) {
