@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-06] Reveal Saved API Credentials on Explicit Request
+
+### การเปลี่ยนแปลง
+- แก้ปุ่มรูปตาของ Gemini API Key และ LINE Channel Access Token/Secret ให้โหลดค่าที่บันทึกไว้เมื่อผู้ดูแลกดดู แทนการเปิดช่องว่างเปล่า
+- เพิ่ม endpoint เปิดเผย secret เฉพาะรายการที่ร้องขอ ป้องกันด้วย Admin middleware และตั้ง `Cache-Control: no-store`; endpoint โหลด config ปกติยังไม่ส่ง secret
+- เพิ่มสถานะกำลังโหลด คำอธิบายการใช้งาน และปุ่มที่กดได้สะดวกขึ้น; ช่องที่มี Key อยู่แล้วไม่แสดงว่าเป็นช่องบังคับกรอก
+- อัปเดตคู่มือการทำงานของ credential ใน Handover
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+
 ## [2026-10-06] Run Connection Self-Test from the Login Page
 
 ### การเปลี่ยนแปลง

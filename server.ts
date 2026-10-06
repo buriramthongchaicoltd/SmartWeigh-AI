@@ -261,7 +261,9 @@ app.use('/api', (req: Request, res: Response, next) => {
     '/drive/setup-secret',
     '/drive/test',
     '/line/config',
+    '/line/config/reveal',
     '/line/test',
+    '/system/config/reveal-key',
     '/startup/retest'
   ]);
   const isUserManagementWrite =
@@ -747,6 +749,16 @@ app.get('/api/system/config', async (_req: Request, res: Response) => {
     maskedGeminiKey: maskedKey,
     keySource: cfg.geminiApiKey ? 'ui_config' : (process.env.GEMINI_API_KEY ? 'env_var' : 'none')
   });
+});
+
+app.post('/api/system/config/reveal-key', async (_req: Request, res: Response) => {
+  await restoreConfigsFromSupabase();
+  const apiKey = getActiveGeminiApiKey();
+  if (!apiKey) {
+    return res.status(404).json({ success: false, error: 'ไม่พบ GEMINI_API_KEY ที่บันทึกไว้' });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ success: true, geminiApiKey: apiKey });
 });
 
 app.post('/api/system/config', (req: Request, res: Response) => {
@@ -2172,6 +2184,22 @@ app.get('/api/line/config', async (_req: Request, res: Response) => {
       hasChannelSecret: Boolean(lineBotConfig.channelSecret)
     }
   });
+});
+
+app.post('/api/line/config/reveal', async (req: Request, res: Response) => {
+  await restoreConfigsFromSupabase();
+  const field = req.body?.field;
+  if (field !== 'channelAccessToken' && field !== 'channelSecret') {
+    return res.status(400).json({ success: false, error: 'ระบุชนิดข้อมูล LINE ที่ต้องการดูไม่ถูกต้อง' });
+  }
+  const value = field === 'channelAccessToken'
+    ? lineBotConfig.channelAccessToken
+    : lineBotConfig.channelSecret;
+  if (!value) {
+    return res.status(404).json({ success: false, error: 'ไม่พบค่าที่บันทึกไว้สำหรับรายการนี้' });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ success: true, field, value });
 });
 
 app.post('/api/line/config', async (req: Request, res: Response) => {

@@ -206,6 +206,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [isSavingGemini, setIsSavingGemini] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [isRevealingGeminiKey, setIsRevealingGeminiKey] = useState(false);
 
   const loadSystemConfig = async () => {
     try {
@@ -220,6 +221,32 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       }
     } catch (err) {
       console.error('Failed to load system config:', err);
+    }
+  };
+
+  const handleToggleGeminiKeyVisibility = async () => {
+    if (showGeminiKey) {
+      setShowGeminiKey(false);
+      return;
+    }
+    if (geminiKeyInput || !geminiConfig.hasKey) {
+      setShowGeminiKey(true);
+      return;
+    }
+
+    setIsRevealingGeminiKey(true);
+    try {
+      const res = await fetch('/api/system/config/reveal-key', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success || typeof data.geminiApiKey !== 'string') {
+        throw new Error(data.error || 'แสดง Gemini API Key ที่บันทึกไว้ไม่สำเร็จ');
+      }
+      setGeminiKeyInput(data.geminiApiKey);
+      setShowGeminiKey(true);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'แสดง Gemini API Key ไม่สำเร็จ', 'info');
+    } finally {
+      setIsRevealingGeminiKey(false);
     }
   };
 
@@ -262,6 +289,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   });
   const [showLineToken, setShowLineToken] = useState(false);
   const [showLineSecret, setShowLineSecret] = useState(false);
+  const [isRevealingLineToken, setIsRevealingLineToken] = useState(false);
+  const [isRevealingLineSecret, setIsRevealingLineSecret] = useState(false);
   const [isSavingLine, setIsSavingLine] = useState(false);
   const [isTestingLine, setIsTestingLine] = useState(false);
   const [lineTestMessage, setLineTestMessage] = useState('');
@@ -286,6 +315,45 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       }
     } catch (err) {
       console.warn('Failed to load LINE config:', err);
+    }
+  };
+
+  const handleToggleLineSecretVisibility = async (
+    field: 'channelAccessToken' | 'channelSecret',
+    isVisible: boolean,
+    setIsVisible: React.Dispatch<React.SetStateAction<boolean>>,
+    setIsRevealing: React.Dispatch<React.SetStateAction<boolean>>
+  ) => {
+    if (isVisible) {
+      setIsVisible(false);
+      return;
+    }
+    const value = lineConfig[field];
+    const hasSavedValue = field === 'channelAccessToken'
+      ? lineConfig.hasChannelAccessToken
+      : lineConfig.hasChannelSecret;
+    if (value || !hasSavedValue) {
+      setIsVisible(true);
+      return;
+    }
+
+    setIsRevealing(true);
+    try {
+      const res = await fetch('/api/line/config/reveal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || typeof data.value !== 'string') {
+        throw new Error(data.error || 'แสดงค่าที่บันทึกไว้ไม่สำเร็จ');
+      }
+      setLineConfig(prev => ({ ...prev, [field]: data.value }));
+      setIsVisible(true);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'แสดงค่าที่บันทึกไว้ไม่สำเร็จ', 'info');
+    } finally {
+      setIsRevealing(false);
     }
   };
 
@@ -2447,24 +2515,35 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             <div className="space-y-2 text-xs">
               <label className="block font-bold text-slate-700">
                 {geminiConfig.hasKey ? 'ระบุ GEMINI_API_KEY ใหม่เพื่อเปลี่ยนแปลง' : 'ระบุ GEMINI_API_KEY เพื่อเปิดใช้งานระบบ AI'}
-                <span className="text-rose-500 ml-1">*</span>
+                {!geminiConfig.hasKey && <span className="text-rose-500 ml-1">*</span>}
               </label>
+              {geminiConfig.hasKey && (
+                <p className="text-[11px] text-slate-500">
+                  กดไอคอนรูปตาเพื่อดู Key เดิม หรือพิมพ์ Key ใหม่เพื่อเปลี่ยนค่า
+                </p>
+              )}
               <div className="flex flex-wrap sm:flex-nowrap gap-2">
                 <div className="relative flex-1">
                   <input
                     type={showGeminiKey ? 'text' : 'password'}
                     value={geminiKeyInput}
                     onChange={e => setGeminiKeyInput(e.target.value)}
-                    placeholder="AIzaSy..."
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-violet-500 bg-white pr-10"
+                    placeholder={geminiConfig.hasKey ? 'กดไอคอนรูปตาเพื่อดู Key เดิม หรือพิมพ์ค่าใหม่' : 'AIzaSy...'}
+                    className="w-full min-h-11 px-3.5 py-2.5 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-violet-500 bg-white pr-12"
                   />
                   <button
                     type="button"
-                    onClick={() => setShowGeminiKey(v => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                    title={showGeminiKey ? 'ซ่อน Key' : 'แสดง Key'}
+                    onClick={handleToggleGeminiKeyVisibility}
+                    disabled={isRevealingGeminiKey}
+                    aria-label={showGeminiKey ? 'ซ่อน Gemini API Key' : 'แสดง Gemini API Key ที่บันทึกไว้'}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer disabled:opacity-50"
+                    title={isRevealingGeminiKey ? 'กำลังโหลด Key...' : showGeminiKey ? 'ซ่อน Key' : 'แสดง Key ที่บันทึกไว้'}
                   >
-                    {showGeminiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {isRevealingGeminiKey
+                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                      : showGeminiKey
+                      ? <EyeOff className="w-4 h-4" />
+                      : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
                 <button
@@ -2581,15 +2660,26 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                       type={showLineToken ? 'text' : 'password'}
                       value={lineConfig.channelAccessToken}
                       onChange={e => setLineConfig(prev => ({ ...prev, channelAccessToken: e.target.value }))}
-                      placeholder={lineConfig.hasChannelAccessToken ? '•••••••••••••••• (ใส่ค่าใหม่เพื่อแก้ไข)' : 'Channel Access Token...'}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-500 bg-white pr-10"
+                      placeholder={lineConfig.hasChannelAccessToken ? 'กดไอคอนรูปตาเพื่อดูค่าเดิม หรือพิมพ์ค่าใหม่' : 'Channel Access Token...'}
+                      className="w-full min-h-11 px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-500 bg-white pr-12"
                     />
                     <button
                       type="button"
-                      onClick={() => setShowLineToken(v => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      onClick={() => handleToggleLineSecretVisibility(
+                        'channelAccessToken',
+                        showLineToken,
+                        setShowLineToken,
+                        setIsRevealingLineToken
+                      )}
+                      disabled={isRevealingLineToken}
+                      aria-label={showLineToken ? 'ซ่อน LINE Channel Access Token' : 'แสดง LINE Channel Access Token ที่บันทึกไว้'}
+                      className="absolute right-0 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer disabled:opacity-50"
                     >
-                      {showLineToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {isRevealingLineToken
+                        ? <RefreshCw className="w-4 h-4 animate-spin" />
+                        : showLineToken
+                        ? <EyeOff className="w-4 h-4" />
+                        : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
                 </div>
@@ -2609,15 +2699,26 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                       type={showLineSecret ? 'text' : 'password'}
                       value={lineConfig.channelSecret}
                       onChange={e => setLineConfig(prev => ({ ...prev, channelSecret: e.target.value }))}
-                      placeholder={lineConfig.hasChannelSecret ? '•••••••••••••••• (ใส่ค่าใหม่เพื่อแก้ไข)' : 'Channel Secret...'}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-500 bg-white pr-10"
+                      placeholder={lineConfig.hasChannelSecret ? 'กดไอคอนรูปตาเพื่อดูค่าเดิม หรือพิมพ์ค่าใหม่' : 'Channel Secret...'}
+                      className="w-full min-h-11 px-3 py-2 rounded-xl border border-slate-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-500 bg-white pr-12"
                     />
                     <button
                       type="button"
-                      onClick={() => setShowLineSecret(v => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      onClick={() => handleToggleLineSecretVisibility(
+                        'channelSecret',
+                        showLineSecret,
+                        setShowLineSecret,
+                        setIsRevealingLineSecret
+                      )}
+                      disabled={isRevealingLineSecret}
+                      aria-label={showLineSecret ? 'ซ่อน LINE Channel Secret' : 'แสดง LINE Channel Secret ที่บันทึกไว้'}
+                      className="absolute right-0 top-1/2 -translate-y-1/2 min-h-11 min-w-11 flex items-center justify-center text-slate-500 hover:text-slate-900 cursor-pointer disabled:opacity-50"
                     >
-                      {showLineSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {isRevealingLineSecret
+                        ? <RefreshCw className="w-4 h-4 animate-spin" />
+                        : showLineSecret
+                        ? <EyeOff className="w-4 h-4" />
+                        : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
                 </div>
