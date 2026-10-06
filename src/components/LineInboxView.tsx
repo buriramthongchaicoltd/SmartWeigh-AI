@@ -16,6 +16,7 @@ import {
   Cloud,
   Archive,
   ShieldAlert,
+  EyeOff,
   X
 } from 'lucide-react';
 import {
@@ -180,6 +181,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [isAuditingDrive, setIsAuditingDrive] = useState(false);
   const auditAbortController = useRef<AbortController | null>(null);
   const [driveAuditError, setDriveAuditError] = useState<string | null>(null);
+  const [isDriveAuditDetailsVisible, setIsDriveAuditDetailsVisible] = useState(true);
   const [driveAudit, setDriveAudit] = useState<{
     scannedAt: string;
     zone00Count: number;
@@ -232,6 +234,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const handleAuditDriveInbox = async () => {
     const controller = new AbortController();
     auditAbortController.current = controller;
+    setIsDriveAuditDetailsVisible(true);
     setIsAuditingDrive(true);
     setDriveAuditError(null);
     try {
@@ -853,6 +856,20 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
             <RefreshCw className={`h-3.5 w-3.5 ${isAuditingDrive ? 'animate-spin' : ''}`} />
             {isAuditingDrive ? 'กำลังตรวจสอบ...' : 'ตรวจเทียบไฟล์ใน Drive'}
           </button>
+          {driveAudit && (
+            <button
+              type="button"
+              onClick={() => setIsDriveAuditDetailsVisible(visible => !visible)}
+              aria-expanded={isDriveAuditDetailsVisible}
+              aria-controls="drive-audit-results"
+              className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+            >
+              {isDriveAuditDetailsVisible
+                ? <EyeOff className="h-3.5 w-3.5" />
+                : <Eye className="h-3.5 w-3.5" />}
+              {isDriveAuditDetailsVisible ? 'ซ่อนผลตรวจ' : 'แสดงผลตรวจ'}
+            </button>
+          )}
           {isAuditingDrive && (
             <button
               type="button"
@@ -878,7 +895,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         )}
 
         {driveAudit && (
-          <div className="mt-3 rounded-lg border border-amber-200 bg-white p-3">
+          <div
+            id="drive-audit-results"
+            hidden={!isDriveAuditDetailsVisible}
+            className="mt-3 rounded-lg border border-amber-200 bg-white p-3"
+          >
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <p className="font-semibold text-slate-800">
                 LINE {driveAudit.lineInboxCount} รายการ · โฟลเดอร์ 00 มี {driveAudit.zone00Count} ไฟล์ · จับคู่ LINE โดยตรง {driveAudit.zone00MatchedToLineCount} ไฟล์ · ไม่มี LINE อ้างอิง {driveAudit.zone00NotMatchedToLineCount} ไฟล์

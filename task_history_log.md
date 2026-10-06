@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Add Hide Toggle for Google Drive Audit Results
+
+### การเปลี่ยนแปลง
+- เพิ่มปุ่มซ่อน/แสดงแผงผลตรวจไฟล์ค้างใน Google Drive โดยเก็บข้อมูลผลตรวจไว้เมื่อพับ
+- เริ่มตรวจ Drive รอบใหม่แล้วเปิดแผงผลตรวจให้อัตโนมัติ พร้อมระบุสถานะการขยายสำหรับผู้ใช้คีย์บอร์ด/โปรแกรมอ่านหน้าจอ
+- อัปเดต Handover ให้บันทึกพฤติกรรมการซ่อนผลตรวจ
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build แสดงคำเตือนเดิมว่า JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Repair LINE Inbox Rescan and Refresh Handover Documentation
 
 ### การเปลี่ยนแปลง
