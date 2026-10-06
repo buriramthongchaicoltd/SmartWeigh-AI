@@ -141,6 +141,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     zoneBadge: string;
     docTypeLabel: string;
     docNo: string;
+    driveFileId?: string;
     imageUrl?: string | null;
     fallbackImageUrl?: string | null;
     imageLoadFailed?: boolean;
@@ -199,8 +200,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     payload: Omit<NonNullable<typeof hoveredDocPreview>, 'rect'>
   ) => {
     const r = e.currentTarget.getBoundingClientRect();
+    const driveFileId = payload.driveFileId || extractGoogleDriveFileId(payload.imageUrl);
+    const imageUrl = driveFileId
+      ? `/api/drive/image/${encodeURIComponent(driveFileId)}`
+      : payload.imageUrl;
     setHoveredDocPreview({
       ...payload,
+      imageUrl,
+      fallbackImageUrl: driveFileId && payload.imageUrl !== imageUrl
+        ? payload.imageUrl
+        : payload.fallbackImageUrl,
       rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
     });
   };
@@ -875,6 +884,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                           zoneBadge: 'โซน 4 • ตั๋วชั่งน้ำหนักปลายทาง',
                           docTypeLabel: 'ตั๋วชั่งน้ำหนักปลายทาง (Destination Weighbridge)',
                           docNo: tDocNo,
+                          driveFileId: ticket.driveFileId,
                           imageUrl: ticket.image,
                           matchStatus: ticket.destMatchStatus,
                           referenceNote: ticket.linkedViaDocNo
@@ -1882,17 +1892,14 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   // Helper payloads for hover preview on PO, DO/Origin, and Destination Ticket
                   const triggerPOHover = (e: React.MouseEvent<HTMLElement>) => {
                     if (!row.col4) return;
-                    const poDriveFileId = matchedPO?.driveFileId || extractGoogleDriveFileId(matchedPO?.image);
                     openDocHoverPreview(e, {
                       rowId: row.id,
                       trNo: row.col1,
                       zoneBadge: 'โซน 1 • คอลัมน์ 4 (ใบสั่งซื้อ PO)',
                       docTypeLabel: 'ใบสั่งซื้อ (Purchase Order)',
                       docNo: row.col4,
-                      imageUrl: poDriveFileId
-                        ? `/api/drive/image/${encodeURIComponent(poDriveFileId)}`
-                        : matchedPO?.image,
-                      fallbackImageUrl: poDriveFileId ? matchedPO?.image : undefined,
+                      driveFileId: matchedPO?.driveFileId,
+                      imageUrl: matchedPO?.image,
                       matchStatus: poNeedsReview ? 'auto_flagged' : row.poMatchStatus,
                       referenceNote:
                         row.referenceSource === 'handwritten'
@@ -1935,6 +1942,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       zoneBadge: 'โซน 1–3 • คอลัมน์ 6–15 (ใบส่งของ DO / ข้อมูลและน้ำหนักต้นทาง)',
                       docTypeLabel: 'ใบส่งของ (Delivery Order - โซน 1–3)',
                       docNo: `DO: ${docNum}`,
+                      driveFileId: row.driveFileId,
                       imageUrl: row.image,
                       matchStatus: row.autoFlagsVerified ? 'verified' : hasUnverifiedAutoActions(row) ? 'auto_flagged' : 'manual',
                       referenceNote: row.col4 ? `🔗 อ้างอิงใบสั่งซื้อ PO: ${row.col4}` : 'ยังไม่ได้ผูกเลขที่ PO',
@@ -1960,6 +1968,11 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                     if (!hasZone4Doc) return;
                     const destDocNo = effectiveCol17 || 'ตั๋วชั่งปลายทาง';
                     const destImg = linkedDestTicket?.image || (row.docType === 'dest_weighbridge' ? row.image : undefined);
+                    const destDriveFileId = linkedDestTicket?.image
+                      ? linkedDestTicket.driveFileId
+                      : row.docType === 'dest_weighbridge'
+                        ? row.driveFileId
+                        : undefined;
                     const refDoText =
                       linkedDestTicket?.referenceDocNo ||
                       linkedDestTicket?.linkedViaDocNo ||
@@ -1971,6 +1984,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       zoneBadge: 'โซน 4 • คอลัมน์ 16-21 (ตั๋วชั่งน้ำหนักปลายทาง)',
                       docTypeLabel: 'ตั๋วชั่งน้ำหนักปลายทาง (Destination Weighbridge)',
                       docNo: destDocNo,
+                      driveFileId: destDriveFileId,
                       imageUrl: destImg,
                       matchStatus: row.destMatchStatus || linkedDestTicket?.destMatchStatus,
                       referenceNote: `🔗 ชนเข้ากับใบส่งของ DO: ${refDoText}`,
@@ -2197,6 +2211,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                     zoneBadge: 'โซน 1 คอลัมน์ 5 / โซน 5-6 (เอกสารวางบิล/ใบเสร็จ)',
                                     docTypeLabel: linkedTaxInvoice ? 'ใบกำกับภาษี / ใบเสร็จรับเงิน' : 'ใบรับวางบิล (RR)',
                                     docNo: invDoc,
+                                    driveFileId: linkedTaxInvoice?.image
+                                      ? linkedTaxInvoice.driveFileId
+                                      : row.driveFileId,
                                     imageUrl: linkedTaxInvoice?.image || row.image,
                                     details: [
                                       { label: 'เลขที่เอกสาร', value: invDoc, highlight: true },
@@ -3207,7 +3224,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               {proxyImageError ? (
                 <div className="text-center px-4 py-6 text-amber-300 space-y-1">
                   <FileImage className="w-8 h-8 mx-auto opacity-70" />
-                  <div className="font-semibold">โหลดภาพ PO ไม่สำเร็จ</div>
+                  <div className="font-semibold">โหลดภาพเอกสารไม่สำเร็จ</div>
                   <div className="text-[10px] text-slate-200 break-words">{proxyImageError}</div>
                 </div>
               ) : hoveredDocPreview.imageUrl?.startsWith('/api/drive/image/') && !proxyImageUrl ? (

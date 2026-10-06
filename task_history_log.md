@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Unify Hover Image Loading for PO and DO
+
+### การเปลี่ยนแปลง
+- ย้ายการแปลง Drive ID เป็น image proxy URL ไปไว้ในจุดกลางที่เปิด tooltip เพื่อให้ PO, DO และตั๋วชั่งปลายทางใช้กติกาเดียวกัน
+- ถ้ามี Drive ID/ลิงก์ Drive จะโหลดผ่าน server proxy; ภาพ data URL หรือลิงก์ที่ไม่ใช่ Google Drive ยังคงแสดงโดยตรงเหมือนเดิม และใช้ลิงก์เดิมเป็น fallback
+- เปลี่ยนข้อความ error ของ proxy ให้เป็นกลาง ไม่ระบุว่าเป็น PO เท่านั้น
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังมีคำเตือนเดิมว่า bundle JavaScript ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Generate TR Numbers From Database Records
 
 ### การเปลี่ยนแปลง
