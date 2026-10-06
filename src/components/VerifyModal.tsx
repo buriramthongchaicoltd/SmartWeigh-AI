@@ -18,7 +18,8 @@ import {
   PenTool,
   MessageSquare,
   SlidersHorizontal,
-  Upload
+  Upload,
+  Download
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
@@ -41,6 +42,11 @@ interface VerifyModalProps {
   onClose: () => void;
   onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
+  onRecoverLineImage?: (orderId: string) => Promise<{
+    image: string;
+    driveFileId: string;
+    driveFolderId?: string;
+  }>;
 }
 
 export const VerifyModal: React.FC<VerifyModalProps> = ({
@@ -55,7 +61,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   lineInboxItems = [],
   onClose,
   onSaveOrder,
-  onSwitchToPO
+  onSwitchToPO,
+  onRecoverLineImage
 }) => {
   const [currentImage, setCurrentImage] = useState<string | null>(billImage || null);
   const [form, setForm] = useState<Partial<OrderRecord>>({});
@@ -68,6 +75,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [enableDOWeighing, setEnableDOWeighing] = useState(false);
   const [projectMissingError, setProjectMissingError] = useState(false);
   const [remappedNotice, setRemappedNotice] = useState<string | null>(null);
+  const [isRecoveringLineImage, setIsRecoveringLineImage] = useState(false);
   const [isRescanningAI, setIsRescanningAI] = useState(false);
   const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [hasAttachedImage, setHasAttachedImage] = useState(false);
@@ -121,6 +129,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setProjectMissingError(false);
       setRemappedNotice(null);
       setHasAttachedImage(false);
+      setIsRecoveringLineImage(false);
 
       // Preserve a document type already classified by the shared OCR pipeline.
       let detectedType: DocumentType = normalized.docType || 'delivery_order';
@@ -447,6 +456,28 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
   };
 
+  const handleRecoverLineImage = async () => {
+    if (!form.id || !onRecoverLineImage || isRecoveringLineImage) return;
+    setIsRecoveringLineImage(true);
+    setRemappedNotice('กำลังดึงภาพต้นฉบับจาก LINE และจัดเก็บใน Google Drive...');
+    try {
+      const recovered = await onRecoverLineImage(form.id);
+      setCurrentImage(recovered.image);
+      setForm(previous => ({
+        ...previous,
+        image: recovered.image,
+        driveFileId: recovered.driveFileId,
+        driveFolderId: recovered.driveFolderId
+      }));
+      setRemappedNotice('กู้ภาพจาก LINE และบันทึกเข้า Google Drive แล้ว');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      setRemappedNotice(`⚠️ กู้ภาพจาก LINE ไม่สำเร็จ: ${message}`);
+    } finally {
+      setIsRecoveringLineImage(false);
+    }
+  };
+
   const handleAttachImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
@@ -622,6 +653,22 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
           
           {/* Left Column: Image Viewer with Rotate & Crop (5 Cols) */}
           <div className="md:col-span-5 bg-slate-950 p-3 flex flex-col h-full overflow-hidden">
+            {form.id && form.lineInboxId && !form.driveFileId && onRecoverLineImage && (
+              <div className="mb-2 rounded-lg border border-sky-700 bg-slate-900 p-2.5">
+                <button
+                  type="button"
+                  onClick={handleRecoverLineImage}
+                  disabled={isRecoveringLineImage}
+                  className="min-h-10 w-full px-3 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-60 text-white text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Download className={`w-4 h-4 ${isRecoveringLineImage ? 'animate-bounce' : ''}`} />
+                  {isRecoveringLineImage ? 'กำลังดึงภาพจาก LINE...' : 'ดึงภาพจาก LINE เข้า Google Drive'}
+                </button>
+                <p className="mt-1.5 text-[11px] leading-4 text-slate-300">
+                  ใช้ได้เมื่อ LINE ยังเปิดให้ดึงภาพต้นฉบับ และรายการนี้มีรหัส LINE
+                </p>
+              </div>
+            )}
             {!form.id && (
               <div className="mb-2 flex items-center gap-2">
                 <input

@@ -4396,6 +4396,193 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/drive/recover-order-line-image', async (req: Request, res: Response) => {
+  try {
+    const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+    if (!orderId || orderId.length > 200) {
+      return res.status(400).json({ success: false, error: 'กรุณาระบุรหัสบิลที่ต้องการกู้ภาพ' });
+    }
+
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase' });
+    }
+    const { data: runtimeConfigs, error: runtimeConfigError } = await client.from('system_config')
+      .select('config_key,config_value')
+      .in('config_key', ['drive_config', 'line_bot_config']);
+    if (runtimeConfigError) {
+      throw new Error(`โหลดการตั้งค่า LINE/Drive ไม่สำเร็จ: ${runtimeConfigError.message}`);
+    }
+    for (const config of runtimeConfigs || []) {
+      if (config.config_key === 'drive_config' && config.config_value) {
+        saveStoredDriveConfig(config.config_value);
+      } else if (config.config_key === 'line_bot_config' && config.config_value) {
+        lineBotConfig = { ...lineBotConfig, ...config.config_value, strictZeroPushQuota: true };
+      }
+    }
+
+    const { data: order, error: orderError } = await client.from('orders')
+      .select('id,doc_type,line_inbox_id,drive_file_id,col1,col6,col17')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (orderError) throw new Error(`อ่านข้อมูลบิลไม่สำเร็จ: ${orderError.message}`);
+    if (!order) return res.status(404).json({ success: false, error: 'ไม่พบบิลในตารางหลัก' });
+    if (order.drive_file_id) {
+      return res.status(409).json({ success: false, error: 'บิลนี้มี Drive File ID อยู่แล้ว จึงไม่สร้างไฟล์ซ้ำ' });
+    }
+    if (!order.line_inbox_id) {
+      return res.status(400).json({ success: false, error: 'บิลนี้ไม่มีรหัสรายการ LINE ที่ใช้กู้ภาพ' });
+    }
+
+    const { data: inbox, error: inboxError } = await client.from('line_inbox')
+      .select('line_message_id,image_url')
+      .eq('id', order.line_inbox_id)
+      .maybeSingle();
+    if (inboxError) throw new Error(`อ่านข้อมูลต้นทาง LINE ไม่สำเร็จ: ${inboxError.message}`);
+    if (!inbox) return res.status(404).json({ success: false, error: 'ไม่พบรายการ LINE ต้นทางของบิลนี้' });
+
+    const storedImage = typeof inbox.image_url === 'string' ? inbox.image_url.trim() : '';
+    const isStoredImageBase64 = /^data:image\/[^;]+;base64,/i.test(storedImage) ||
+      /^[A-Za-z0-9+/=\r\n]+$/.test(storedImage);
+    let base64Image = isStoredImageBase64 && storedImage.length > 50 ? storedImage : '';
+    let mimeType = base64Image.match(/^data:(image\/[^;]+);base64,/i)?.[1] || 'image/jpeg';
+
+    if (!base64Image && inbox.line_message_id) {
+      if (!lineBotConfig.channelAccessToken) {
+        return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า LINE Channel Access Token สำหรับดึงภาพต้นฉบับ' });
+      }
+      const lineResponse = await fetch(
+        `https://api-data.line.me/v2/bot/message/${encodeURIComponent(inbox.line_message_id)}/content`,
+        { headers: { Authorization: `Bearer ${lineBotConfig.channelAccessToken}` } }
+      );
+      if (!lineResponse.ok) {
+        return res.status(502).json({
+          success: false,
+          error: `LINE ไม่สามารถส่งภาพต้นฉบับกลับมาได้ (HTTP ${lineResponse.status}); ภาพนี้อาจพ้นช่วงเวลาที่ LINE เปิดให้ดึง`
+        });
+      }
+      mimeType = lineResponse.headers.get('content-type') || 'image/jpeg';
+      if (!mimeType.startsWith('image/')) {
+        return res.status(502).json({ success: false, error: 'ข้อมูลที่ LINE ส่งกลับมาไม่ใช่ไฟล์ภาพ' });
+      }
+      base64Image = `data:${mimeType};base64,${Buffer.from(await lineResponse.arrayBuffer()).toString('base64')}`;
+    }
+
+    if (!base64Image) {
+      return res.status(404).json({ success: false, error: 'ไม่พบภาพในฐานข้อมูลและไม่มีรหัสข้อความ LINE ให้ดึงซ้ำ' });
+    }
+
+    const imageBytes = Buffer.from(base64Image.replace(/^data:[a-zA-Z0-9/+-]+;base64,/i, ''), 'base64');
+    if (!imageBytes.length) {
+      return res.status(422).json({ success: false, error: 'ข้อมูลภาพต้นทางว่างหรือไม่ถูกต้อง' });
+    }
+
+    const driveCfg = getStoredDriveConfig();
+    if (!driveCfg.isEnabled || !driveCfg.rootFolderId) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Drive สำหรับจัดเก็บภาพ' });
+    }
+
+    const token = await getDriveAccessToken();
+    const isGasMode = Boolean(driveCfg.connectionMode === 'gas' || (!token && driveCfg.gasWebAppUrl));
+    if (!token && !isGasMode) {
+      return res.status(503).json({ success: false, error: 'ไม่สามารถเชื่อมต่อ Google Drive ได้' });
+    }
+    if (isGasMode && !driveCfg.gasWebAppUrl) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script Web App URL' });
+    }
+
+    const docType = order.doc_type || 'delivery_order';
+    const assignedZone = docType === 'purchase_order'
+      ? 'zone_01'
+      : docType === 'dest_weighbridge'
+        ? 'zone_03'
+        : docType === 'tax_invoice'
+          ? 'zone_04'
+          : 'zone_02';
+    const safeOrderId = sanitizeDriveName(orderId).slice(-80);
+    const docNumber = sanitizeDriveName(order.col6 || order.col17 || order.col1 || 'UNKNOWN');
+    const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
+    const fileName = `LINE_RECOVERED_${safeOrderId}.${extension}`;
+    let driveResult: { fileId?: string; folderId?: string; webViewLink?: string; success?: boolean; error?: string } | null = null;
+
+    if (isGasMode && driveCfg.gasWebAppUrl) {
+      driveResult = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+        action: 'upload',
+        rootFolderId: driveCfg.rootFolderId,
+        targetZone: assignedZone,
+        subfolderName: docType === 'delivery_order' ? `${sanitizeDriveName(order.col1 || 'TR')}_DO-${docNumber}` : undefined,
+        fileName,
+        base64Image
+      });
+      if (!driveResult?.success) {
+        throw new Error(driveResult?.error || 'อัปโหลดภาพเข้า Google Drive ผ่าน Apps Script ไม่สำเร็จ');
+      }
+    } else if (token) {
+      const zones = await ensureStandardDriveZones(token, driveCfg.rootFolderId);
+      let targetFolderId = assignedZone === 'zone_01'
+        ? zones.ZONE_01
+        : assignedZone === 'zone_03'
+          ? zones.ZONE_03
+          : assignedZone === 'zone_04'
+            ? zones.ZONE_04
+            : zones.ZONE_02;
+      if (docType === 'delivery_order') {
+        targetFolderId = await getOrCreateSubfolder(
+          token,
+          targetFolderId,
+          `${sanitizeDriveName(order.col1 || 'TR')}_DO-${docNumber}`
+        );
+      }
+      driveResult = await findDriveFileByName(token, targetFolderId, fileName);
+      if (!driveResult) {
+        driveResult = await uploadFileToDrive({
+          accessToken: token,
+          folderId: targetFolderId,
+          fileName,
+          base64Data: base64Image,
+          mimeType
+        });
+      }
+      driveResult.folderId = targetFolderId;
+    }
+
+    if (!driveResult?.fileId) {
+      throw new Error('Google Drive ไม่ได้ส่งกลับ File ID หลังบันทึกภาพ');
+    }
+
+    const { data: updatedOrder, error: updateError } = await client.from('orders')
+      .update({
+        drive_file_id: driveResult.fileId,
+        drive_folder_id: driveResult.folderId || driveCfg.rootFolderId
+      })
+      .eq('id', orderId)
+      .or('drive_file_id.is.null,drive_file_id.eq.')
+      .select('id')
+      .maybeSingle();
+    if (updateError) throw new Error(`บันทึก Drive File ID ลงบิลไม่สำเร็จ: ${updateError.message}`);
+    if (!updatedOrder) {
+      return res.status(409).json({
+        success: false,
+        error: 'ข้อมูลบิลเปลี่ยนระหว่างกู้ภาพ กรุณาโหลดรายการใหม่ก่อนตรวจสอบอีกครั้ง'
+      });
+    }
+
+    return res.json({
+      success: true,
+      image: base64Image,
+      driveFileId: driveResult.fileId,
+      driveFolderId: driveResult.folderId || driveCfg.rootFolderId,
+      driveWebViewLink: driveResult.webViewLink || `https://drive.google.com/file/d/${driveResult.fileId}/view`
+    });
+  } catch (err: any) {
+    console.error('[Drive Recovery] Failed to restore LINE image:', err?.message);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'กู้ภาพจาก LINE เข้า Google Drive ไม่สำเร็จ'
+    });
+  }
+});
+
 // 5. Verified-Only File Move Rule (POST /api/drive/sync-verified-move)
 app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) => {
   try {

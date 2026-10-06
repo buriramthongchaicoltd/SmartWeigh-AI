@@ -1068,9 +1068,12 @@ export default function App() {
 
     setOrders(prev => {
       let workingList = [...prev];
+      const previousOrder = isExistingRecord ? orders.find(existing => existing.id === order.id) : undefined;
       let orderToSave: OrderRecord = normalizeOrderWeights({
         ...order,
-        driveFileId: (isExistingRecord && orders.find(o => o.id === order.id)?.image !== order.image) ? undefined : order.driveFileId,
+        driveFileId: (previousOrder?.image !== order.image && order.driveFileId === previousOrder?.driveFileId)
+          ? undefined
+          : order.driveFileId,
         createdBy: order.createdBy || currentUser.fullName,
         updatedBy: currentUser.fullName
       });
@@ -1790,6 +1793,37 @@ export default function App() {
     const matchingStore = stores.find(s => s.name === order.col8 || s.id === order.storeId);
     setVerifyStoreSuggestion(matchingStore);
     setIsVerifyOpen(true);
+  };
+
+  const handleRecoverOrderImageFromLine = async (orderId: string) => {
+    const response = await fetch('/api/drive/recover-order-line-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || `กู้ภาพจาก LINE ไม่สำเร็จ (HTTP ${response.status})`);
+    }
+    if (typeof result.image !== 'string' || typeof result.driveFileId !== 'string') {
+      throw new Error('เซิร์ฟเวอร์กู้ภาพได้ไม่ครบข้อมูลสำหรับแสดงผล');
+    }
+
+    const recoveredFields = {
+      driveFileId: result.driveFileId,
+      driveFolderId: typeof result.driveFolderId === 'string' ? result.driveFolderId : undefined
+    };
+    setOrders(previous => previous.map(order =>
+      order.id === orderId ? { ...order, ...recoveredFields } : order
+    ));
+    setVerifyOrderData(previous =>
+      previous?.id === orderId ? { ...previous, ...recoveredFields, image: result.image } : previous
+    );
+    showToast('กู้ภาพจาก LINE และบันทึกเข้า Google Drive สำเร็จ');
+    return {
+      image: result.image,
+      ...recoveredFields
+    };
   };
 
   // ================= PO MANAGEMENT HANDLERS =================
@@ -2883,6 +2917,7 @@ export default function App() {
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}
+        onRecoverLineImage={handleRecoverOrderImageFromLine}
       />
 
       {/* Purchase Order Detail & Print Modal */}

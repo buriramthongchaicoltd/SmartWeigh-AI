@@ -4,6 +4,19 @@
 
 ---
 
+## [2026-10-06] Recover Missing Order Images from LINE
+
+### การเปลี่ยนแปลง
+- เพิ่มปุ่มในหน้า Verify สำหรับบิลที่บันทึกแล้วและมี LINE Inbox ต้นทาง แต่ยังไม่มี `drive_file_id`
+- เพิ่ม `POST /api/drive/recover-order-line-image` ให้ตรวจความสัมพันธ์ระหว่าง `orders` กับ `line_inbox`, ใช้ภาพที่ยังอยู่ใน Supabase หรือดึงภาพเดิมจาก LINE Content API แล้วบันทึกเข้าโซน Google Drive ตามประเภทเอกสาร
+- บันทึก Drive ID/Folder ID กลับไปยังแถวบิลเดิมโดยไม่ทำ OCR ซ้ำหรือแก้ข้อมูล 39 คอลัมน์; ใช้ชื่อไฟล์ที่ผูกกับรหัสบิลเพื่อให้ retry ไม่สร้างไฟล์ซ้ำ
+- แจ้งความล้มเหลวอย่างชัดเจนเมื่อ LINE ไม่สามารถส่งภาพหรือการเชื่อมโยง/บริการ Drive ไม่พร้อม
+- อัปเดตคู่มือ handover และ blueprint
+
+### การตรวจสอบ
+- ตรวจ `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- ยังไม่ได้ทดสอบดึงภาพจาก LINE หรืออัปโหลด Google Drive จริง
+
 ## [2026-10-06] Restore Saved Gemini Key Before PO Scanning
 
 ### การเปลี่ยนแปลง
