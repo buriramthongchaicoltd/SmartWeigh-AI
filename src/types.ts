@@ -386,6 +386,8 @@ export interface LineBillInboxItem {
   nonBillReason?: string;
   botReplyText?: string;           // ข้อความที่บอท Quote Reply ตอบกลับอ้างอิงภาพบิลในกลุ่ม LINE
   botReplySent?: boolean;
+  botReplyAttempted?: boolean;
+  botReplyError?: string;
   duplicateInfo?: {
     isDuplicate: boolean;
     matchedCode?: string;          // เช่น TR-2026-101 หรือรหัสคิวเดิม

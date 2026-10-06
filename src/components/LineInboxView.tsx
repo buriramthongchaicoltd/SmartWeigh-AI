@@ -70,6 +70,9 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
   }
 ];
 
+const normalizeDocumentText = (value: string) =>
+  value.toLocaleLowerCase().replace(/[\s.,:;!?'"“”‘’()\-_/]+/g, '');
+
 export const LineInboxView: React.FC<LineInboxViewProps> = ({
   inboxItems,
   onUpdateInboxItem,
@@ -1107,6 +1110,12 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               <tbody className="divide-y divide-slate-200 bg-white">
                 {filteredItems.map((item, idx) => {
                   const rawSnapshot = (item.rawAiSnapshot as any) || {};
+                  const documentTitle = item.extractedData?.documentTitle?.trim() || 'อ่านชื่อเอกสารไม่ชัด';
+                  const documentEvidence = item.extractedData?.docTypeEvidence?.trim() || '';
+                  const showDocumentEvidence = Boolean(
+                    documentEvidence &&
+                    normalizeDocumentText(documentEvidence) !== normalizeDocumentText(documentTitle)
+                  );
                   const billNo =
                     item.detectedDocType === 'dest_weighbridge'
                       ? item.extractedData?.col17 || item.extractedData?.col6 || rawSnapshot.rawDocNo || rawSnapshot.rawRefDoNo || ''
@@ -1260,13 +1269,22 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                             <span>รอตรวจสอบ</span>
                           </span>
                         )}
+                        {item.botReplyAttempted && !item.botReplySent && (
+                          <div
+                            role="status"
+                            className="mt-1 text-[10px] font-semibold text-red-700"
+                            title={item.botReplyError || 'ส่งข้อความกลับ LINE ไม่สำเร็จ'}
+                          >
+                            ตอบกลับ LINE ไม่สำเร็จ
+                          </div>
+                        )}
                       </td>
 
                       {/* 6. Document Type Switcher */}
                       <td className="py-2 px-3 border-r border-slate-200 align-middle">
                         {item.status !== 'ignored_non_bill' ? (
                           <div className="space-y-1">
-                            {(item.extractedData.documentTitle || item.extractedData.docTypeEvidence) && (
+                            {(item.extractedData.documentTitle || documentEvidence) && (
                               <div
                                 className={`text-[10px] leading-tight ${
                                   Number(item.extractedData.docTypeConfidence) > 0 &&
@@ -1274,10 +1292,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                                     ? 'text-amber-800 font-semibold'
                                     : 'text-slate-500'
                                 }`}
-                                title={`ชื่อเอกสาร: ${item.extractedData.documentTitle || 'อ่านไม่ชัด'} | หลักฐาน: ${item.extractedData.docTypeEvidence || 'ไม่มี'}`}
+                                title={`ชื่อเอกสาร: ${item.extractedData.documentTitle || 'อ่านไม่ชัด'}${showDocumentEvidence ? ` | หลักฐาน: ${documentEvidence}` : ''}`}
                               >
-                                <div className="truncate">{item.extractedData.documentTitle || 'อ่านชื่อเอกสารไม่ชัด'}</div>
-                                <div className="truncate">{item.extractedData.docTypeEvidence || 'ไม่มีหลักฐานข้อความ'}</div>
+                                {item.extractedData.documentTitle && (
+                                <div className="truncate">{documentTitle}</div>
+                                )}
+                                {showDocumentEvidence && (
+                                <div className="truncate">หลักฐาน: {documentEvidence}</div>
+                                )}
                               </div>
                             )}
                             <div className="flex items-center gap-1">

@@ -646,7 +646,9 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     driveWebViewLink: item.driveWebViewLink,
     imageHash: item.imageHash,
     rawAiSnapshot: item.rawAiSnapshot || {},
-    reviewFeedbackHistory: item.reviewFeedbackHistory || []
+    reviewFeedbackHistory: item.reviewFeedbackHistory || [],
+    botReplyAttempted: Boolean(item.botReplyAttempted),
+    botReplyError: item.botReplyError || undefined
   };
 
   const row: any = {
@@ -730,6 +732,8 @@ export function mapSupabaseToLineInbox(row: any): LineBillInboxItem {
     nonBillReason: extData.nonBillReason || undefined,
     botReplyText: row.bot_reply_text || undefined,
     botReplySent: Boolean(row.bot_replied),
+    botReplyAttempted: Boolean(extData.botReplyAttempted),
+    botReplyError: extData.botReplyError || undefined,
     duplicateInfo: row.duplicate_of_order_id ? {
       isDuplicate: true,
       matchedCode: row.duplicate_of_order_id,

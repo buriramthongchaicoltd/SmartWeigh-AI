@@ -4,6 +4,30 @@
 
 ---
 
+## [2026-10-06] Remove Duplicate LINE Document Type Text
+
+### การเปลี่ยนแปลง
+- ปรับคอลัมน์ประเภทเอกสารในกล่องพัก LINE ให้ไม่แสดงชื่อเอกสารและหลักฐานซ้ำกัน โดยเทียบข้อความหลังตัดช่องว่าง/เครื่องหมายวรรคตอน
+- เมื่อหลักฐานเป็นข้อความแยกจากชื่อเอกสาร ให้แสดงพร้อมป้าย “หลักฐาน” เพื่อแยกความหมายชัดเจน
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังเตือน bundle ใหญ่กว่า 500 kB ตามเดิม
+
+## [2026-10-06] Persist LINE Inbox Before Webhook Acknowledgement
+
+### การเปลี่ยนแปลง
+- ตรวจ LINE webhook signature ด้วย raw request body และปฏิเสธ request ที่ไม่มี Channel Secret/signature หรือ signature ไม่ตรง
+- บันทึกรายการ `queued` ลง Supabase ก่อนตอบ HTTP 200; เมื่อฐานข้อมูลไม่พร้อมให้ตอบ HTTP 503 เพื่อให้ LINE retry และกัน event ซ้ำด้วย LINE message ID
+- บันทึกผลสุดท้ายจากทุก branch ของการประมวลผล รวมถึงโหลดรูป/AI/Drive ที่ไม่สำเร็จ; ไม่รายงานการโหลดกล่องพักสำเร็จเมื่อ Supabase อ่านไม่สำเร็จ
+- เก็บสถานะ/สาเหตุเมื่อ LINE Reply API ส่งข้อความไม่สำเร็จ และแสดงสถานะดังกล่าวในกล่องพัก
+- ให้หน้าเว็บแสดงข้อผิดพลาดเมื่อดึง LINE Inbox ไม่ได้ และลดการเขียน `line_inbox` ซ้ำเมื่อข้อมูลจาก polling ไม่เปลี่ยน
+- ตรวจ HTTP/result ของการบันทึกข้อมูลแบบ batch, retry ความล้มเหลวชั่วคราวสูงสุด 2 ครั้ง และแจ้งเตือนเมื่อบันทึกไม่สำเร็จหลัง retry
+- อัปเดต Handover และ Database Blueprint พร้อมข้อจำกัด reply token และการกู้คืนแถวที่ยังไม่มี Drive ID
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังเตือน JavaScript bundle ใหญ่กว่า 500 kB ตามขนาดแอปปัจจุบัน
+- ยังไม่ได้ทดสอบ LINE Webhook, Supabase หรือ Google Drive กับ production จริง
+
 ## [2026-10-06] Reveal Saved API Credentials on Explicit Request
 
 ### การเปลี่ยนแปลง

@@ -35,7 +35,14 @@ const PORT = process.env.PORT || 3000;
 // Enable reverse proxy trust behind Cloud Run / AI Studio load balancers
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({
+  limit: '50mb',
+  verify: (req, _res, buffer) => {
+    if (req.url?.split('?')[0] === '/api/line/webhook') {
+      (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 type AuthenticatedAppUser = {
@@ -2319,31 +2326,29 @@ const LINE_INBOX_LIST_COLUMNS = 'id,received_at,line_message_id,line_quote_token
 app.get('/api/line/inbox', async (_req: Request, res: Response) => {
   try {
     const client = getSupabaseClient();
-    if (client) {
-      // Primary: fetch from Supabase so ALL users see the SAME bills (real-time multi-user)
-      // Intentionally exclude 'image_url' (base64 images) — loaded on-demand via /api/line/inbox/image/:id
-      const { data, error } = await client
-        .from('line_inbox')
-        .select(LINE_INBOX_LIST_COLUMNS)
-        .order('received_at', { ascending: false })
-        .limit(500);
-
-      if (!error && Array.isArray(data)) {
-        const supabaseItems = data.map(mapSupabaseToLineInbox);
-
-        // Merge in-memory queue (items not yet persisted — these still have image in memory)
-        const supabaseIds = new Set(supabaseItems.map((i: any) => i.id));
-        const queueOnly = lineWebhookInboxQueue.filter(q => !supabaseIds.has(q.id));
-        const merged = [...queueOnly, ...supabaseItems];
-
-        return res.json({ success: true, items: merged });
-      }
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase จึงโหลดกล่องพัก LINE ไม่ได้' });
     }
-    // Fallback to in-memory queue when Supabase is not configured
-    return res.json({ success: true, items: lineWebhookInboxQueue });
+
+    // Primary: fetch from Supabase so ALL users see the SAME bills (real-time multi-user)
+    // Intentionally exclude 'image_url' (base64 images) — loaded on-demand via /api/line/inbox/image/:id
+    const { data, error } = await client
+      .from('line_inbox')
+      .select(LINE_INBOX_LIST_COLUMNS)
+      .order('received_at', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      return res.status(503).json({ success: false, error: `โหลดกล่องพัก LINE จาก Supabase ไม่สำเร็จ: ${error.message}` });
+    }
+
+    const supabaseItems = (data || []).map(mapSupabaseToLineInbox);
+    const supabaseIds = new Set(supabaseItems.map((i: any) => i.id));
+    const queueOnly = lineWebhookInboxQueue.filter(q => !supabaseIds.has(q.id));
+    return res.json({ success: true, items: [...queueOnly, ...supabaseItems] });
   } catch (err: any) {
-    console.warn('[GET /api/line/inbox] Error fetching from Supabase, falling back to queue:', err?.message);
-    return res.json({ success: true, items: lineWebhookInboxQueue });
+    console.error('[GET /api/line/inbox] Failed to load Supabase inbox:', err?.message);
+    return res.status(503).json({ success: false, error: `โหลดกล่องพัก LINE ไม่สำเร็จ: ${err?.message || 'เชื่อมต่อฐานข้อมูลไม่ได้'}` });
   }
 });
 
@@ -2519,24 +2524,110 @@ app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
 // 3. Real LINE Messaging API Webhook Endpoint (POST /api/line/webhook)
 app.post('/api/line/webhook', async (req: Request, res: Response) => {
   try {
-    // Optional signature verification when channelSecret is configured
-    const signature = req.headers['x-line-signature'] as string | undefined;
-    if (lineBotConfig.channelSecret && signature) {
-      const rawBodyStr = JSON.stringify(req.body);
-      const expectedSig = crypto
-        .createHmac('SHA256', lineBotConfig.channelSecret)
-        .update(rawBodyStr)
-        .digest('base64');
-      if (signature !== expectedSig) {
-        console.warn('LINE Webhook signature mismatch warning (proceeding only if dev environment)');
-      }
+    const signature = req.headers['x-line-signature'];
+    const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+    if (!lineBotConfig.channelSecret || typeof signature !== 'string' || !rawBody) {
+      return res.status(503).json({ status: 'error', error: 'LINE Webhook ต้องตั้งค่า Channel Secret และส่ง Signature ที่ถูกต้อง' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('SHA256', lineBotConfig.channelSecret)
+      .update(rawBody)
+      .digest();
+    const receivedSignature = Buffer.from(signature, 'base64');
+    if (
+      receivedSignature.length !== expectedSignature.length ||
+      !crypto.timingSafeEqual(receivedSignature, expectedSignature)
+    ) {
+      return res.status(401).json({ status: 'error', error: 'LINE Webhook signature ไม่ถูกต้อง' });
     }
 
     const events = Array.isArray(req.body?.events) ? req.body.events : [];
-    // Respond 200 OK quickly as required by LINE Webhook specification
+    if (!lineBotConfig.enabled) {
+      return res.status(200).json({ status: 'ok', receivedEvents: events.length });
+    }
+
+    const imageEvents = events.filter((event: any) =>
+      event.type === 'message' &&
+      event.message?.type === 'image' &&
+      typeof event.message.id === 'string' &&
+      event.message.id.length > 0
+    );
+    const seededItems = new Map<string, any>();
+    const client = getSupabaseClient();
+
+    if (imageEvents.length > 0 && !client) {
+      return res.status(503).json({ status: 'error', error: 'บันทึกคิว LINE ไม่ได้เพราะยังไม่ได้เชื่อมต่อ Supabase' });
+    }
+
+    for (const event of imageEvents) {
+      const messageId: string = event.message.id;
+      const userId: string = event.source?.userId || 'unknown-user';
+      const groupId: string | undefined = event.source?.groupId || event.source?.roomId;
+      const receivedAt = event.timestamp ? new Date(event.timestamp).toISOString() : new Date().toISOString();
+      const item: any = {
+        id: `LINE_${messageId}`,
+        lineMessageId: messageId,
+        lineQuoteToken: event.message.quoteToken,
+        lineReplyToken: event.replyToken,
+        lineUserId: userId,
+        lineSenderName: userId,
+        lineGroupId: groupId,
+        lineGroupName: groupId ? `LINE ${groupId}` : 'LINE',
+        receivedAt,
+        image: '',
+        status: 'queued',
+        detectedDocType: 'delivery_order',
+        extractedData: {
+          col2: '',
+          lineUserId: userId,
+          lineGroupId: groupId,
+          lineReceivedAt: receivedAt
+        },
+        rawAiSnapshot: {},
+        isBillDocument: true
+      };
+      seededItems.set(messageId, item);
+    }
+
+    if (seededItems.size > 0) {
+      const { data: insertedRows, error } = await client!
+        .from('line_inbox')
+        .upsert(
+          Array.from(seededItems.values()).map(mapLineInboxToSupabase),
+          { onConflict: 'id', ignoreDuplicates: true }
+        )
+        .select('id');
+
+      if (error) {
+        console.error('[LINE Webhook] Failed to persist queue before acknowledgement:', error.message);
+        return res.status(503).json({ status: 'error', error: 'บันทึกคิว LINE ลง Supabase ไม่สำเร็จ ระบบจึงยังไม่รับงานนี้' });
+      }
+
+      const insertedIds = new Set((insertedRows || []).map((row: { id: string }) => row.id));
+      for (const [messageId, item] of seededItems) {
+        if (!insertedIds.has(item.id)) {
+          seededItems.delete(messageId);
+          continue;
+        }
+        lineWebhookInboxQueue.unshift(item);
+      }
+      if (lineWebhookInboxQueue.length > MAX_WEBHOOK_QUEUE_SIZE) {
+        lineWebhookInboxQueue.length = MAX_WEBHOOK_QUEUE_SIZE;
+      }
+    }
+
+    // Acknowledge only after every image event has a durable inbox row.
     res.status(200).json({ status: 'ok', receivedEvents: events.length });
 
-    if (!lineBotConfig.enabled) return;
+    const persistInboxItem = async (item: any) => {
+      const { error } = await client!
+        .from('line_inbox')
+        .upsert(mapLineInboxToSupabase(item), { onConflict: 'id' });
+      if (error) {
+        throw new Error(`อัปเดตรายการ LINE ${item.id} ลง Supabase ไม่สำเร็จ: ${error.message}`);
+      }
+    };
 
     for (const event of events) {
       if (event.type !== 'message' || event.message?.type !== 'image') {
@@ -2544,6 +2635,9 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       }
 
       const messageId: string = event.message.id;
+      const inboxItem = seededItems.get(messageId);
+      if (!inboxItem) continue;
+
       const quoteToken: string | undefined = event.message.quoteToken;
       const replyToken: string | undefined = event.replyToken;
       const userId: string = event.source?.userId || 'unknown-user';
@@ -2552,12 +2646,26 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
 
       // Step 1: Resolve Sender & Group Name (Free GET calls, 0 quota)
       const { senderName, senderAvatar, groupName } = await resolveLineSenderAndGroup(userId, groupId);
+      inboxItem.lineSenderName = senderName;
+      inboxItem.lineSenderAvatar = senderAvatar;
+      inboxItem.lineGroupName = groupName;
+      inboxItem.extractedData = {
+        ...inboxItem.extractedData,
+        lineSenderName: senderName,
+        lineSenderAvatar: senderAvatar,
+        lineGroupId: groupId,
+        lineGroupName: groupName
+      };
 
       // Check allowedGroupNames filter if configured
       if (
         lineBotConfig.allowedGroupNames.length > 0 &&
         !lineBotConfig.allowedGroupNames.some(g => g.trim().toLowerCase() === groupName.trim().toLowerCase())
       ) {
+        inboxItem.status = 'ignored_non_bill';
+        inboxItem.isBillDocument = false;
+        inboxItem.nonBillReason = 'กลุ่มนี้ไม่ได้อยู่ในรายการกลุ่มที่อนุญาต';
+        await persistInboxItem(inboxItem);
         continue;
       }
 
@@ -2580,36 +2688,7 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         }
       }
 
-      // Step 3: QUEUE-FIRST SAFETY — Push into queue immediately BEFORE AI scan so zero bills are ever dropped!
-      // ID กฎ: LINE_{messageId} ตาม Blueprint — messageId ของ LINE เป็น unique key ป้องกัน duplicate อัตโนมัติ
-      const inboxItem: any = {
-        id: messageId ? `LINE_${messageId}` : `LINE_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`,
-        lineMessageId: messageId,
-        lineQuoteToken: quoteToken,
-        lineReplyToken: replyToken,
-        lineUserId: userId,
-        lineSenderName: senderName,
-        lineSenderAvatar: senderAvatar,
-        lineGroupId: groupId,
-        lineGroupName: groupName, // Stored strictly separate from col2 Project Name!
-        receivedAt,
-        image: base64DataUrl,
-        status: 'queued',
-        detectedDocType: 'delivery_order',
-        extractedData: {
-          col2: '', // Project Name left empty for mandatory verifier input
-          lineSenderName: senderName,
-          lineGroupName: groupName,
-          lineReceivedAt: receivedAt
-        },
-        rawAiSnapshot: {},
-        isBillDocument: true
-      };
-
-      lineWebhookInboxQueue.unshift(inboxItem);
-      if (lineWebhookInboxQueue.length > MAX_WEBHOOK_QUEUE_SIZE) {
-        lineWebhookInboxQueue.pop();
-      }
+      inboxItem.image = base64DataUrl;
 
       if (!base64DataUrl) {
         inboxItem.status = 'scan_failed';
@@ -2618,6 +2697,12 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           senderName,
           scanFailed: true
         });
+        inboxItem.botReplyAttempted = true;
+        inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, inboxItem.botReplyText);
+        inboxItem.botReplyError = inboxItem.botReplySent
+          ? undefined
+          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
+        await persistInboxItem(inboxItem);
         continue;
       }
 
@@ -2645,6 +2730,7 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         if (!analysis.isBillDocument && lineBotConfig.filterNonBillImages) {
           inboxItem.status = 'ignored_non_bill';
           inboxItem.botReplyText = '🤫 (ข้ามการตอบกลับ: AI ตรวจพบว่าเป็นภาพถ่ายทั่วไป ไม่ใช่เอกสารบิล)';
+          await persistInboxItem(inboxItem);
           continue;
         }
 
@@ -2667,7 +2753,11 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         });
 
         inboxItem.botReplyText = replyText;
+        inboxItem.botReplyAttempted = true;
         inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, replyText);
+        inboxItem.botReplyError = inboxItem.botReplySent
+          ? undefined
+          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
         if (!billNo) {
           console.log(`[LINE Webhook] Unreadable bill saved as scan_failed (collect-first mode). messageId=${messageId}, sender=${senderName}`);
         }
@@ -2680,7 +2770,11 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           scanFailed: true
         });
         inboxItem.botReplyText = fallbackReply;
+        inboxItem.botReplyAttempted = true;
         inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, fallbackReply);
+        inboxItem.botReplyError = inboxItem.botReplySent
+          ? undefined
+          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
       }
 
       // Step 5: Upload to Google Drive ZONE_00 BEFORE saving to Supabase
@@ -2737,19 +2831,13 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         }
       }
 
-      // Step 6: Persist to Supabase (Drive link only, NO base64 image)
-      try {
-        const client = getSupabaseClient();
-        if (client) {
-          const { error } = await client.from('line_inbox').upsert(mapLineInboxToSupabase(inboxItem), { onConflict: 'id' });
-          if (error) throw new Error(`บันทึกรายการ LINE ${inboxItem.id} ลง Supabase ไม่สำเร็จ: ${error.message}`);
-        }
-      } catch (dbErr) {
-        console.warn('[LINE Webhook] Failed to auto-save inboxItem to Supabase line_inbox table:', dbErr);
-      }
+      await persistInboxItem(inboxItem);
     }
   } catch (err) {
     console.error('LINE Webhook handler error:', err);
+    if (!res.headersSent) {
+      return res.status(503).json({ status: 'error', error: 'ระบบรับข้อมูล LINE ไม่สำเร็จ กรุณาลองส่งใหม่อีกครั้ง' });
+    }
   }
 });
 

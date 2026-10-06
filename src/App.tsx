@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Header, SidebarNav, MainTabType } from './components/Header';
 import { StatSummaryCards } from './components/StatSummaryCards';
 import { TableView39Cols } from './components/TableView39Cols';
@@ -443,21 +443,42 @@ export default function App() {
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
+  const lastDbSyncWarningRef = useRef(0);
 
   const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
     if (saveDbTimerRef.current[table]) {
       clearTimeout(saveDbTimerRef.current[table]);
     }
     saveDbTimerRef.current[table] = setTimeout(async () => {
-      try {
-        await fetch('/api/database/save-batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ table, records })
-        });
-      } catch (err) {
-        console.warn(`[DB Sync] Failed to sync ${table} to Supabase:`, err);
-      }
+      const saveBatch = async (attempt: number): Promise<void> => {
+        try {
+          const response = await fetch('/api/database/save-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ table, records })
+          });
+          const result = await response.json();
+          if (!response.ok || !result?.success) {
+            throw new Error(result?.error || `HTTP ${response.status}`);
+          }
+        } catch (err) {
+          if (attempt < 2) {
+            window.setTimeout(() => void saveBatch(attempt + 1), 1000 * (attempt + 1));
+            return;
+          }
+          console.error(`[DB Sync] Failed to sync ${table} to Supabase after retries:`, err);
+          if (Date.now() - lastDbSyncWarningRef.current >= 60_000) {
+            lastDbSyncWarningRef.current = Date.now();
+            setToast({
+              message: `บันทึกข้อมูล ${table} ลงฐานข้อมูลไม่สำเร็จ กรุณารอให้ระบบเชื่อมต่อแล้วลองอีกครั้ง`,
+              type: 'info'
+            });
+            window.setTimeout(() => setToast(null), 3200);
+          }
+        }
+      };
+
+      void saveBatch(0);
     }, 1200);
   }, []);
 
@@ -523,17 +544,36 @@ export default function App() {
   }, [dismissedNotifIds]);
 
   // Real-Time Multi-User Sync: Keep lineInbox strictly synced from Supabase Cloud so all users see identical bills
+  const lastInboxSyncWarningRef = useRef(0);
   const syncWebhookQueueToLocal = React.useCallback(async () => {
+    const warnOnce = (message: string) => {
+      if (Date.now() - lastInboxSyncWarningRef.current < 60_000) return;
+      lastInboxSyncWarningRef.current = Date.now();
+      setToast({ message, type: 'info' });
+      window.setTimeout(() => setToast(null), 3200);
+    };
+
     try {
       const resp = await fetch('/api/line/inbox');
-      if (!resp.ok) return;
       const data = await resp.json();
-      const incoming: LineBillInboxItem[] = Array.isArray(data?.items) ? data.items : [];
-      if (incoming.length > 0) {
-        setLineInbox(incoming);
+      if (!resp.ok || !data?.success) {
+        warnOnce(data?.error || 'โหลดกล่องพัก LINE จากฐานข้อมูลไม่สำเร็จ');
+        return;
       }
-    } catch {
-      // ignore background poll error
+      const incoming: LineBillInboxItem[] = Array.isArray(data?.items) ? data.items : [];
+      setLineInbox(current => {
+        const unchanged = current.length === incoming.length && current.every((item, index) => {
+          const nextItem = incoming[index];
+          return nextItem &&
+            item.id === nextItem.id &&
+            JSON.stringify({ ...item, image: '', lineReplyToken: undefined }) ===
+              JSON.stringify({ ...nextItem, image: '', lineReplyToken: undefined });
+        });
+        return unchanged ? current : incoming;
+      });
+    } catch (err: any) {
+      console.warn('[LINE Inbox] Failed to refresh from server:', err);
+      warnOnce('เชื่อมต่อกล่องพัก LINE ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตหรือฐานข้อมูล');
     }
   }, []);
 
