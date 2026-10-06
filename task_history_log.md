@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Restore Saved Gemini Key Before PO Scanning
+
+### การเปลี่ยนแปลง
+- แก้ `/api/scan-po` ให้โหลด Gemini API Key จาก `system_config` ใน Supabase ก่อนสร้าง Gemini client เพื่อรองรับ config ที่หน้าตั้งค่าบันทึกไว้ แม้ instance จะไม่มีไฟล์ local หลัง redeploy หรือ cold start
+- เพิ่มการตรวจข้อผิดพลาดจากการอ่าน config โดยตรง; ไม่แสดง key ใน log หรือ response
+
+### การตรวจสอบ
+- ตรวจ `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- ยังต้องทดสอบสแกน PO บน production หลัง deploy
+
 ## [2026-10-06] Extend PO Scan Timeout Without Changing Other OCR Flows
 
 ### การเปลี่ยนแปลง

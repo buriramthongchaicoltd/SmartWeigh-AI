@@ -1271,6 +1271,7 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
       });
     }
 
+    await restoreGeminiConfigFromSupabase();
     const ai = getGeminiClient();
 
     if (!ai) {
@@ -2907,6 +2908,22 @@ async function persistConfigToSupabase(key: string, value: any) {
     console.log(`[Config Persistence] Synced '${key}' to Supabase system_config ✅`);
   } catch (err: any) {
     console.warn(`[Config Persistence] Could not sync '${key}' to Supabase:`, err?.message);
+  }
+}
+
+async function restoreGeminiConfigFromSupabase() {
+  const client = getSupabaseClient();
+  if (!client) return;
+
+  const { data, error } = await client.from('system_config')
+    .select('config_value')
+    .eq('config_key', 'gemini_config')
+    .maybeSingle();
+  if (error) {
+    throw new Error(`โหลดการตั้งค่า Gemini จาก Supabase ไม่สำเร็จ: ${error.message}`);
+  }
+  if (data?.config_value?.geminiApiKey) {
+    saveSystemConfig(data.config_value);
   }
 }
 
