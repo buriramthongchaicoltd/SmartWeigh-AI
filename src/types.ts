@@ -11,6 +11,8 @@ export type DocumentType =
   | 'purchase_order'    // ใบสั่งซื้อสินค้า (PO)
   | 'full_logistics';   // โลจิสติกส์ 39 คอลัมน์เต็มรูปแบบ
 
+export type DocumentIssuerRole = 'supplier_issued' | 'buyer_company_issued' | 'uncertain';
+
 export interface OrderItemDetail {
   id?: string;
   itemDescription: string;
@@ -27,6 +29,12 @@ export interface OrderRecord {
   documentTitle?: string;        // ชื่อเอกสารที่ OCR อ่านจากหัว/ป้ายบนภาพ
   docTypeEvidence?: string;      // หลักฐานจากภาพที่ใช้ประกอบการจำแนกประเภท
   docTypeConfidence?: number;    // ความมั่นใจในการจำแนกประเภท 0-100
+  documentIssuerRole?: DocumentIssuerRole;
+  documentIssuerName?: string;
+  supplierName?: string;
+  buyerName?: string;
+  partyRoleEvidence?: string;
+  partyRoleConfidence?: number;
   lineItems?: OrderItemDetail[];
   referenceDocNo?: string;     // เลขที่เอกสารอ้างอิง เช่น เลข DO ที่ตั๋วชั่งอ้างถึง หรือ เลข PO
   referenceSource?: 'form_field' | 'notes' | 'handwritten'; // แหล่งที่พบ: ในช่องฟอร์ม, ในช่องหมายเหตุ, หรือลายมือเขียน
@@ -245,6 +253,11 @@ export interface PurchaseOrder {
   storeId?: string;               // รหัสร้านค้า
   storeName: string;              // ชื่อผู้จำหน่าย / ร้านค้า
   supplierName?: string;
+  buyerName?: string;
+  documentIssuerName?: string;
+  documentIssuerRole?: DocumentIssuerRole;
+  partyRoleEvidence?: string;
+  partyRoleConfidence?: number;
   category: string;               // หมวดหมู่วัสดุ
   items: POItem[];                // รายการสินค้าที่สั่ง
   totalQty: number;               // ปริมาณรวมที่สั่ง

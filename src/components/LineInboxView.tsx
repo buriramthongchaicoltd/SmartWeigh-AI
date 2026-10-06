@@ -163,6 +163,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     verifiedRowsStillInZone00: Array<{ id: string; drive_file_id?: string; doc_number?: string }>;
   } | null>(null);
   const [selectedOrphanIds, setSelectedOrphanIds] = useState<Set<string>>(new Set());
+  const [isQuarantineConfirmationOpen, setIsQuarantineConfirmationOpen] = useState(false);
   const [quarantiningIds, setQuarantiningIds] = useState<Set<string>>(new Set());
   const cancelQuarantineRequested = useRef(false);
   const [isCancellingQuarantine, setIsCancellingQuarantine] = useState(false);
@@ -209,11 +210,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const handleQuarantineSelected = async () => {
     const selectedFiles = driveAudit?.orphanFiles.filter(file => selectedOrphanIds.has(file.id)) || [];
     if (selectedFiles.length === 0) return;
-    if (!window.confirm(`ย้ายรูป ${selectedFiles.length} รายการที่เลือกไปโฟลเดอร์กักกัน 99 หรือไม่? ไฟล์จะไม่ถูกลบถาวร`)) return;
 
     const completed = new Set<string>();
     const failed: string[] = [];
     let cancelled = false;
+    setIsQuarantineConfirmationOpen(false);
     cancelQuarantineRequested.current = false;
     setIsCancellingQuarantine(false);
     setQuarantiningIds(new Set(selectedFiles.map(file => file.id)));
@@ -875,7 +876,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={handleQuarantineSelected}
+                    onClick={() => setIsQuarantineConfirmationOpen(true)}
                     disabled={selectedOrphanIds.size === 0 || quarantiningIds.size > 0}
                     className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
                   >
@@ -894,13 +895,41 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                     </button>
                   )}
                 </div>
+                {isQuarantineConfirmationOpen && (
+                  <div
+                    className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3"
+                    role="group"
+                    aria-label="ยืนยันการย้ายไฟล์ไปถังกักกัน"
+                  >
+                    <p className="text-xs text-amber-950">
+                      ยืนยันย้ายรูป {selectedOrphanIds.size} รายการไปโฟลเดอร์กักกัน 99? ไฟล์จะไม่ถูกลบถาวร
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsQuarantineConfirmationOpen(false)}
+                        className="min-h-9 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        ยกเลิก
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleQuarantineSelected}
+                        disabled={selectedOrphanIds.size === 0}
+                        className="min-h-9 rounded-lg bg-amber-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        ยืนยันย้าย
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <ul className="mt-3 max-h-64 divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200">
                   {driveAudit.orphanFiles.map(file => (
                     <li key={file.id} className="flex items-center gap-3 px-3 py-2">
                       <input
                         type="checkbox"
                         checked={selectedOrphanIds.has(file.id)}
-                        disabled={quarantiningIds.has(file.id)}
+                        disabled={quarantiningIds.has(file.id) || isQuarantineConfirmationOpen}
                         onChange={event => setSelectedOrphanIds(current => {
                           const next = new Set(current);
                           if (event.target.checked) next.add(file.id);

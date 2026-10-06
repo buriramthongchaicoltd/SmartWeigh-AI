@@ -54,8 +54,7 @@ type AuthenticatedAppUser = {
 const AUTH_COOKIE_NAME = 'smartweigh_session';
 const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SYSTEM_MASTER_USERNAME = 'Admin';
-const SYSTEM_MASTER_INITIAL_PASSWORD = '@Admin';
-const SYSTEM_MASTER_LEGACY_PASSWORD = '123456';
+const SYSTEM_MASTER_INITIAL_PASSWORD = (process.env.SYSTEM_MASTER_ADMIN_PASSWORD || '').trim();
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
 const authSessions = new Map<string, { user: AuthenticatedAppUser; expiresAt: number }>();
 const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
@@ -158,6 +157,15 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       String(user.id) === 'SYSTEM-MASTER-ADMIN' || String(user.username || '').trim().toLowerCase() === SYSTEM_MASTER_USERNAME.toLowerCase()
     );
     if (!hasMasterAccount) {
+      if (SYSTEM_MASTER_INITIAL_PASSWORD.length < 16) {
+        return res.status(503).json({
+          success: false,
+          error: 'ยังไม่ได้ตั้งค่ารหัสผ่านเริ่มต้น Master Admin ที่ปลอดภัยใน SYSTEM_MASTER_ADMIN_PASSWORD'
+        });
+      }
+      if (password !== SYSTEM_MASTER_INITIAL_PASSWORD) {
+        return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+      }
       const { error: seedError } = await client.from('app_users').upsert({
         id: 'SYSTEM-MASTER-ADMIN',
         username: SYSTEM_MASTER_USERNAME,
@@ -180,20 +188,22 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
     const isSystemMaster = row.id === 'SYSTEM-MASTER-ADMIN';
     let checked = verifyPassword(password, row.password);
-    if (isSystemMaster && password === SYSTEM_MASTER_LEGACY_PASSWORD) {
-      return res.status(401).json({ success: false, error: 'รหัสผ่าน Master Admin เปลี่ยนแล้ว กรุณาใช้รหัสใหม่' });
+    if (
+      isSystemMaster &&
+      SYSTEM_MASTER_INITIAL_PASSWORD.length >= 16 &&
+      password === SYSTEM_MASTER_INITIAL_PASSWORD &&
+      !checked.valid
+    ) {
+      const upgradedPassword = hashPassword(SYSTEM_MASTER_INITIAL_PASSWORD);
+      const { error: upgradeError } = await client.from('app_users')
+        .update({ password: upgradedPassword })
+        .eq('id', row.id);
+      if (upgradeError) throw upgradeError;
+      row.password = upgradedPassword;
+      checked = { valid: true, needsUpgrade: false };
     }
-    if (isSystemMaster && password === SYSTEM_MASTER_INITIAL_PASSWORD && !checked.valid) {
-      const legacyCheck = verifyPassword(SYSTEM_MASTER_LEGACY_PASSWORD, row.password);
-      if (legacyCheck.valid) {
-        const upgradedPassword = hashPassword(SYSTEM_MASTER_INITIAL_PASSWORD);
-        const { error: upgradeError } = await client.from('app_users')
-          .update({ password: upgradedPassword })
-          .eq('id', row.id);
-        if (upgradeError) throw upgradeError;
-        row.password = upgradedPassword;
-        checked = { valid: true, needsUpgrade: false };
-      }
+    if (isSystemMaster && checked.valid && (password === '@Admin' || password === '123456')) {
+      return res.status(401).json({ success: false, error: 'รหัสผ่านเริ่มต้นไม่ปลอดภัย กรุณาตั้งค่า SYSTEM_MASTER_ADMIN_PASSWORD และใช้รหัสใหม่' });
     }
     if (!checked.valid) return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
     if (checked.needsUpgrade) {
@@ -261,8 +271,66 @@ app.use('/api', (req: Request, res: Response, next) => {
   if ((adminOnlyPaths.has(req.path) || isUserManagementWrite) && user.role !== 'admin') {
     return res.status(403).json({ success: false, error: 'ต้องใช้บัญชี Admin เพื่อทำรายการนี้' });
   }
+  const managerOnlyPaths = new Set([
+    '/database/delete-record',
+    '/drive/cleanup-file',
+    '/drive/rename-and-move',
+    '/drive/sync-verified-move',
+    '/drive/quarantine-line-inbox-orphan',
+    '/drive/delete-line-inbox-file'
+  ]);
+  if (managerOnlyPaths.has(req.path) && user.role === 'user') {
+    return res.status(403).json({ success: false, error: 'ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อทำรายการนี้' });
+  }
+  const writeTable = req.body?.table;
+  const isDatabaseWrite = ['/database/save-record', '/database/save-batch'].includes(req.path);
+  const userWritableTables = new Set(['orders', 'line_inbox', 'stores', 'projects']);
+  if (user.role === 'user' && isDatabaseWrite && !userWritableTables.has(writeTable)) {
+    return res.status(403).json({ success: false, error: 'บัญชีของคุณไม่มีสิทธิ์แก้ไขข้อมูลตารางนี้' });
+  }
   return next();
 });
+
+const RESTRICTED_ORDER_FIELDS = [
+  'col5',
+  ...Array.from({ length: 15 }, (_, index) => `col${index + 22}`),
+  'billing_status',
+  'billing_note_id'
+];
+
+const NEW_ORDER_RESTRICTED_DEFAULTS: Record<string, string | number | null> = {
+  col5: '',
+  ...Object.fromEntries(Array.from({ length: 15 }, (_, index) => [`col${index + 22}`, 0])),
+  billing_status: 'UNBILLED',
+  billing_note_id: null
+};
+
+async function preserveRestrictedOrderFields(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  user: AuthenticatedAppUser,
+  rows: Record<string, any>[]
+): Promise<void> {
+  if (user.role !== 'user' || rows.length === 0) return;
+
+  type RestrictedOrderSnapshot = { id: string } & Record<string, string | number | null>;
+  const existingRows = new Map<string, RestrictedOrderSnapshot>();
+  const fields = ['id', ...RESTRICTED_ORDER_FIELDS].join(',');
+  for (let index = 0; index < rows.length; index += 500) {
+    const ids = rows.slice(index, index + 500).map(row => row.id).filter(Boolean);
+    if (ids.length === 0) continue;
+    const { data, error } = await client.from('orders').select(fields).in('id', ids);
+    if (error) throw error;
+    const selectedRows = (data || []) as unknown as RestrictedOrderSnapshot[];
+    for (const row of selectedRows) existingRows.set(String(row.id), row);
+  }
+
+  for (const row of rows) {
+    const existing = existingRows.get(String(row.id));
+    for (const field of RESTRICTED_ORDER_FIELDS) {
+      row[field] = existing ? existing[field] : NEW_ORDER_RESTRICTED_DEFAULTS[field];
+    }
+  }
+}
 
 // In-memory rate limiting to prevent Denial-of-Service and Gemini API quota exhaustion
 const scanRateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -383,6 +451,10 @@ const OCR_DOCUMENT_TYPES: DocumentType[] = [
 
 const SHARED_OCR_POLICY = `มาตรฐาน OCR กลางของระบบ (ใช้กับทุกช่องทาง):
 - อ่านและส่งคืน documentTitle ตามชื่อ/หัวเอกสารที่เห็นจริง และ docTypeEvidence เป็นข้อความสั้นๆ ที่ยกหลักฐานจากภาพมาอธิบายประเภทที่เลือก
+- แยกบทบาทคู่ค้าออกจากประเภทเอกสารเสมอ: ส่ง supplierName (ผู้ขาย/ผู้จำหน่าย), buyerName (ผู้ซื้อ/ผู้รับสินค้า) และ documentIssuerName (ผู้ออกเอกสาร) คนละฟิลด์ พร้อม documentIssuerRole เป็น supplier_issued, buyer_company_issued หรือ uncertain, partyRoleEvidence ยกป้ายชื่อช่อง/ข้อความจริง และ partyRoleConfidence 0–100
+- PO เป็นเอกสารที่ผู้ซื้อ/บริษัทผู้ออก PO ออกให้ผู้ขาย: ชื่อหัวกระดาษ/โลโก้/ผู้อนุมัติ/ผู้สั่งซื้อห้ามนำไปใส่ supplierName หรือชื่อร้านค้า; supplierName ใช้ได้เฉพาะชื่อที่อยู่ในช่องผู้ขาย/ผู้จำหน่าย/Vendor/ผู้รับเงินซึ่งมีหลักฐานชัด
+- ใบส่งของ/ใบกำกับภาษีที่ผู้ขายเป็นผู้ออก ให้ระบุ supplier_issued เฉพาะเมื่อหลักฐานบนเอกสารสนับสนุน; ตั๋วชั่งปลายทางหรือเอกสารบริษัทเราให้ระบุ buyer_company_issued เมื่อมีหลักฐาน; หากระบุบทบาทไม่ได้หรือหลักฐานขัดกันให้ใช้ uncertain และเว้น supplierName ว่าง ห้ามเดาจากชื่อบริษัท โลโก้ หรือชื่อกลุ่ม LINE
+- ห้ามคัดลอก documentIssuerName หรือ buyerName ลง supplierName/storeName; storeName เป็นชื่อผู้ขายเท่านั้น และต้องตรงกับ supplierName ที่อ่านได้
 - จัดประเภทตามลำดับหลักฐาน: (1) ชื่อเอกสารที่พิมพ์บนเอกสาร (2) ป้ายชื่อช่องและรูปแบบฟอร์ม (3) เนื้อหา/รายการในเอกสาร แล้วจึงใช้คำอธิบายประเภทด้านล่างช่วยแยกกรณีที่ยังคล้ายกัน; ห้ามใช้ชนิดสินค้า หรือตัวเลข Gross/Tare/Net เพียงอย่างเดียวตัดสินประเภท
 - ถ้าเอกสารพิมพ์ว่า ใบส่งสินค้า/ใบส่งของ/Delivery Note/Delivery Receipt ให้เป็น delivery_order แม้มีตารางน้ำหนักหรือ Gross/Tare/Net; อ่านน้ำหนักจากเอกสารลงช่องต้นทางด้วย
 - เลือก weighbridge เมื่อชื่อ/ป้ายบนเอกสารระบุชัดว่าเป็นใบชั่งหรือตั๋วชั่ง และรูปแบบเอกสารสนับสนุนการจัดประเภทนั้น ไม่ใช่เพียงเพราะมีตัวเลขน้ำหนัก
@@ -425,6 +497,52 @@ function normalizeOcrDocumentNumber(rawDoc?: string, rawBook?: string): string {
 
 function normalizeOcrDocumentType(value: unknown, fallback: DocumentType = 'delivery_order'): DocumentType {
   return OCR_DOCUMENT_TYPES.find(type => type === value) || fallback;
+}
+
+function normalizeOcrPartyFields(data: Record<string, any>): Record<string, any> {
+  const allowedIssuerRoles = ['supplier_issued', 'buyer_company_issued', 'uncertain'];
+  const issuerRole = allowedIssuerRoles.includes(data.documentIssuerRole)
+    ? data.documentIssuerRole
+    : 'uncertain';
+  const confidence = Math.max(0, Math.min(100, Number(data.partyRoleConfidence) || 0));
+  const partyRoleEvidence = String(data.partyRoleEvidence || '').trim();
+  const buyerName = String(data.buyerName || '').trim();
+  const supplierCandidate = String(data.supplierName || '').trim();
+  const hasConflictingPartyNames = Boolean(
+    supplierCandidate &&
+    (
+      isInternalBuyerCompanyName(supplierCandidate) ||
+      (buyerName && normalizeOcrPartyName(supplierCandidate) === normalizeOcrPartyName(buyerName))
+    )
+  );
+  const supplierName = issuerRole !== 'uncertain' &&
+    confidence >= 70 &&
+    partyRoleEvidence.length > 0 &&
+    !hasConflictingPartyNames
+    ? supplierCandidate
+    : '';
+  const storeSuggestion = data.storeSuggestion && typeof data.storeSuggestion === 'object'
+    ? { ...data.storeSuggestion }
+    : undefined;
+
+  data.documentIssuerRole = issuerRole;
+  data.documentIssuerName = String(data.documentIssuerName || '').trim();
+  data.supplierName = supplierName;
+  data.storeName = supplierName;
+  data.buyerName = buyerName;
+  data.partyRoleEvidence = partyRoleEvidence;
+  data.partyRoleConfidence = confidence;
+  if (Object.prototype.hasOwnProperty.call(data, 'col8')) data.col8 = supplierName;
+  if (storeSuggestion) {
+    storeSuggestion.name = supplierName;
+    if (!supplierName) {
+      storeSuggestion.taxId = '';
+      storeSuggestion.phone = '';
+      storeSuggestion.address = '';
+    }
+    data.storeSuggestion = storeSuggestion;
+  }
+  return data;
 }
 
 function getLineInboxPrimaryDocumentNumber(
@@ -830,6 +948,16 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
               type: Type.NUMBER,
               description: "ความมั่นใจในการจำแนกประเภทจากชื่อและหลักฐานบนเอกสาร 0-100 ไม่ใช่ความมั่นใจอ่านเลขที่"
             },
+            documentIssuerRole: {
+              type: Type.STRING,
+              enum: ['supplier_issued', 'buyer_company_issued', 'uncertain'],
+              description: "บทบาทผู้ออกเอกสารที่มีหลักฐาน: supplier_issued, buyer_company_issued หรือ uncertain"
+            },
+            documentIssuerName: { type: Type.STRING, description: "ชื่อผู้ออกเอกสารตามหลักฐานบนภาพ" },
+            supplierName: { type: Type.STRING, description: "ชื่อผู้ขาย/ผู้จำหน่ายจากช่อง Vendor/ผู้ขาย/ผู้รับเงินเท่านั้น; หากไม่ชัดให้เว้นว่าง" },
+            buyerName: { type: Type.STRING, description: "ชื่อผู้ซื้อ/ผู้รับสินค้า/บริษัทผู้สั่งซื้อ จากช่องที่ระบุบทบาทจริง" },
+            partyRoleEvidence: { type: Type.STRING, description: "ข้อความหรือป้ายช่องบนภาพที่บอกบทบาทผู้ขาย/ผู้ซื้อ/ผู้ออกเอกสาร" },
+            partyRoleConfidence: { type: Type.NUMBER, description: "ความมั่นใจในการแยกบทบาทผู้ขาย/ผู้ซื้อจากหลักฐาน 0-100" },
             referenceDocNo: {
               type: Type.STRING,
               description: "เลขที่เอกสารอ้างอิง เช่น ตั๋วชั่งอ้างถึง DO เลขอะไร หรือ DO อ้างถึง PO เลขอะไร (ตรวจหาจากฟอร์มพิมพ์, ช่องหมายเหตุ หรือที่เขียนด้วยลายมือ)"
@@ -943,18 +1071,7 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
     parsedData.documentTitle = (parsedData.documentTitle || '').toString().trim();
     parsedData.docTypeEvidence = (parsedData.docTypeEvidence || '').toString().trim();
     parsedData.docTypeConfidence = Math.max(0, Math.min(100, Number(parsedData.docTypeConfidence) || 0));
-
-    if (
-      parsedData.docType === 'purchase_order' &&
-      parsedData.col8 &&
-      (
-        isInternalBuyerCompanyName(parsedData.col8) ||
-        (parsedData.col9 && normalizeOcrPartyName(parsedData.col8) === normalizeOcrPartyName(parsedData.col9))
-      )
-    ) {
-      parsedData.col8 = '';
-      if (parsedData.storeSuggestion) parsedData.storeSuggestion.name = '';
-    }
+    normalizeOcrPartyFields(parsedData);
 
     // Capture rawAiSnapshot BEFORE clearing Zone 3 or Zone 4 so switching docType in VerifyModal never loses scale weights
     const rawGrossSnapshot = Number(parsedData.col13) || Number(parsedData.col18) || 0;
@@ -970,6 +1087,12 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
       documentTitle: parsedData.documentTitle,
       docTypeEvidence: parsedData.docTypeEvidence,
       docTypeConfidence: parsedData.docTypeConfidence,
+      documentIssuerRole: parsedData.documentIssuerRole,
+      documentIssuerName: parsedData.documentIssuerName,
+      supplierName: parsedData.supplierName,
+      buyerName: parsedData.buyerName,
+      partyRoleEvidence: parsedData.partyRoleEvidence,
+      partyRoleConfidence: parsedData.partyRoleConfidence,
       rawDocNo: parsedData.col17 || parsedData.col6 || '',
       rawRefPoNo: parsedData.col4 || '',
       rawRefDoNo: parsedData.referenceDocNo || '',
@@ -1162,21 +1285,23 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
 4. deliveryDueDate: กำหนดส่งมอบของ (รูปแบบ YYYY-MM-DD หากมี)
 5. projectId: ชื่อโครงการ หรือหน่วยงานที่สั่งซื้อ
 6. storeName: ชื่อผู้ขาย/ผู้จำหน่ายที่ระบุชัดในเอกสารเท่านั้น; ชื่อบริษัท/โลโก้หัวกระดาษคือ Buyer/Issuer ไม่ใช่ผู้ขาย ห้ามคัดลอกมาใส่ storeName
-7. buyerName: ชื่อผู้ซื้อหรือบริษัทผู้ออก PO จากช่อง Buyer/ผู้ซื้อ (หากมี); ถ้าแยกผู้ขายไม่ได้ให้เว้น storeName ว่าง ห้ามเดาจากหัวกระดาษ
-8. category: หมวดหมู่วัสดุ (เช่น งานหิน/ทราย, งานเหล็ก, งานคอนกรีต, วัสดุก่อสร้างทั่วไป)
-9. items: รายการสินค้าในตารางสั่งซื้อ (เฉพาะตัวสินค้า/วัสดุจริงที่มีการสั่งซื้อเท่านั้น) ประกอบด้วย:
+7. supplierName: ชื่อเดียวกับ storeName เฉพาะเมื่อพบชื่อในช่อง Vendor/ผู้ขาย/ผู้จำหน่าย/ผู้รับเงินอย่างชัดเจน; หากแยกไม่ได้ให้เว้นทั้งคู่
+8. buyerName: ชื่อผู้ซื้อ/บริษัทผู้ออก PO จากช่อง Buyer/ผู้ซื้อ (หากมี); documentIssuerName คือชื่อผู้ออกเอกสาร และ documentIssuerRole ต้องเป็น buyer_company_issued สำหรับ PO
+9. partyRoleEvidence: ข้อความหรือป้ายช่องที่ใช้แยกผู้ขายจากผู้ซื้อ; partyRoleConfidence ให้คะแนนความมั่นใจ 0-100 หากไม่มีหลักฐานให้ 0 และอย่าเดาชื่อผู้ขายจากหัวกระดาษ
+10. category: หมวดหมู่วัสดุ (เช่น งานหิน/ทราย, งานเหล็ก, งานคอนกรีต, วัสดุก่อสร้างทั่วไป)
+11. items: รายการสินค้าในตารางสั่งซื้อ (เฉพาะตัวสินค้า/วัสดุจริงที่มีการสั่งซื้อเท่านั้น) ประกอบด้วย:
    - itemDescription: ชื่อรายการสินค้า/วัสดุเพียวๆ เท่านั้น (เช่น "หินคลุก", "ทรายหยาบ", "ปูนซีเมนต์ปอร์ตแลนด์", "เหล็กข้ออ้อย DB16") **กฎเหล็กสำคัญมาก: ในใบสั่งซื้อ (PO) มักมีการเขียนหมายเหตุ เงื่อนไขการส่ง สถานที่จัดส่ง ชื่อผู้ติดต่อ เบอร์โทร หรือเงื่อนไขราคา ไว้ในบรรทัดว่างของตารางสินค้า หรือเขียนต่อท้ายชื่อสินค้า ห้ามนำข้อความหมายเหตุเหล่านั้นมารวมไว้ใน itemDescription หรือสร้างเป็นแถวสินค้าใน items เด็ดขาด! ให้แยกเฉพาะชื่อสินค้าไว้ใน itemDescription และย้ายข้อความหมายเหตุ/เงื่อนไขทั้งหมดไปใส่ในช่อง notes หรือ deliveryLocation เสมอ**
    - specCode: สเปก หรือรหัสสินค้า
    - orderedQty: ปริมาณที่สั่งซื้อ (ตัวเลข)
    - unit: หน่วยนับ (เช่น ตัน, คิว, เส้น, แผ่น, ชุด)
    - unitPrice: ราคาต่อหน่วย (บาท)
    - totalAmount: ยอดเงินตามที่พิมพ์/เขียนไว้ในแถวนั้นเท่านั้น; ห้ามคำนวณแทนค่าที่อ่านไม่ชัด
-10. totalAmount: ยอดเงินรวมทั้งสิ้นตามที่พิมพ์/เขียนไว้ในเอกสารเท่านั้น
-11. creditTerms: เงื่อนไขการชำระเงิน (เช่น เครดิต 30 วัน, เงินสด, โอนเงิน)
-12. deliveryLocation: สถานที่จัดส่งสินค้า / ไซต์งาน
-13. orderedBy: ผู้เปิดใบสั่งซื้อ / ผู้สั่ง
-14. approvedBy: ผู้อนุมัติใบสั่งซื้อ
-15. notes: เงื่อนไขหรือหมายเหตุเพิ่มเติม (รวมถึงข้อความหมายเหตุที่เขียนแทรกอยู่ในตารางรายการสินค้าด้วย)`;
+12. totalAmount: ยอดเงินรวมทั้งสิ้นตามที่พิมพ์/เขียนไว้ในเอกสารเท่านั้น
+13. creditTerms: เงื่อนไขการชำระเงิน (เช่น เครดิต 30 วัน, เงินสด, โอนเงิน)
+14. deliveryLocation: สถานที่จัดส่งสินค้า / ไซต์งาน
+15. orderedBy: ผู้เปิดใบสั่งซื้อ / ผู้สั่ง
+16. approvedBy: ผู้อนุมัติใบสั่งซื้อ
+17. notes: เงื่อนไขหรือหมายเหตุเพิ่มเติม (รวมถึงข้อความหมายเหตุที่เขียนแทรกอยู่ในตารางรายการสินค้าด้วย)`;
 
     const { data: parsedPO, usedModel } = await requestOcrWithSharedPolicy(ai, {
       contents: {
@@ -1202,8 +1327,13 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
             orderDate: { type: Type.STRING, description: "วันที่สั่งซื้อ YYYY-MM-DD" },
             deliveryDueDate: { type: Type.STRING, description: "กำหนดส่งมอบ" },
             projectId: { type: Type.STRING, description: "โครงการ" },
-            storeName: { type: Type.STRING, description: "ชื่อผู้ขาย/ผู้จำหน่ายเท่านั้น ห้ามใช้ชื่อ Buyer/ผู้ออก PO จากหัวกระดาษ" },
+            supplierName: { type: Type.STRING, description: "ชื่อผู้ขายจากช่อง Vendor/ผู้ขาย/ผู้รับเงินเท่านั้น; ห้ามใช้ Buyer/ผู้ออก PO" },
+            storeName: { type: Type.STRING, description: "ชื่อเดียวกับ supplierName; เว้นว่างหากระบุผู้ขายไม่ได้" },
             buyerName: { type: Type.STRING, description: "ชื่อผู้ซื้อ/ผู้ออก PO หากมีระบุชัด" },
+            documentIssuerName: { type: Type.STRING, description: "ชื่อผู้ออกเอกสาร/บริษัทที่อยู่หัวกระดาษ" },
+            documentIssuerRole: { type: Type.STRING, enum: ['supplier_issued', 'buyer_company_issued', 'uncertain'] },
+            partyRoleEvidence: { type: Type.STRING, description: "ข้อความ/ป้ายช่องที่ใช้แยกผู้ขาย ผู้ซื้อ และผู้ออกเอกสาร" },
+            partyRoleConfidence: { type: Type.NUMBER, description: "ความมั่นใจในการแยกบทบาทคู่ค้า 0-100" },
             category: { type: Type.STRING, description: "หมวดหมู่วัสดุ" },
             items: {
               type: Type.ARRAY,
@@ -1233,15 +1363,8 @@ app.post('/api/scan-po', rateLimitScan, async (req: Request, res: Response) => {
     if (parsedPO.bookNo || /เล่ม/i.test(parsedPO.poNumber || '')) {
       parsedPO.poNumber = normalizeOcrDocumentNumber(parsedPO.poNumber, parsedPO.bookNo);
     }
-    if (
-      parsedPO.storeName &&
-      (
-        isInternalBuyerCompanyName(parsedPO.storeName) ||
-        (parsedPO.buyerName && normalizeOcrPartyName(parsedPO.storeName) === normalizeOcrPartyName(parsedPO.buyerName))
-      )
-    ) {
-      parsedPO.storeName = '';
-    }
+    parsedPO.documentIssuerRole = 'buyer_company_issued';
+    normalizeOcrPartyFields(parsedPO);
     parsedPO.docType = 'purchase_order';
 
     // Sanitize items: Separate any remarks/notes mixed into item rows or appended to itemDescription
@@ -1689,8 +1812,13 @@ async function analyzeLineBillWithGemini(
           referenceDoNo: { type: Type.STRING, description: 'เลขที่ใบส่งของ (DO) ที่อ้างอิงในบิล (ถ้ามี)' },
           referenceSource: { type: Type.STRING, enum: ['form_field', 'notes', 'handwritten'] },
           docDate: { type: Type.STRING, description: 'วันที่ในเอกสาร YYYY-MM-DD' },
-          storeName: { type: Type.STRING, description: 'ชื่อร้านค้า / ผู้จำหน่าย / โรงโม่' },
-          buyerName: { type: Type.STRING, description: 'ชื่อผู้ซื้อ/บริษัทผู้ออก PO หากเอกสารเป็นใบสั่งซื้อ' },
+          supplierName: { type: Type.STRING, description: 'ชื่อผู้ขาย/ผู้จำหน่ายจากช่องที่ระบุชัดเท่านั้น ห้ามใช้ผู้ออกเอกสารหรือผู้ซื้อแทน' },
+          storeName: { type: Type.STRING, description: 'ชื่อเดียวกับ supplierName เท่านั้น; หากบทบาทผู้ขายไม่ชัดให้เว้นว่าง' },
+          buyerName: { type: Type.STRING, description: 'ชื่อผู้ซื้อ/ผู้รับสินค้า/ผู้สั่งซื้อจากช่องที่ระบุบทบาทจริง' },
+          documentIssuerName: { type: Type.STRING, description: 'ชื่อผู้ออกเอกสารตามหลักฐานบนภาพ' },
+          documentIssuerRole: { type: Type.STRING, enum: ['supplier_issued', 'buyer_company_issued', 'uncertain'] },
+          partyRoleEvidence: { type: Type.STRING, description: 'ข้อความ/ป้ายช่องที่พิสูจน์บทบาทคู่ค้า' },
+          partyRoleConfidence: { type: Type.NUMBER, description: 'ความมั่นใจในการแยกผู้ขายและผู้ซื้อ 0-100' },
           storeTaxId: { type: Type.STRING },
           storePhone: { type: Type.STRING },
           storeAddress: { type: Type.STRING },
@@ -1735,7 +1863,7 @@ async function analyzeLineBillWithGemini(
     }
   });
 
-  const raw = { ...initialRaw };
+  const raw = normalizeOcrPartyFields({ ...initialRaw });
   if (raw.isBillDocument === false) {
     return {
       isBillDocument: false,
@@ -1833,11 +1961,7 @@ async function analyzeLineBillWithGemini(
   const formattedDocNo = normalizeOcrDocumentNumber(raw.docNumber, raw.bookNo);
   const formattedDestDocNo = normalizeOcrDocumentNumber(raw.destDocNumber, raw.destBookNo);
   const rawBuyerName = (raw.buyerName || '').toString().trim();
-  const rawStoreCandidate = (raw.storeName || '').toString().trim();
-  const rawStoreName = detectedDocType === 'purchase_order' && (
-    isInternalBuyerCompanyName(rawStoreCandidate) ||
-    (rawBuyerName && normalizeOcrPartyName(rawStoreCandidate) === normalizeOcrPartyName(rawBuyerName))
-  ) ? '' : rawStoreCandidate;
+  const rawStoreName = (raw.supplierName || '').toString().trim();
 
   const rawBook = (raw.bookNo || '')
     .toString()
@@ -1868,6 +1992,12 @@ async function analyzeLineBillWithGemini(
     documentTitle,
     docTypeEvidence,
     docTypeConfidence,
+    documentIssuerRole: raw.documentIssuerRole,
+    documentIssuerName: raw.documentIssuerName,
+    supplierName: rawStoreName,
+    buyerName: rawBuyerName,
+    partyRoleEvidence: raw.partyRoleEvidence,
+    partyRoleConfidence: raw.partyRoleConfidence,
     rawDocNo: formattedDocNo,
     rawDocNoCandidate: initialDocNumber || '',
     rawBookNo: rawBook,
@@ -1911,6 +2041,12 @@ async function analyzeLineBillWithGemini(
     documentTitle,
     docTypeEvidence,
     docTypeConfidence,
+    documentIssuerRole: raw.documentIssuerRole,
+    documentIssuerName: raw.documentIssuerName,
+    supplierName: rawStoreName,
+    buyerName: rawBuyerName,
+    partyRoleEvidence: raw.partyRoleEvidence,
+    partyRoleConfidence: raw.partyRoleConfidence,
     col1: `TR-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
     col2: '', // STRICT RULE: Never auto-fill col2 from LINE Group Name! Verifier must select/input Project Name before saving.
     col3: rawAiSnapshot.rawCategory,
@@ -2700,21 +2836,17 @@ function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
     console.warn('[DB Config] Failed to read .supabase_config.json', err);
   }
 
-  // Default Project Supabase credentials (ฝังถาวร — ไม่ต้องกรอกใหม่ทุกครั้ง)
-  const DEFAULT_SUPABASE_URL         = 'https://bmytwcnjebrqpormoalh.supabase.co';
-  const DEFAULT_SUPABASE_ANON_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJteXR3Y25qZWJycXBvcm1vYWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5ODU1OTksImV4cCI6MjEwNjU2MTU5OX0.4hqvunADQ6oGDos22UPKewPjniIcq_mWLNVkTv2aoHA';
-  const DEFAULT_SUPABASE_SERVICE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJteXR3Y25qZWJycXBvcm1vYWxoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MDk4NTU5OSwiZXhwIjoyMTA2NTYxNTk5fQ.tnsTEIJSNkTpEN8jr4vq9Ney9Rze7dexz0zmsbzzDIE';
+    // Credentials are runtime-only secrets and must never be loaded from persisted config files.
+  const supabaseUrl = (process.env.SUPABASE_URL?.trim() || fileConfig.supabaseUrl?.trim() || '').trim();
+  const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+  const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const pgConnectionString = (process.env.DATABASE_URL || '').trim();
 
-  // Priority: UI file config > Environment Variable > Project Default (hardcoded)
-  const supabaseUrl            = (fileConfig.supabaseUrl?.trim()            || process.env.SUPABASE_URL              || DEFAULT_SUPABASE_URL).trim();
-  const supabaseAnonKey        = (fileConfig.supabaseAnonKey?.trim()        || process.env.SUPABASE_ANON_KEY         || DEFAULT_SUPABASE_ANON_KEY).trim();
-  const supabaseServiceRoleKey = (fileConfig.supabaseServiceRoleKey?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY || DEFAULT_SUPABASE_SERVICE_KEY).trim();
-  const pgConnectionString     = (fileConfig.pgConnectionString?.trim()     || process.env.DATABASE_URL              || '').trim();
-
-  // Detect config source for UI display and logging
-  const hasFileConfig = Boolean(fileConfig.supabaseUrl?.trim() || fileConfig.supabaseAnonKey?.trim());
-  const hasEnvConfig = Boolean(process.env.SUPABASE_URL || process.env.SUPABASE_ANON_KEY);
-  const configSource = hasFileConfig ? 'ui_config' : hasEnvConfig ? 'env_var' : 'none';
+  const configSource = process.env.SUPABASE_URL || process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? 'env_var'
+    : fileConfig.supabaseUrl?.trim()
+    ? 'ui_config'
+    : 'none';
 
   return {
     supabaseUrl,
@@ -2732,7 +2864,7 @@ function saveStoredDbConfig(cfg: Partial<ServerDbConfig>) {
   const current = getStoredDbConfig();
   const cleaned: Partial<ServerDbConfig> = {};
   for (const [k, v] of Object.entries(cfg)) {
-    if (v !== undefined && v !== '') {
+    if (!['supabaseAnonKey', 'supabaseServiceRoleKey', 'pgConnectionString'].includes(k) && v !== undefined && v !== '') {
       (cleaned as any)[k] = v;
     }
   }
@@ -2741,7 +2873,13 @@ function saveStoredDbConfig(cfg: Partial<ServerDbConfig>) {
     ...cleaned
   };
   try {
-    fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+    const {
+      supabaseAnonKey: _anonKey,
+      supabaseServiceRoleKey: _serviceRoleKey,
+      pgConnectionString: _connectionString,
+      ...persisted
+    } = merged;
+    fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(persisted, null, 2), 'utf-8');
   } catch (e) {
     console.warn('[DB Config] Failed to write .supabase_config.json', e);
   }
@@ -2776,6 +2914,14 @@ async function restoreConfigsFromSupabase() {
         saveSystemConfig(row.config_value);
       } else if (row.config_key === 'drive_config' && row.config_value) {
         saveStoredDriveConfig(row.config_value);
+        if (Object.prototype.hasOwnProperty.call(row.config_value, 'gasSharedSecret')) {
+          const sanitizedConfig = { ...row.config_value };
+          delete sanitizedConfig.gasSharedSecret;
+          const { error: sanitizeError } = await client.from('system_config')
+            .update({ config_value: sanitizedConfig })
+            .eq('config_key', 'drive_config');
+          if (sanitizeError) throw sanitizeError;
+        }
       } else if (row.config_key === 'line_bot_config' && row.config_value) {
         lineBotConfig = { ...lineBotConfig, ...row.config_value };
         try {
@@ -2790,9 +2936,14 @@ async function restoreConfigsFromSupabase() {
 }
 
 function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
-  const cfg = { ...getStoredDbConfig(), ...(customCfg || {}) };
+  const cfg = {
+    ...getStoredDbConfig(),
+    ...(customCfg || {}),
+    supabaseAnonKey: (process.env.SUPABASE_ANON_KEY || '').trim(),
+    supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+  };
   if (!cfg.supabaseUrl || !cfg.supabaseUrl.startsWith('http')) return null;
-  const key = cfg.supabaseServiceRoleKey || cfg.supabaseAnonKey;
+  const key = cfg.supabaseServiceRoleKey;
   if (!key) return null;
   return createClient(cfg.supabaseUrl, key, {
     auth: { persistSession: false }
@@ -2800,7 +2951,7 @@ function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
 }
 
 function getPgPool(customCfg?: Partial<ServerDbConfig>) {
-  const cfg = { ...getStoredDbConfig(), ...(customCfg || {}) };
+  const cfg = { ...getStoredDbConfig(), ...(customCfg || {}), pgConnectionString: (process.env.DATABASE_URL || '').trim() };
   if (!cfg.pgConnectionString || !cfg.pgConnectionString.startsWith('postgres')) return null;
   return new pg.Pool({
     connectionString: cfg.pgConnectionString,
@@ -2814,7 +2965,7 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
   try {
     const cfg = getStoredDbConfig();
     const isConfigured = Boolean(
-      (cfg.supabaseUrl && (cfg.supabaseAnonKey || cfg.supabaseServiceRoleKey)) ||
+      (cfg.supabaseUrl && cfg.supabaseServiceRoleKey) ||
         cfg.pgConnectionString
     );
 
@@ -2830,7 +2981,7 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
         isConfigured,
         isEnabled: cfg.isEnabled,
         // แสดง source เพื่อให้ UI บอกผู้ใช้ได้ว่า config มาจากไหน
-        configSource: (cfg as any)._source || 'none', // 'env_var' | 'ui_config' | 'none'
+        configSource: cfg.supabaseServiceRoleKey || process.env.DATABASE_URL ? 'env_var' : (cfg as any)._source || 'none',
         mode: cfg.pgConnectionString
           ? 'postgres_direct'
           : cfg.supabaseUrl
@@ -2858,20 +3009,12 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
   try {
     const {
       supabaseUrl,
-      supabaseAnonKey,
-      supabaseServiceRoleKey,
-      pgConnectionString,
       isEnabled,
       autoSyncIntervalMinutes
     } = req.body;
 
     const saved = saveStoredDbConfig({
       supabaseUrl: typeof supabaseUrl === 'string' && supabaseUrl.trim() ? supabaseUrl.trim() : undefined,
-      supabaseAnonKey: typeof supabaseAnonKey === 'string' && supabaseAnonKey.trim() ? supabaseAnonKey.trim() : undefined,
-      supabaseServiceRoleKey:
-        typeof supabaseServiceRoleKey === 'string' && supabaseServiceRoleKey.trim() ? supabaseServiceRoleKey.trim() : undefined,
-      pgConnectionString:
-        typeof pgConnectionString === 'string' && pgConnectionString.trim() ? pgConnectionString.trim() : undefined,
       isEnabled: isEnabled !== undefined ? Boolean(isEnabled) : undefined,
       autoSyncIntervalMinutes:
         typeof autoSyncIntervalMinutes === 'number' ? autoSyncIntervalMinutes : undefined
@@ -2886,7 +3029,7 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
       message: 'บันทึกการตั้งค่าเชื่อมต่อฐานข้อมูล Supabase Cloud เรียบร้อยแล้ว',
       config: {
         isConfigured: Boolean(
-          (saved.supabaseUrl && (saved.supabaseAnonKey || saved.supabaseServiceRoleKey)) ||
+          (saved.supabaseUrl && saved.supabaseServiceRoleKey) ||
             saved.pgConnectionString
         ),
         isEnabled: saved.isEnabled,
@@ -2905,12 +3048,10 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
 app.post('/api/database/test', async (req: Request, res: Response) => {
   const startTime = Date.now();
   const rawTargetCfg: Partial<ServerDbConfig> = req.body || {};
-  const targetCfg: Partial<ServerDbConfig> = {};
-  if (rawTargetCfg.supabaseUrl?.trim()) targetCfg.supabaseUrl = rawTargetCfg.supabaseUrl.trim();
-  if (rawTargetCfg.supabaseAnonKey?.trim()) targetCfg.supabaseAnonKey = rawTargetCfg.supabaseAnonKey.trim();
-  if (rawTargetCfg.supabaseServiceRoleKey?.trim()) targetCfg.supabaseServiceRoleKey = rawTargetCfg.supabaseServiceRoleKey.trim();
-  if (rawTargetCfg.pgConnectionString?.trim()) targetCfg.pgConnectionString = rawTargetCfg.pgConnectionString.trim();
-  const cfg = { ...getStoredDbConfig(), ...targetCfg };
+  const cfg = {
+    ...getStoredDbConfig(),
+    ...(rawTargetCfg.supabaseUrl?.trim() ? { supabaseUrl: rawTargetCfg.supabaseUrl.trim() } : {})
+  };
 
   const tablesStatus: Record<string, boolean> = {
     orders: false,
@@ -3388,6 +3529,11 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
       };
     }
 
+    const authenticatedUser = getAuthenticatedUser(req);
+    if (targetTable === 'orders' && authenticatedUser) {
+      await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+    }
+
     const { error } = await client.from(targetTable).upsert(dbRow, { onConflict: targetTable === 'system_config' ? 'config_key' : 'id' });
     if (error) {
       console.error(`DB Save Error on ${targetTable}:`, error);
@@ -3460,6 +3606,10 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     else if (table === 'billing_notes') mapper = mapBillingNoteToSupabase;
 
     const rows = records.map(mapper);
+    if (targetTable === 'orders') {
+      const authenticatedUser = getAuthenticatedUser(req);
+      if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, rows);
+    }
     const chunkSize = 50;
     for (let i = 0; i < rows.length; i += chunkSize) {
       const chunk = rows.slice(i, i + chunkSize);
@@ -3485,6 +3635,7 @@ interface ServerDriveConfig {
   rootFolderName?: string;
   connectionMode?: 'gas' | 'service_account';
   gasWebAppUrl?: string;
+  gasSharedSecret?: string;
   serviceAccountEmail?: string;
   serviceAccountPrivateKey?: string;
   serviceAccountJson?: string;
@@ -3530,6 +3681,7 @@ function getStoredDriveConfig(): ServerDriveConfig {
     rootFolderName: fileConfig.rootFolderName || '',
     connectionMode: connMode,
     gasWebAppUrl: gasUrl,
+    gasSharedSecret: (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || '').trim(),
     serviceAccountEmail: saEmail.trim(),
     serviceAccountPrivateKey: saKey.trim(),
     serviceAccountJson: rawSaJson.trim(),
@@ -3555,7 +3707,9 @@ function saveStoredDriveConfig(cfg: Partial<ServerDriveConfig>) {
     ...cleaned
   };
   try {
-    fs.writeFileSync(DRIVE_CONFIG_FILE_PATH, JSON.stringify(merged, null, 2), 'utf-8');
+    const persistedConfig = { ...merged };
+    delete persistedConfig.gasSharedSecret;
+    fs.writeFileSync(DRIVE_CONFIG_FILE_PATH, JSON.stringify(persistedConfig, null, 2), 'utf-8');
   } catch (e) {
     console.warn('[Drive Config] Failed to write .google_drive_config.json', e);
   }
@@ -3563,11 +3717,19 @@ function saveStoredDriveConfig(cfg: Partial<ServerDriveConfig>) {
 }
 
 // Helper to call Google Apps Script Web App (Zero-Junk & Verified-Only Move without Service Account)
-async function callGasDriveApi(gasUrl: string, payload: any, signal?: AbortSignal): Promise<any> {
+async function callGasDriveApi(
+  gasUrl: string,
+  payload: any,
+  signal?: AbortSignal
+): Promise<any> {
+  const sharedSecret = (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || '').trim();
+  if (sharedSecret.length < 32) {
+    throw new Error('Google Apps Script ต้องตั้งค่า shared secret อย่างน้อย 32 ตัวอักษรทั้งในเซิร์ฟเวอร์และ Script Properties');
+  }
   const resp = await fetch(gasUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, sharedSecret }),
     redirect: 'follow',
     signal: signal
       ? AbortSignal.any([AbortSignal.timeout(45000), signal])
@@ -3926,9 +4088,8 @@ app.get('/api/drive/config', async (req: Request, res: Response) => {
   // Ensure latest config is restored from Supabase system_config (handles Render redeploys)
   await restoreConfigsFromSupabase();
   const cfg = getStoredDriveConfig();
-  // isConfigured: gasWebAppUrl alone (GAS mode) is enough — rootFolderId may be configured later
   const isConfigured = Boolean(
-    cfg.gasWebAppUrl ||
+    (cfg.gasWebAppUrl && (cfg.gasSharedSecret || '').length >= 32) ||
     (cfg.rootFolderId && (cfg.serviceAccountEmail || cfg.directAccessToken || cfg.refreshToken))
   );
   res.json({
@@ -3941,6 +4102,7 @@ app.get('/api/drive/config', async (req: Request, res: Response) => {
       isEnabled: cfg.isEnabled,
       connectionMode: cfg.connectionMode || (cfg.gasWebAppUrl ? 'gas' : 'service_account'),
       gasWebAppUrl: cfg.gasWebAppUrl || null,
+      hasGasSharedSecret: (cfg.gasSharedSecret || '').length >= 32,
       hasGas: Boolean(cfg.gasWebAppUrl),
       rootFolderId: cfg.rootFolderId,
       rootFolderName: cfg.rootFolderName || null,
@@ -3969,17 +4131,20 @@ app.post('/api/drive/config', (req: Request, res: Response) => {
     zoneFoldersCache.clear();
     cachedDriveAccessToken = null;
 
-    // Persist to Supabase so it survives Render redeploys
-    persistConfigToSupabase('drive_config', saved);
+    // Secrets are runtime-only; persist only the non-secret Drive configuration.
+    const persistedConfig = { ...saved };
+    delete persistedConfig.gasSharedSecret;
+    persistConfigToSupabase('drive_config', persistedConfig);
 
     res.json({
       success: true,
       message: 'บันทึกการตั้งค่า Google Drive สำเร็จ',
       config: {
-        isConfigured: Boolean(saved.rootFolderId && (saved.gasWebAppUrl || saved.serviceAccountEmail || saved.directAccessToken)),
+        isConfigured: Boolean(saved.rootFolderId && ((saved.gasWebAppUrl && (saved.gasSharedSecret || '').length >= 32) || saved.serviceAccountEmail || saved.directAccessToken)),
         isEnabled: saved.isEnabled,
         connectionMode: saved.connectionMode,
         gasWebAppUrl: saved.gasWebAppUrl || null,
+        hasGasSharedSecret: (saved.gasSharedSecret || '').length >= 32,
         rootFolderId: saved.rootFolderId,
         serviceAccountEmail: saved.serviceAccountEmail || null
       }
@@ -4031,7 +4196,9 @@ app.post('/api/drive/test', async (req: Request, res: Response) => {
         connectionMode: 'gas',
         lastTestedAt: new Date().toISOString()
       });
-      persistConfigToSupabase('drive_config', updated);
+      const persistedConfig = { ...updated };
+      delete persistedConfig.gasSharedSecret;
+      persistConfigToSupabase('drive_config', persistedConfig);
 
       return res.json({
         success: true,
@@ -5176,15 +5343,15 @@ async function runStartupSelfTest() {
   if (_dbCfgForLog._source === 'env_var') {
     console.log('[Startup] ✅ Supabase credentials loaded from Environment Variables (Render Dashboard) — ไม่หายเมื่อ redeploy');
   } else if (_dbCfgForLog._source === 'ui_config') {
-    console.log('[Startup] ⚠️  Supabase credentials loaded from local file (.supabase_config.json) — จะหายเมื่อ Render redeploy! แนะนำให้ตั้งค่าเป็น Environment Variables แทน');
+    console.log('[Startup] ⚠️  Supabase URL loaded from local config; service-role key is still required from runtime environment');
   } else {
-    console.log('[Startup] ❌ Supabase: ยังไม่มีค่า — กรุณาตั้งค่า SUPABASE_URL, SUPABASE_ANON_KEY ใน Render Dashboard → Environment');
+    console.log('[Startup] ❌ Supabase: ยังไม่มีค่า — กรุณาตั้งค่า SUPABASE_URL และ SUPABASE_SERVICE_ROLE_KEY ใน Render Dashboard → Environment');
   }
 
   // --- 1. Test Supabase ---
   const dbCfg = getStoredDbConfig();
   const dbConfigured = Boolean(
-    (dbCfg.supabaseUrl && (dbCfg.supabaseAnonKey || dbCfg.supabaseServiceRoleKey)) ||
+    (dbCfg.supabaseUrl && dbCfg.supabaseServiceRoleKey) ||
     dbCfg.pgConnectionString
   );
 

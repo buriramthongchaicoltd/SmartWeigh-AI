@@ -15,7 +15,11 @@
  *    - ดำเนินการในฐานะ (Execute as): "ฉัน (Me)"
  *    - ผู้ที่มีสิทธิ์เข้าถึง (Who has access): "ทุกคน (Anyone)"  <-- สำคัญมาก! เพื่อให้ระบบส่งรูปเข้ามาได้
  * 6. กดปุ่ม "ทำให้ใช้งานได้" (Deploy) -> กด "ให้สิทธิ์การเข้าถึง" (Authorize access) แล้วกดยอมรับ
- * 7. คัดลอก "URL เว็บแอป" (Web app URL ที่ลงท้ายด้วย /exec) นำไปวางในหน้าตั้งค่า SmartWeigh AI!
+ * 7. ไปที่ Project Settings -> Script Properties แล้วเพิ่ม
+ *    SMARTWEIGH_SHARED_SECRET โดยใช้ค่าเดียวกับ Render environment variable
+ *    (อย่างน้อย 32 ตัวอักษร; ห้ามเปิดเผยหรือบันทึกลง source code)
+ * 8. คัดลอก Web app URL ที่ลงท้ายด้วย /exec ไปวางในหน้าตั้งค่า SmartWeigh AI
+ *    และ Deploy source รุ่นนี้ใหม่ทุกครั้งเมื่อเปลี่ยนโค้ด
  * ==============================================================================
  */
 
@@ -26,6 +30,11 @@ function doPost(e) {
     }
 
     var payload = JSON.parse(e.postData.contents);
+    var expectedSecret = PropertiesService.getScriptProperties().getProperty('SMARTWEIGH_SHARED_SECRET');
+    if (!expectedSecret || typeof payload.sharedSecret !== 'string' || payload.sharedSecret !== expectedSecret) {
+      return jsonResponse({ success: false, error: 'Unauthorized' });
+    }
+    delete payload.sharedSecret;
     var action = payload.action;
 
     if (action === 'test') {

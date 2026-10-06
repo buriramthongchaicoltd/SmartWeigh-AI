@@ -17,11 +17,12 @@
 | **2. File Storage & Zero-Junk Engine** | **Google Drive API (Service Account / OAuth2)** | จัดเก็บรูปถ่ายบิลและเอกสารแนบทั้งหมด แยกโฟลเดอร์ตามประเภทและเลขที่เอกสารอัตโนมัติ ย้ายไฟล์มารวมชุดเมื่อชนบิลสำเร็จ และลบไฟล์เก่า/ไฟล์ที่ถูกลบออกจากระบบทันที (Zero-Junk Cleanup) |
 
 ### สถานะและข้อจำกัดด้านความปลอดภัยหลังทวนโค้ด
-- ไฟล์ `.supabase_config.json` ที่ถูก track มี Supabase service-role credential และ `getSupabaseClient()` เลือกใช้ service-role key ก่อน anon key; service role ข้าม RLS ได้ ให้ถือว่า credential นี้ compromised และหมุน/เพิกถอนก่อนใช้งานต่อ โดยย้ายค่าที่ใช้จริงไปยัง runtime secret และตรวจสอบ Git history/การใช้งานจริง ห้ามคัดลอกค่าลับลงเอกสารหรือ log
-- API ที่ไม่ใช่ public health/login/LINE webhook บังคับ server session; API ตั้งค่าระบบและจัดการผู้ใช้จำกัด Admin. ยังคงต้องทบทวนและบังคับสิทธิ์ role ราย action สำหรับข้อมูลธุรกิจทุกเส้นทาง ไม่ใช้ role UI เป็น security boundary
-- Login ใช้ Username/Password จาก `app_users`, hash scrypt, HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และจะหมดเมื่อ process restart/deploy. Legacy plaintext password จะถูก hash เมื่อ login สำเร็จ
-- ถ้ายังไม่มี Master Admin ใน `app_users`, endpoint login จะสร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) อัตโนมัติด้วยรหัสเริ่มต้น `@Admin` และเก็บเป็น scrypt hash. บัญชีที่ provision ก่อนหน้าโดยใช้ `123456` จะย้ายเป็น `@Admin` เมื่อ login ด้วยรหัสใหม่ และรหัสเก่าจะถูกปฏิเสธ. เนื่องจาก `@Admin` คาดเดาง่าย ให้เปลี่ยนเป็นรหัสส่วนตัวที่ยาวและไม่ซ้ำทันทีหลังล็อกอิน
-- การแก้ authentication นี้ไม่ได้หมุน Supabase service-role credential และไม่ได้ตรวจฐานข้อมูล/Production จริง; ต้องทำการ rotate credential และทบทวน API policy แยก
+- `.supabase_config.json` ที่เคยถูก track ถูกนำออกแล้ว; service-role credential และ `DATABASE_URL` อ่านจาก runtime environment เท่านั้น. เนื่องจาก credential เดิมยังอยู่ใน Git history ให้ถือว่า compromised และเพิกถอน/หมุนก่อนใช้งานต่อ; อย่าคัดลอก secret ลงเอกสารหรือ log
+- `getSupabaseClient()` ต้องใช้ `SUPABASE_URL` และ `SUPABASE_SERVICE_ROLE_KEY` ฝั่ง server; ไม่มี fallback ไป anon key. DDL ใน `src/utils/supabaseClient.ts` เปิด RLS, ลบ policies เดิมของตารางระบบ, revoke สิทธิ์ `anon`/`authenticated` และให้ `service_role` เท่านั้น. ต้องนำ DDL ไป execute ใน Supabase SQL Editor ด้วยตนเอง; source change ไม่ปรับ cloud database อัตโนมัติ
+- API ที่ไม่ใช่ health/login/LINE webhook บังคับ server session. การเขียน/ลบข้อมูลและไฟล์ถูกจำกัดตาม role ที่ backend; role `user` จำกัดตารางที่เขียนได้และไม่สามารถแก้ไขฟิลด์ราคา/การเงิน/การชำระเงินที่ถูกป้องกันผ่าน API. UI ไม่ใช่ security boundary
+- Login ใช้บัญชี `app_users`, password hash scrypt และ HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และหมดเมื่อ process restart/deploy. Master Admin ใหม่ต้อง bootstrap ด้วย `SYSTEM_MASTER_ADMIN_PASSWORD` ความยาวอย่างน้อย 16 ตัวอักษร; รหัสเริ่มต้นเดิมถูกปฏิเสธ และ runtime secret ใช้หมุนรหัส Master เดิมได้
+- GAS ต้องมี secret อย่างน้อย 32 ตัวอักษรที่ตรงกันระหว่าง `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ฝั่ง server กับ Script Property `SMARTWEIGH_SHARED_SECRET`; ต้อง deploy `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้ endpoint ปฏิเสธ request ที่ไม่มี secret
+- การเปลี่ยนแปลงนี้ไม่ได้หมุน key, รัน DDL, deploy GAS หรือทดสอบ production จริง. ผู้ดูแลต้องทำขั้นตอนภายนอกและตรวจ service logs หลัง deploy
 
 ---
 
@@ -313,8 +314,10 @@ CREATE TABLE IF NOT EXISTS public.billing_notes (
 
 1. **สำหรับ Supabase Cloud:**
    - `VITE_SUPABASE_URL` — URL ของโปรเจกต์ Supabase
-   - `VITE_SUPABASE_ANON_KEY` — กุญแจสำหรับฝั่งหน้าเว็บ (Realtime & Read/Write)
-   - `SUPABASE_SERVICE_ROLE_KEY` — กุญแจสำหรับฝั่ง `server.ts` (เพื่อให้ LINE Webhook บันทึกข้อมูลเข้าฐานข้อมูลได้โดยตรง)
+   - `SUPABASE_URL` — Project URL สำหรับ backend
+   - `SUPABASE_SERVICE_ROLE_KEY` — runtime secret สำหรับ backend `server.ts` เท่านั้น; ห้ามตั้งเป็น `VITE_*` หรือส่งให้ browser
+   - `SYSTEM_MASTER_ADMIN_PASSWORD` — รหัส bootstrap/กู้คืน Master Admin ยาวอย่างน้อย 16 ตัวอักษร
+   - `GOOGLE_APPS_SCRIPT_SHARED_SECRET` — shared secret สำหรับ GAS ยาวอย่างน้อย 32 ตัวอักษร; ต้องตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`
 2. **สำหรับ Google Drive API (Zero-Junk Storage):**
    - `GOOGLE_DRIVE_ROOT_FOLDER_ID` — รหัสโฟลเดอร์หลักบน Google Drive ที่แชร์สิทธิ์ให้ระบบแล้ว
    - `GOOGLE_SERVICE_ACCOUNT_JSON` (หรือ `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`) — สำหรับให้เซิร์ฟเวอร์สร้างโฟลเดอร์ ย้ายไฟล์ และสั่งลบไฟล์ขยะอัตโนมัติได้ตลอด 24 ชม.

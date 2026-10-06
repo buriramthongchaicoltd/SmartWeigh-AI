@@ -48,6 +48,8 @@ export const POManagementView: React.FC<POManagementViewProps> = ({
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [selectedStore, setSelectedStore] = useState<string>('');
   const [selectedProject, setSelectedProject] = useState<string>('');
+  const [confirmDeletePOId, setConfirmDeletePOId] = useState<string | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   // Reconcile all POs against real orders
   const reconciledPOs = useMemo(() => {
@@ -119,9 +121,10 @@ export const POManagementView: React.FC<POManagementViewProps> = ({
 
   const exportPOsToExcel = () => {
     if (pos.length === 0) {
-      alert('ไม่มีข้อมูลใบสั่งซื้อให้ส่งออก');
+      setExportMessage('ไม่มีข้อมูลใบสั่งซื้อให้ส่งออก');
       return;
     }
+    setExportMessage(null);
 
     const exportRows = reconciledPOs.map((r, idx) => ({
       'ลำดับ': idx + 1,
@@ -286,6 +289,9 @@ export const POManagementView: React.FC<POManagementViewProps> = ({
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
               <span>ส่งออกรายงาน PO (Excel)</span>
             </button>
+            {exportMessage && (
+              <p className="text-xs text-amber-700" role="status">{exportMessage}</p>
+            )}
           </div>
 
         </div>
@@ -537,17 +543,37 @@ export const POManagementView: React.FC<POManagementViewProps> = ({
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
                           <button
-                            onClick={() => {
-                              if (confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบใบสั่งซื้อ ${po.poNumber}?`)) {
-                                onDeletePO(po.id);
-                              }
-                            }}
+                            onClick={() => setConfirmDeletePOId(po.id)}
                             title="ลบใบสั่งซื้อ"
                             className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-md transition cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
+                        {confirmDeletePOId === po.id && (
+                          <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 p-2">
+                            <span className="text-[11px] text-rose-800">
+                              ยืนยันลบ PO {po.poNumber}?
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onDeletePO(po.id);
+                                setConfirmDeletePOId(null);
+                              }}
+                              className="rounded-md bg-rose-700 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-800"
+                            >
+                              ยืนยัน
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeletePOId(null)}
+                              className="rounded-md border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                            >
+                              ยกเลิก
+                            </button>
+                          </div>
+                        )}
                       </td>
 
                     </tr>

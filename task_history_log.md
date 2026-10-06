@@ -4,6 +4,36 @@
 
 ---
 
+## [2026-10-06] Close Security and UI Confirmation Follow-ups
+
+### การเปลี่ยนแปลง
+- ลบไฟล์ Supabase config ที่เคยติดตามใน Git และยกเลิก credential fallback ใน source; จำกัด service-role key และ database URL ไว้ที่ backend runtime environment พร้อมระบุ secrets ที่ต้องตั้งใน `render.yaml`
+- เปลี่ยน Master Admin bootstrap/กู้คืนบัญชีให้ใช้ `SYSTEM_MASTER_ADMIN_PASSWORD` อย่างน้อย 16 ตัวอักษร และปฏิเสธรหัสเริ่มต้นเดิม
+- จำกัดสิทธิ์ API ฝั่ง server สำหรับ role, ตารางที่เขียนได้, การลบ/จัดการไฟล์ และป้องกัน role `user` เปลี่ยนฟิลด์ราคา/การเงิน/วางบิล
+- ปรับ DDL ให้เปิด RLS, ลบ policy เดิม และถอนสิทธิ์ `PUBLIC`, `anon`, `authenticated`; คงสิทธิ์ให้ `service_role` เท่านั้น
+- บังคับ GAS shared secret จาก `GOOGLE_APPS_SCRIPT_SHARED_SECRET` และ Script Property เท่านั้น; ไม่รับ secret ผ่าน browser request และล้างค่า legacy จาก config file/`system_config`
+- แทน browser confirm/alert ใน LINE Inbox และ PO ด้วย inline confirmation/status; ปรับ handover, blueprint และตัวอย่าง environment
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน (ยังมีคำเตือนเดิมเรื่อง JavaScript bundle ขนาดเกิน 500 kB)
+- `git diff --check` ผ่าน
+- ยังต้องทำขั้นตอน production ด้วยผู้ดูแล: เพิกถอน/หมุน Supabase key ที่เคยอยู่ใน Git history, ตั้ง Render secrets, รัน DDL ใน Supabase และตั้ง Script Property/deploy GAS รุ่นล่าสุด
+
+## [2026-10-06] Separate Buyer and Supplier in AI Bill Scanning
+
+### การเปลี่ยนแปลง
+- เพิ่มฟิลด์บทบาทคู่ค้า (`supplierName`, `buyerName`, `documentIssuerName`, `documentIssuerRole`, หลักฐาน และคะแนนความมั่นใจ) ใน prompt/schema ของ OCR สำหรับสแกนบิล, LINE และ PO
+- ให้ backend รับชื่อเข้า `col8`/ข้อมูลร้านค้าเมื่อมีบทบาทที่ไม่ uncertain, มีหลักฐาน และ confidence อย่างน้อย 70/100; ล้างชื่อ/ข้อมูลร้านเมื่อบทบาทไม่ชัดหรือชื่อผู้ขายตรงกับผู้ซื้อ/บริษัทเรา
+- แสดงบทบาทผู้ออกเอกสาร หลักฐาน และคะแนนในหน้าตรวจสอบ; ปิดการเลือกบันทึกร้านค้าเป็นค่าเริ่มต้นและให้ผู้ใช้ยืนยันหลังเทียบภาพ
+- ส่ง metadata บทบาทผู้ซื้อ/ผู้ขายต่อจากผลสแกนเข้า draft PO และ order
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน (ยังมีคำเตือน bundle JavaScript ขนาดเกิน 500 kB)
+- `git diff --check` ผ่าน
+- ยังต้องทดสอบกับภาพตัวอย่างจริงที่มีแบบฟอร์มหลากหลายก่อนปรับเกณฑ์/พฤติกรรมเพิ่มเติม
+
 ## [2026-10-05] Shorten LINE Bill Receipt Reply
 
 ### การเปลี่ยนแปลง

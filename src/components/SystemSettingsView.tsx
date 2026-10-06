@@ -57,141 +57,7 @@ import {
 } from 'lucide-react';
 import { BillingNoteRecord } from '../types';
 import { SUPABASE_SQL_DDL_SCHEMA } from '../utils/supabaseClient';
-
-const GAS_SCRIPT_TEMPLATE = `/**
- * ==============================================================================
- * SmartWeigh AI — Google Apps Script (GAS) Drive Engine
- * ระบบจัดเก็บและจัดการไฟล์ Google Drive อัตโนมัติ (Zero-Junk & Verified-Only Move)
- * ใช้งานผ่านบัญชี Google ส่วนตัวได้ทันที — ไม่ต้องใช้ Google Service Account
- * ==============================================================================
- */
-
-function doPost(e) {
-  try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return jsonResponse({ success: false, error: 'ไม่พบข้อมูลคำขอ (No POST payload)' });
-    }
-    var payload = JSON.parse(e.postData.contents);
-    var action = payload.action;
-
-    if (action === 'test') {
-      return handleTestConnection(payload);
-    } else if (action === 'upload') {
-      return handleUploadFile(payload);
-    } else if (action === 'sync_verified_move') {
-      return handleMoveFile(payload);
-    } else if (action === 'cleanup') {
-      return handleCleanup(payload);
-    } else {
-      return jsonResponse({ success: false, error: 'ไม่รู้จัก action: ' + action });
-    }
-  } catch (err) {
-    return jsonResponse({ success: false, error: err.toString() });
-  }
-}
-
-function doGet(e) {
-  return jsonResponse({
-    success: true,
-    service: 'SmartWeigh AI - Google Drive Engine (GAS)',
-    status: 'Ready',
-    timestamp: new Date().toISOString()
-  });
-}
-
-var ZONE_NAMES = {
-  ZONE_00: '00_กล่องพักบิล_LINE_รอตรวจรับ',
-  ZONE_01: '01_ใบสั่งซื้อ_PO',
-  ZONE_02: '02_ใบงานหลัก_DO_ครบชุด',
-  ZONE_03: '03_ตั๋วชั่งปลายทาง_รอจับคู่DO',
-  ZONE_04: '04_ใบเสร็จกำกับภาษี_เอกเทศ',
-  ZONE_99: '99_ถังขยะ_รอทำลาย_30วัน'
-};
-
-var ZONE_KEY_MAP = {
-  'zone_00': 'ZONE_00',
-  'zone_01': 'ZONE_01',
-  'zone_02': 'ZONE_02',
-  'zone_03': 'ZONE_03',
-  'zone_04': 'ZONE_04',
-  'trash': 'ZONE_99'
-};
-
-function getOrCreateSubfolder(parentFolder, folderName) {
-  var folders = parentFolder.getFoldersByName(folderName);
-  if (folders.hasNext()) return folders.next();
-  return parentFolder.createFolder(folderName);
-}
-
-function handleTestConnection(payload) {
-  var rootFolderId = payload.rootFolderId;
-  if (!rootFolderId) return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId' });
-  var rootFolder = DriveApp.getFolderById(rootFolderId);
-  var zonesCreated = {};
-  for (var key in ZONE_NAMES) {
-    var folder = getOrCreateSubfolder(rootFolder, ZONE_NAMES[key]);
-    zonesCreated[key] = folder.getId();
-  }
-  return jsonResponse({
-    success: true,
-    message: 'เชื่อมต่อ Google Drive ผ่าน Google Apps Script สำเร็จ',
-    rootFolderId: rootFolder.getId(),
-    rootFolderName: rootFolder.getName(),
-    zonesCreated: zonesCreated
-  });
-}
-
-function handleUploadFile(payload) {
-  var rootFolder = DriveApp.getFolderById(payload.rootFolderId);
-  var destFolder = rootFolder;
-  if (payload.targetFolderId) {
-    try { destFolder = DriveApp.getFolderById(payload.targetFolderId); } catch(e) { destFolder = rootFolder; }
-  } else if (payload.targetZone && ZONE_KEY_MAP[payload.targetZone]) {
-    destFolder = getOrCreateSubfolder(rootFolder, ZONE_NAMES[ZONE_KEY_MAP[payload.targetZone]]);
-  }
-  if (payload.subfolderName) destFolder = getOrCreateSubfolder(destFolder, payload.subfolderName);
-  var cleanBase64 = payload.base64Image.replace(/^data:image\\/[a-zA-Z0-9+]+;base64,/, '');
-  var blob = Utilities.newBlob(Utilities.base64Decode(cleanBase64), 'image/jpeg', payload.fileName || ('FILE_' + Date.now() + '.jpg'));
-  var file = destFolder.createFile(blob);
-  return jsonResponse({
-    success: true,
-    fileId: file.getId(),
-    fileName: file.getName(),
-    folderId: destFolder.getId(),
-    webViewLink: file.getUrl()
-  });
-}
-
-function handleMoveFile(payload) {
-  var file = DriveApp.getFileById(payload.fileId);
-  var targetFolder;
-  if (payload.targetFolderId) {
-    targetFolder = DriveApp.getFolderById(payload.targetFolderId);
-  } else if (payload.rootFolderId && payload.targetZone && ZONE_KEY_MAP[payload.targetZone]) {
-    var rootFolder = DriveApp.getFolderById(payload.rootFolderId);
-    targetFolder = getOrCreateSubfolder(rootFolder, ZONE_NAMES[ZONE_KEY_MAP[payload.targetZone]]);
-    if (payload.subfolderName) targetFolder = getOrCreateSubfolder(targetFolder, payload.subfolderName);
-  }
-  file.moveTo(targetFolder);
-  return jsonResponse({ success: true, fileId: file.getId(), targetFolderId: targetFolder.getId() });
-}
-
-function handleCleanup(payload) {
-  if (payload.rescueFileId) {
-    try {
-      var rFile = DriveApp.getFileById(payload.rescueFileId);
-      var rTarget = payload.rescueTargetFolderId ? DriveApp.getFolderById(payload.rescueTargetFolderId) : (payload.rootFolderId ? getOrCreateSubfolder(DriveApp.getFolderById(payload.rootFolderId), ZONE_NAMES.ZONE_03) : null);
-      if (rTarget) rFile.moveTo(rTarget);
-    } catch (e) {}
-  }
-  if (payload.fileId) { try { DriveApp.getFileById(payload.fileId).setTrashed(true); } catch(e) {} }
-  if (payload.folderId) { try { DriveApp.getFolderById(payload.folderId).setTrashed(true); } catch(e) {} }
-  return jsonResponse({ success: true, message: 'Zero-Junk Cleanup สำเร็จ' });
-}
-
-function jsonResponse(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
-};`;
+import GAS_SCRIPT_TEMPLATE from '../../google_apps_script_drive.gs?raw';
 
 interface SystemSettingsViewProps {
   systemSettings: SystemSettings;
@@ -292,6 +158,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     isEnabled?: boolean;
     connectionMode?: 'gas' | 'service_account';
     gasWebAppUrl?: string;
+    hasGasSharedSecret?: boolean;
     hasGas?: boolean;
     rootFolderId?: string;
     rootFolderName?: string;
@@ -452,6 +319,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             connectionMode: data.config.connectionMode,
             hasGas: data.config.hasGas,
             gasWebAppUrl: data.config.gasWebAppUrl,
+              hasGasSharedSecret: data.config.hasGasSharedSecret,
             rootFolderId: data.config.rootFolderId,
             rootFolderName: data.config.rootFolderName || prev?.rootFolderName,
             hasServiceAccount: data.config.hasServiceAccount,
@@ -2101,11 +1969,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     {dbStatus.configSource === 'ui_config' ? (
                       <>
                         <p className="font-bold text-amber-800">Config มาจาก UI — จะหายทุกครั้งที่ Redeploy!</p>
-                        <p className="text-amber-700 mt-1">เพื่อแก้ปัญหาถาวร กรุณาตั้งค่าเป็น Environment Variables บน Render Dashboard แทน:</p>
+                        <p className="text-amber-700 mt-1">ตั้งค่าความลับบน Render Dashboard เท่านั้น; API ใช้ service-role key จาก environment ฝั่งเซิร์ฟเวอร์ และไม่มี public database policy:</p>
                         <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-amber-800 bg-amber-100 rounded-lg p-2">
                           <li>SUPABASE_URL = {dbStatus.supabaseUrl || 'https://xxx.supabase.co'}</li>
-                          <li>SUPABASE_ANON_KEY = eyJ...</li>
-                          <li>SUPABASE_SERVICE_ROLE_KEY = eyJ... (ถ้ามี)</li>
+                          <li>SUPABASE_SERVICE_ROLE_KEY = runtime secret (ห้ามใส่ใน browser/Git)</li>
                         </ul>
                         <p className="text-amber-600 text-xs mt-1.5">วิธี: Render Dashboard → เลือก Service → <strong>Environment</strong> → Add Environment Variable → ตั้งครั้งเดียว ใช้ได้ตลอด ไม่หาย</p>
                       </>
@@ -2115,7 +1982,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                         <p className="text-red-700 mt-1">กรุณาตั้งค่า Environment Variables บน Render Dashboard:</p>
                         <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-red-800 bg-red-100 rounded-lg p-2">
                           <li>SUPABASE_URL</li>
-                          <li>SUPABASE_ANON_KEY</li>
                           <li>SUPABASE_SERVICE_ROLE_KEY</li>
                         </ul>
                       </>
@@ -2186,20 +2052,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <div className="flex items-center gap-2">
                   <Key className="w-4 h-4 text-sky-600" />
                   <h4 className="text-sm font-bold text-slate-900">
-                    1. ข้อมูลการเชื่อมต่อ Supabase Cloud (ตั้งค่าได้จากหน้าเว็บทันที)
+                    1. ข้อมูลการเชื่อมต่อ Supabase Cloud
                   </h4>
                 </div>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-sky-50 text-sky-700">
-                  เก็บบนเซิร์ฟเวอร์ปลอดภัย
+                  เฉพาะ URL ไม่เก็บ secret
                 </span>
               </div>
 
               <div className="bg-sky-50 border border-sky-200/80 rounded-xl p-3 text-sky-900 text-xs flex items-start gap-2.5">
                 <ShieldCheck className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
                 <div className="space-y-0.5">
-                  <p className="font-bold">ระบบมีการบันทึกการตั้งค่าไว้แล้วถาวร</p>
+                  <p className="font-bold">ตั้งค่า service-role key ใน Render Environment เท่านั้น</p>
                   <p className="text-[11px] text-sky-800">
-                    เพื่อความปลอดภัยระดับสูงสุด ช่องรหัสผ่านและคีย์ลับจะถูกซ่อนเป็นจุดไข่ปลา <code className="bg-white/80 px-1 rounded text-sky-950 font-mono">••••••••</code> (คุณไม่จำเป็นต้องกรอกใหม่ เว้นแต่ต้องการเปลี่ยนค่าใหม่)
+                    ห้ามวาง anon/service-role key หรือ PostgreSQL password ในฟอร์มนี้, browser หรือ Git; backend ปฏิเสธการเชื่อมต่อหากไม่มี runtime secret
                   </p>
                 </div>
               </div>
@@ -2221,82 +2087,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     ดูได้จาก Supabase Dashboard → <strong>Project Settings → API → Project URL</strong>
                   </p>
                 </div>
-
-                {/* Supabase Anon Key */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1 flex items-center gap-2">
-                    Supabase Anon Public Key (สำหรับหน้าเว็บ & Realtime) <span className="text-rose-500">*</span>
-                    {dbStatus?.hasAnonKey && (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
-                        <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
-                      </span>
-                    )}
-                  </label>
-                  <input
-                    type="password"
-                    value={dbConfig.supabaseAnonKey}
-                    onChange={e => setDbConfig(prev => ({ ...prev, supabaseAnonKey: e.target.value }))}
-                    placeholder={dbStatus?.hasAnonKey ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'eyJh...'}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
-                      dbStatus?.hasAnonKey ? 'border-emerald-300' : 'border-slate-300'
-                    }`}
-                  />
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    ดูได้จาก Supabase Dashboard → <strong>Project Settings → API → Project API keys (anon public)</strong>
-                  </p>
-                </div>
-
-                {/* Supabase Service Role Key */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-2">
-                      Supabase Service Role Key (บันทึกหลังบ้าน ปลอดภัย 100%)
-                      {dbStatus?.hasServiceKey && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
-                          <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
-                        </span>
-                      )}
-                    </span>
-                    <span className="text-[10px] text-amber-700 font-normal">สำหรับ LINE Webhook & จัดการระบบ</span>
-                  </label>
-                  <input
-                    type="password"
-                    value={dbConfig.supabaseServiceRoleKey}
-                    onChange={e => setDbConfig(prev => ({ ...prev, supabaseServiceRoleKey: e.target.value }))}
-                    placeholder={dbStatus?.hasServiceKey ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'eyJh... (หากไม่กรอกจะใช้ Anon Key)'}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
-                      dbStatus?.hasServiceKey ? 'border-emerald-300' : 'border-slate-300'
-                    }`}
-                  />
-                </div>
-
-                {/* Direct PostgreSQL Connection String */}
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-2">
-                      PostgreSQL Connection URI (ทางเลือกสำหรับรัน DDL ตรง)
-                      {dbStatus?.hasPgConnection && (
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex items-center gap-0.5">
-                          <CheckCircle2 className="w-2.5 h-2.5" /> ตั้งค่าแล้ว
-                        </span>
-                      )}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-normal">Database Direct / Pooler</span>
-                  </label>
-                  <input
-                    type="password"
-                    value={dbConfig.pgConnectionString}
-                    onChange={e => setDbConfig(prev => ({ ...prev, pgConnectionString: e.target.value }))}
-                    placeholder={dbStatus?.hasPgConnection ? '••••••••••••••••••• (ใส่ค่าใหม่เพื่อเปลี่ยน)' : 'postgresql://postgres:[password]@db.xyz.supabase.co:5432/postgres'}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono text-xs text-slate-900 focus:outline-none focus:border-sky-500 bg-white ${
-                      dbStatus?.hasPgConnection ? 'border-emerald-300' : 'border-slate-300'
-                    }`}
-                  />
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    ดูได้จาก Supabase Dashboard → <strong>Project Settings → Database → Connection string (URI)</strong>
-                  </p>
-                </div>
-
                 {/* Cloud Mode Toggle */}
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between">
                   <div>
@@ -2856,7 +2646,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     className="w-full px-3 py-2 rounded-xl border border-emerald-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-600 bg-white"
                   />
                   <p className="text-[11px] text-emerald-800">
-                    วาง URL ที่ได้จากการ Deploy ใน Google Apps Script ลงที่นี่ได้เลย (ลงท้ายด้วย <code>/exec</code>)
+                    ตั้งค่า secret แบบสุ่มอย่างน้อย 32 ตัวอักษรเป็น Render Environment Variable <code>GOOGLE_APPS_SCRIPT_SHARED_SECRET</code> และตั้งค่าเดียวกันใน Apps Script → Project Settings → Script Properties ชื่อ <code>SMARTWEIGH_SHARED_SECRET</code> ก่อน deploy รุ่นล่าสุด (อย่าวาง secret ในหน้านี้)
                   </p>
                   <div className="flex items-center justify-between pt-1">
                     <button

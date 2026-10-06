@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS public.billing_notes (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable Row Level Security (RLS) & Public Access Policies for Web Application
+-- Enable Row Level Security and deny direct public access to application tables
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.line_inbox ENABLE ROW LEVEL SECURITY;
@@ -229,25 +229,51 @@ ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.system_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.billing_notes ENABLE ROW LEVEL SECURITY;
 
--- Allow read/write for authenticated and anon users (Full Applet Integration)
--- DROP before CREATE so this script is idempotent (safe to re-run anytime)
-DROP POLICY IF EXISTS "Allow all operations for orders" ON public.orders;
-DROP POLICY IF EXISTS "Allow all operations for purchase_orders" ON public.purchase_orders;
-DROP POLICY IF EXISTS "Allow all operations for line_inbox" ON public.line_inbox;
-DROP POLICY IF EXISTS "Allow all operations for stores" ON public.stores;
-DROP POLICY IF EXISTS "Allow all operations for projects" ON public.projects;
-DROP POLICY IF EXISTS "Allow all operations for app_users" ON public.app_users;
-DROP POLICY IF EXISTS "Allow all operations for system_config" ON public.system_config;
-DROP POLICY IF EXISTS "Allow all operations for billing_notes" ON public.billing_notes;
+-- The application uses its authenticated Express API and a server-only service-role key.
+-- Remove every existing policy on these tables and deny direct anon/authenticated access.
+DO $$
+DECLARE
+  policy_row RECORD;
+BEGIN
+  FOR policy_row IN
+    SELECT schemaname, tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = ANY (ARRAY[
+        'orders', 'purchase_orders', 'line_inbox', 'stores',
+        'projects', 'app_users', 'system_config', 'billing_notes'
+      ])
+  LOOP
+    EXECUTE format(
+      'DROP POLICY IF EXISTS %I ON %I.%I',
+      policy_row.policyname,
+      policy_row.schemaname,
+      policy_row.tablename
+    );
+  END LOOP;
+END
+$$;
 
-CREATE POLICY "Allow all operations for orders" ON public.orders FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for purchase_orders" ON public.purchase_orders FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for line_inbox" ON public.line_inbox FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for stores" ON public.stores FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for projects" ON public.projects FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for app_users" ON public.app_users FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for system_config" ON public.system_config FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations for billing_notes" ON public.billing_notes FOR ALL USING (true) WITH CHECK (true);
+REVOKE ALL PRIVILEGES ON TABLE
+  public.orders,
+  public.purchase_orders,
+  public.line_inbox,
+  public.stores,
+  public.projects,
+  public.app_users,
+  public.system_config,
+  public.billing_notes
+FROM PUBLIC, anon, authenticated;
+GRANT ALL PRIVILEGES ON TABLE
+  public.orders,
+  public.purchase_orders,
+  public.line_inbox,
+  public.stores,
+  public.projects,
+  public.app_users,
+  public.system_config,
+  public.billing_notes
+TO service_role;
 
 -- Ensure extended columns for line_inbox exist
 ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS image_hash TEXT;

@@ -59,7 +59,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 }) => {
   const [currentImage, setCurrentImage] = useState<string | null>(billImage || null);
   const [form, setForm] = useState<Partial<OrderRecord>>({});
-  const [saveToStoreDirectory, setSaveToStoreDirectory] = useState(true);
+  const [saveToStoreDirectory, setSaveToStoreDirectory] = useState(false);
   const [selectedDocType, setSelectedDocType] = useState<DocumentType>('delivery_order');
   const [showAllCols, setShowAllCols] = useState(false);
   const [showDocTypeSwitcher, setShowDocTypeSwitcher] = useState(false);
@@ -75,6 +75,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   useEffect(() => {
     if (orderData) {
+      setSaveToStoreDirectory(false);
       const normalized = { ...orderData };
       const c13 = Number(normalized.col13) || 0;
       const c14 = Number(normalized.col14) || 0;
@@ -905,7 +906,22 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
               )}
 
               {/* Auto Store Directory Option */}
-              <div className="flex items-center justify-between text-xs px-1">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 space-y-2">
+                <div className="text-[11px] text-slate-700">
+                  <span className="font-bold">บทบาทคู่ค้าจาก AI: </span>
+                  {form.documentIssuerRole === 'supplier_issued'
+                    ? 'เอกสารจากผู้ขาย/ร้านค้า'
+                    : form.documentIssuerRole === 'buyer_company_issued'
+                      ? 'เอกสารจากผู้ซื้อ/บริษัท'
+                      : 'ยังยืนยันบทบาทผู้ซื้อ/ผู้ขายไม่ได้'}
+                  {Number(form.partyRoleConfidence) > 0 && ` (${Math.round(Number(form.partyRoleConfidence))}%)`}
+                  {form.documentIssuerName && ` • ผู้ออกเอกสาร: ${form.documentIssuerName}`}
+                </div>
+                {form.partyRoleEvidence && (
+                  <div className="text-[10px] text-slate-500">
+                    หลักฐาน: {form.partyRoleEvidence}
+                  </div>
+                )}
                 <label className="flex items-center gap-1.5 text-slate-700 cursor-pointer font-medium">
                   <input
                     type="checkbox"
@@ -913,8 +929,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     onChange={(e) => setSaveToStoreDirectory(e.target.checked)}
                     className="rounded text-indigo-600 focus:ring-indigo-500"
                   />
-                  <span>บันทึกชื่อผู้จำหน่ายลงในทะเบียนร้านค้าอัตโนมัติ</span>
+                  <span>ยืนยันชื่อผู้ขายในช่อง 8 แล้ว และบันทึกลงทะเบียนร้านค้า</span>
                 </label>
+                <p className="text-[10px] text-slate-500">
+                  ระบบไม่เลือกบันทึกให้ล่วงหน้า โปรดตรวจชื่อผู้ขายในช่อง 8 กับภาพเอกสารก่อนเลือกตัวเลือกนี้
+                </p>
               </div>
 
               {/* ==================== AUTO-ACTION VERIFICATION BANNER (MANDATORY HUMAN REVIEW) ==================== */}

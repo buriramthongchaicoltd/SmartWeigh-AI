@@ -34,12 +34,14 @@
 - ห้ามสรุปหรือย้าย/ลบ 29 ไฟล์จากยอดนี้เพียงอย่างเดียว; การกักกันเป็นการย้ายแบบเลือกเองไป Zone 99 และไม่ใช่การลบถาวร
 - มีการพบ error ชั่วคราวขณะเรียก audit (timeout/response ที่ parse เป็น JSON ไม่ได้) และภายหลังผู้ใช้ส่งผล audit ที่สำเร็จ; สาเหตุของคำขอที่ล้มเหลวเดิมยังไม่ได้ยืนยันจาก Render logs
 
-### ความเสี่ยงความปลอดภัยที่พบจากการทวนโค้ด (ยังไม่ได้แก้)
-- **สูง — Supabase service-role credential อยู่ในไฟล์ config ที่ถูก track:** server เลือกใช้ `supabaseServiceRoleKey` ก่อน anon key เมื่อสร้าง client; role นี้ข้าม RLS ได้ ผู้ที่เข้าถึง repository อาจนำ credential ไปใช้ได้หากยัง active. ให้ถือว่า credential รั่วแล้วและหมุน/เพิกถอน พร้อมย้ายไปเก็บใน runtime secret และตรวจสอบ Git history/การใช้งานจริง; เอกสารนี้ไม่แสดงค่าของ credential
-- **สูง — API authentication/authorization ยังต้องทบทวนราย action:** ขณะนี้ API ที่ไม่ใช่ health check, login หรือ LINE webhook บังคับ session ฝั่ง server แล้ว และจำกัด route ตั้งค่าระบบ/จัดการผู้ใช้ไว้ที่ Admin; อย่างไรก็ตามสิทธิ์ย่อยสำหรับการแก้/ลบข้อมูลธุรกิจบางประเภทอาจยังอาศัย role UI จึงควรตรวจและเพิ่ม policy ราย action ก่อนใช้งานกับข้อมูลอ่อนไหว
-- การล็อกอินใหม่รับ Username/Password, ตรวจบัญชี `app_users` ที่ server, เก็บ password hash แบบ scrypt (อัปเกรด hash เมื่อ login ผ่านจากรหัสเดิมแบบ plaintext), ออก HttpOnly/SameSite cookie อายุ 8 ชั่วโมง และไม่มีการส่ง password กลับ browser. Session อยู่ในหน่วยความจำ process จึงหมดอายุเมื่อ server restart/deploy. ปุ่มสลับบัญชีถูกนำออก
-- หากยังไม่มี Master Admin ใน `app_users`, endpoint login จะสร้างบัญชี `SYSTEM-MASTER-ADMIN` (`Admin`) ให้อัตโนมัติด้วยรหัสเริ่มต้น `@Admin` ซึ่งเก็บเป็น hash. บัญชีที่ถูกสร้างไปก่อนหน้านี้ด้วยรหัส `123456` จะย้ายเป็น `@Admin` เมื่อ login ด้วยรหัสใหม่; รหัสเดิมถูกปฏิเสธหลัง deploy. `@Admin` เป็นรหัสที่คาดเดาง่าย ให้เปลี่ยนเป็นรหัสส่วนตัวที่ยาวและไม่ซ้ำหลังล็อกอิน
-- งานนี้ **ยังไม่ได้หมุน Supabase service-role credential**; ต้องถือว่า credential ที่อยู่ใน repository อาจถูกเปิดเผยและจัดการแยกต่างหาก. การทดสอบครั้งนี้ยืนยัน build/type-check เท่านั้น ไม่ได้ทดสอบ Production หรือฐานข้อมูลจริง
+### สถานะความปลอดภัยหลังแก้ไขใน repository
+- ลบ `.supabase_config.json` ที่ติดตามใน Git และเอา credential fallback ออกจาก source; Supabase service-role key และ `DATABASE_URL` รับจาก runtime environment เท่านั้น และ API ไม่ยอมรับ key จาก browser/config file. **credential เดิมยังคงอยู่ใน Git history จึงต้องเพิกถอน/หมุนบน Supabase และตรวจการใช้งานย้อนหลัง**
+- DDL ใน `src/utils/supabaseClient.ts` เปิด RLS, ลบ policy เดิมบนตารางแอป, เพิกถอนสิทธิ์ `anon`/`authenticated` และให้ `service_role` เท่านั้น. ผู้ดูแลต้องนำ DDL รุ่นนี้ไปรันใน Supabase จริง; การแก้ source ไม่เปลี่ยน production database อัตโนมัติ
+- API บังคับ role สำหรับการลบข้อมูลและการจัดการไฟล์; role `user` จำกัดตารางที่เขียนได้และ backend ป้องกันการเปลี่ยน RR/จำนวน/ราคา/การชำระเงินโดยตรง. ตรวจ session และ role ที่ server ทุกครั้ง ไม่ถือ UI เป็น security boundary
+- Master Admin ไม่มีรหัสเริ่มต้นคงที่อีกต่อไป: เมื่อยังไม่มีบัญชี ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; รหัสเริ่มต้นเดิมถูกปฏิเสธ และ secret นี้ใช้ช่วยหมุนรหัส Master เดิมได้
+- Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Render ต้องมี `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ค่าเดียวกันอย่างน้อย 32 ตัวอักษร และต้อง deploy source รุ่นล่าสุด
+- **งานภายนอกที่ยังต้องทำโดยผู้ดูแล:** หมุน Supabase key, ตั้ง Render environment secrets, ใช้ DDL ปิด policy ในฐานข้อมูลจริง, deploy GAS รุ่นล่าสุด/ตั้ง Script Property และตรวจสอบ Git history กับสถานะ production. ยังไม่ได้เชื่อมต่อหรือแก้บริการ production จาก workspace นี้
+- Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
 
 ---
 
@@ -72,7 +74,8 @@
 - หลักฐาน OCR ของ LINE อยู่ใน `line_inbox.extracted_data` JSONB เดิมและ snapshot; ไม่เพิ่มคอลัมน์หรือตารางฐานข้อมูล
 - ใช้ `normalizeOcrDocumentNumber()` และ `normalizeOcrWeightPair()` ร่วมกันสำหรับเลขเล่ม/เลขที่และการจัด Gross/Tare/Net; full-logistics จาก LINE มีฟิลด์น้ำหนักปลายทางแยกจากต้นทาง
 - OCR จาก LINE เพิ่มรอบช่วยอ่านเฉพาะเลขที่ด้วย `gemini-2.5-pro` เมื่อเลขว่างหรือ `docNumberConfidence` ต่ำกว่า 75/100; รับผลรอบช่วยเฉพาะเมื่อมีเลขและ confidence ถึงเกณฑ์, รักษาเลขศูนย์นำหน้า และถ้ายังไม่ชัดให้เก็บช่องเลขว่างเพื่อให้คนตรวจแทนการเดา
-- นโยบาย OCR: เลขเอกสาร/วันที่/น้ำหนัก/ยอดที่ไม่อ่านชัดต้องไม่เติมจากวันที่ปัจจุบันหรือคำนวณแทน; PO แยก Vendor จาก Buyer/Issuer และเว้นผู้ขายว่างเมื่อไม่มีหลักฐานชัด
+- นโยบาย OCR: เลขเอกสาร/วันที่/น้ำหนัก/ยอดที่ไม่อ่านชัดต้องไม่เติมจากวันที่ปัจจุบันหรือคำนวณแทน; ทุกเอกสารแยก `supplierName`, `buyerName`, `documentIssuerName` และบทบาทผู้ออก (`supplier_issued`/`buyer_company_issued`/`uncertain`) พร้อมหลักฐาน/คะแนนบทบาท; backend ใส่ผู้ขายลงช่อง 8 เฉพาะเมื่อมีบทบาทที่ไม่ uncertain, หลักฐาน และคะแนนอย่างน้อย 70/100 และไม่ตรงกับบริษัทผู้ซื้อ
+- การบันทึกทะเบียนร้านค้าใน `VerifyModal` เริ่มต้นไม่เลือกไว้; ผู้ตรวจต้องเทียบช่อง 8 กับภาพและยืนยันเองก่อนบันทึกชื่อ เพื่อไม่ให้ชื่อผู้ซื้อ/บริษัทผู้ออกเอกสารถูกเพิ่มเป็นร้านค้าอัตโนมัติ
 - การจับคู่เอกสาร PO/DO/ตั๋วชั่งใช้เลขอ้างอิงตรงจากช่องอ้างอิงหรือหมายเหตุเท่านั้น; ไม่ใช้ร้านค้า วันที่ รถ น้ำหนัก หรือเลข TR ภายในระบบแทนเลขเอกสารเป็นตัวจับคู่ และตัวตรวจแบบ exact คงตัวคั่น/เลขศูนย์นำหน้า รวมทั้งไม่จับคู่เมื่อ prefix ประเภทเอกสารที่ระบุชัดต่างกัน
 - `VerifyModal` ไม่ตัดสินหรือทำเครื่องหมายบิลซ้ำ; ผู้ตรวจดูภาพและข้อมูลก่อนบันทึกเอง รายการ LINE สถานะ legacy `duplicate_warning` แสดงรวมในกลุ่มรอตรวจสอบ
 - ประวัติการแก้ค่าระหว่าง OCR กับค่าที่ผู้ตรวจยืนยันเก็บใน `line_inbox.extracted_data.reviewFeedbackHistory` ซึ่งเป็น JSONB เดิม; ไม่มีการเพิ่มตารางหรือคอลัมน์ฐานข้อมูล
@@ -86,7 +89,7 @@
 ### กฎข้อที่ 5: ทุกบัญชีรวมถึง Admin ต้องยืนยัน Username/Password
 - ห้ามให้ `Admin` หรือบัญชีอื่นเข้าใช้งานจากการเลือกชื่อ/สลับบัญชีโดยไม่กรอกรหัสผ่าน; หน้าเว็บไม่ถือเป็นตัวตรวจสอบตัวตน
 - Server ตรวจ `app_users.password`, ออก session cookie และปฏิเสธ API ที่ไม่มี session; รหัสผ่านใหม่บันทึกเป็น scrypt hash และไม่ส่งคืนใน response
-- ถ้ายังไม่มี Master Admin ใน `app_users`, server จะสร้าง `Admin` ให้อัตโนมัติด้วยรหัสเริ่มต้น `@Admin` และเก็บเป็น hash. บัญชีที่เคยถูกสร้างด้วย `123456` ย้ายไป `@Admin` เมื่อ login ด้วยรหัสใหม่; `123456` จะถูกปฏิเสธ. ให้เปลี่ยน `@Admin` ซึ่งคาดเดาง่ายเป็นรหัสส่วนตัวทันที
+- หากยังไม่มี Master Admin ใน `app_users`, server จะสร้างบัญชีได้ต่อเมื่อกำหนด `SYSTEM_MASTER_ADMIN_PASSWORD` ที่ยาวอย่างน้อย 16 ตัวอักษรใน runtime; รหัสเริ่มต้นเดิมจะถูกปฏิเสธ
 
 ### กฎข้อที่ 6: ห้ามใช้ `window.alert` หรือ `window.confirm`
 - เนื่องจากระบบอาจรันภายใต้สภาพแวดล้อม iFrame/Webview ปุ่มลบหรือจัดการหลายรายการ (Batch Actions) ทั้งหมดต้องใช้ **Inline Confirmation UI** (ปุ่ม `ยืนยัน / ยกเลิก` บนหน้าจอ) แทน `window.confirm()` เสมอ
@@ -259,9 +262,13 @@
 
 ### 6.2 ขั้นตอนที่เหลือสำหรับการเปิดใช้งานเต็มรูปแบบ (Remaining Action Items)
 
-1. **ขั้นตอนที่ 1 (ผู้ใช้งาน): เชื่อมต่อ Supabase Cloud Database**
-   - นำสคริปต์ SQL จากไฟล์ `DATABASE_STORAGE_BLUEPRINT.md` ไปรันใน SQL Editor บน Supabase Project
-   - กรอกค่า `SUPABASE_URL` และ `SUPABASE_ANON_KEY` ใน Render Dashboard → Environment Variables เพื่อให้ข้อมูลทุกเครื่องซิงก์กันสดๆ
-2. **ขั้นตอนที่ 2 (ผู้ใช้งาน): ตั้งค่า Webhook สำหรับ LINE Official Account จริง**
+1. **ขั้นตอนที่ 1 (ผู้ดูแลระบบ): ปิด credential เดิมและตั้งค่า Supabase**
+   - เพิกถอน/หมุน service-role key เดิม เนื่องจากเคยอยู่ในไฟล์และ Git history; เก็บ key ใหม่เฉพาะ `SUPABASE_SERVICE_ROLE_KEY` ใน Render Environment
+   - ตั้ง `SUPABASE_URL` และ `SYSTEM_MASTER_ADMIN_PASSWORD` (อย่างน้อย 16 ตัวอักษร); ห้ามใส่ key ใน browser, config file หรือ Git
+   - นำ DDL รุ่นปัจจุบันจาก `src/utils/supabaseClient.ts` ไปรันใน Supabase SQL Editor เพื่อปิด public policies; ทดสอบการเชื่อมต่อหลังปรับ schema
+2. **ขั้นตอนที่ 2 (ผู้ดูแลระบบ): ปลอดภัยและเปิดใช้ Google Drive GAS**
+   - ตั้ง secret สุ่มอย่างน้อย 32 ตัวอักษรใน `GOOGLE_APPS_SCRIPT_SHARED_SECRET` หรือหน้าตั้งค่า server และตั้งค่าเดียวกันเป็น Script Property `SMARTWEIGH_SHARED_SECRET`
+   - Deploy `google_apps_script_drive.gs` รุ่นล่าสุดใหม่; ทดสอบ POST ที่ไม่มี secret ต้องถูกปฏิเสธก่อนเปิดใช้
+3. **ขั้นตอนที่ 3 (ผู้ใช้งาน): ตั้งค่า Webhook สำหรับ LINE Official Account จริง**
    - นำ Webhook URL: `https://smartweigh-ai.onrender.com/api/line/webhook` ไปวางใน LINE Developers Console
    - ใส่ `Channel Access Token` และ `Channel Secret` ในการตั้งค่าระบบ แล้วทดสอบส่งรูปบิลเข้ากลุ่ม LINE โครงการ
