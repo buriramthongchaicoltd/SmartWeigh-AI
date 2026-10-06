@@ -186,6 +186,17 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       })
       .catch(error => {
         if (controller.signal.aborted) return;
+        if (hoveredDocPreview?.imageUrl === sourceUrl && hoveredDocPreview.fallbackImageUrl) {
+          setHoveredDocPreview(current => current?.imageUrl === sourceUrl
+            ? {
+                ...current,
+                imageUrl: current.fallbackImageUrl,
+                fallbackImageUrl: undefined,
+                imageLoadFailed: false
+              }
+            : current);
+          return;
+        }
         setProxyImageError(error instanceof Error ? error.message : 'โหลดภาพจาก Google Drive ไม่สำเร็จ');
       });
 
@@ -193,7 +204,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [hoveredDocPreview?.imageUrl]);
+  }, [hoveredDocPreview?.imageUrl, hoveredDocPreview?.fallbackImageUrl]);
 
   const openDocHoverPreview = (
     e: React.MouseEvent<HTMLElement>,
@@ -207,8 +218,10 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     setHoveredDocPreview({
       ...payload,
       imageUrl,
-      fallbackImageUrl: driveFileId && payload.imageUrl !== imageUrl
-        ? payload.imageUrl
+      fallbackImageUrl: driveFileId
+        ? payload.imageUrl && payload.imageUrl !== imageUrl
+          ? payload.imageUrl
+          : `https://drive.google.com/uc?export=view&id=${encodeURIComponent(driveFileId)}`
         : payload.fallbackImageUrl,
       rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
     });

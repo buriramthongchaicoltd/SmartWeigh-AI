@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-06] Restore Hover Images When Drive Proxy Is Unavailable
+
+### การเปลี่ยนแปลง
+- เมื่อการโหลด Drive image proxy ล้มเหลว ให้ลองแสดง URL เดิมของเอกสารแทนซ่อนภาพทั้งหมด; หากไม่มี URL เดิม จะสร้าง Google Drive view URL จาก file ID เป็น fallback
+- แก้ regression ที่การเปลี่ยน PO/DO/ตั๋วปลายทางไปใช้ proxy ทำให้ภาพที่เดิมเปิดจาก URL ได้หายไป เมื่อ Apps Script production ยังไม่มี action `get_image`
+- คงข้อความ error จาก proxy ไว้แสดงต่อเมื่อ fallback URL โหลดไม่ได้ด้วย
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังมีคำเตือนเดิมว่า bundle JavaScript ใหญ่กว่า 500 kB
+- ภาพ private ที่ Google Drive ไม่อนุญาตให้ browser เปิดโดยตรงยังต้องใช้ Apps Script รุ่นที่ deploy action `get_image` แล้ว
+
 ## [2026-10-06] Allow Admin to Renumber Existing TR
 
 ### การเปลี่ยนแปลง
