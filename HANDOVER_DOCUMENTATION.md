@@ -34,6 +34,12 @@
 - ห้ามสรุปหรือย้าย/ลบ 29 ไฟล์จากยอดนี้เพียงอย่างเดียว; การกักกันเป็นการย้ายแบบเลือกเองไป Zone 99 และไม่ใช่การลบถาวร
 - มีการพบ error ชั่วคราวขณะเรียก audit (timeout/response ที่ parse เป็น JSON ไม่ได้) และภายหลังผู้ใช้ส่งผล audit ที่สำเร็จ; สาเหตุของคำขอที่ล้มเหลวเดิมยังไม่ได้ยืนยันจาก Render logs
 
+### สถานะโค้ดการยืนยันเอกสารจาก LINE (6 ต.ค. 2569)
+- การยืนยัน DO/ตั๋วชั่ง/ใบกำกับและ PO ใช้ `POST /api/line/inbox/confirm-document`; ถ้ารายการไม่มี Drive ID จะดึงภาพจาก LINE และสร้างไฟล์ชั่วคราวที่ตั้งชื่อจาก inbox ID ก่อนย้ายเข้าโซนปลายทาง
+- บันทึกเอกสารและเปลี่ยน LINE เป็น `verified` หลังย้ายภาพสำเร็จเท่านั้น; เมื่อมีขั้นตอนผิดพลาด server พยายามคืนข้อมูลเดิมและย้ายภาพกลับ ขณะที่หน้า Verify/PO คงเปิดและรายการยังอยู่ในคิวเพื่อให้เริ่มใหม่
+- หากการชดเชยย้อนกลับเองล้มเหลว API ส่งรายละเอียดความผิดพลาดกลับมา ไม่แสดงความสำเร็จเทียม; เพราะ Supabase และ Google Drive เป็นคนละบริการ จึงต้องตรวจสถานะจริงในกรณีที่ rollback รายงาน error
+- `npm.cmd run lint` และ `npm.cmd run build` ผ่านใน workspace; **ยังไม่ได้ทดสอบ LINE Content API, Google Drive, หรือ Supabase จริง และการเปลี่ยนแปลงนี้ยังไม่ใช่หลักฐานว่า production deploy แล้ว**
+
 ### สถานะความปลอดภัยหลังแก้ไขใน repository
 - ลบ `.supabase_config.json` ที่ติดตามใน Git และเอา credential fallback ออกจาก source; service-role key และ `DATABASE_URL` รับจาก runtime environment เท่านั้น. เพื่อรองรับ Render เดิม backend ยอม fallback ไป `SUPABASE_ANON_KEY` เมื่อไม่มี service-role key; fallback นี้ต้องอาศัย RLS policies เดิมและจะใช้ไม่ได้หลังรัน DDL ที่ revoke สิทธิ์ `anon`/`authenticated`. ควรตั้ง service-role key ที่หมุนใหม่ใน Render เพื่อใช้ DDL แบบปิด direct access. **credential เดิมยังคงอยู่ใน Git history จึงต้องเพิกถอน/หมุนบน Supabase และตรวจการใช้งานย้อนหลัง**
 - `.supabase_config.json` ที่ถูก deploy ใน repository มีเฉพาะ Project URL กับ public anon key (service-role key ถูกตัดออก); backend โหลด anon key จากไฟล์ legacy config ได้เพื่อให้ deployment เดิมทำงานโดยไม่ต้องตั้ง environment variable mới. การเชื่อมแบบ anon ใช้ได้เมื่อ RLS policies ที่มีอยู่อนุญาต; DDL ที่ปิด anon access จะต้องใช้ service-role key จาก runtime environment

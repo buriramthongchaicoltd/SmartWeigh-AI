@@ -4396,6 +4396,387 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/line/inbox/confirm-document', async (req: Request, res: Response) => {
+  const actor = getAuthenticatedUser(req);
+  const kind = req.body?.kind === 'purchase_order' ? 'purchase_order' : req.body?.kind === 'order' ? 'order' : '';
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  const record = req.body?.record;
+  let client: ReturnType<typeof getSupabaseClient> = null;
+  let previousInbox: Record<string, any> | null = null;
+  let previousDocument: Record<string, any> | null = null;
+  let targetTable = '';
+  let documentId = '';
+  let documentWriteAttempted = false;
+  let inboxWriteAttempted = false;
+  let driveMayHaveChanged = false;
+  let driveFileId = '';
+  let sourceZone = 'zone_00';
+  let targetZone = '';
+  let targetFolderId = '';
+  let sourceFolderId = '';
+  let rollbackFileName = '';
+  let driveCfg: ServerDriveConfig | null = null;
+  let driveToken: string | null = null;
+  let gasMode = false;
+
+  try {
+    if (!actor) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนยืนยันเอกสาร' });
+    if (!kind || !inboxId || !record || typeof record !== 'object' || Array.isArray(record)) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลยืนยันเอกสารจาก LINE ไม่ครบถ้วน' });
+    }
+    if (kind === 'purchase_order' && actor.role === 'user') {
+      return res.status(403).json({ success: false, error: 'ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อบันทึกใบสั่งซื้อ' });
+    }
+    if (kind === 'order' && record.lineInboxId !== inboxId) {
+      return res.status(400).json({ success: false, error: 'รหัสรายการ LINE ไม่ตรงกับเอกสารที่ยืนยัน' });
+    }
+    if (kind === 'purchase_order' && record.lineInboxId !== inboxId) {
+      return res.status(400).json({ success: false, error: 'รหัสรายการ LINE ไม่ตรงกับใบสั่งซื้อที่ยืนยัน' });
+    }
+    if (typeof record.id !== 'string' || !record.id.trim()) {
+      return res.status(400).json({ success: false, error: 'เอกสารไม่มีรหัสสำหรับบันทึก' });
+    }
+
+    client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase' });
+
+    const { data: inbox, error: inboxReadError } = await client
+      .from('line_inbox')
+      .select('*')
+      .eq('id', inboxId)
+      .maybeSingle();
+    if (inboxReadError) throw new Error(`อ่านรายการ LINE ไม่สำเร็จ: ${inboxReadError.message}`);
+    if (!inbox) return res.status(404).json({ success: false, error: 'ไม่พบรายการ LINE ที่ต้องการยืนยัน' });
+    previousInbox = inbox;
+
+    targetTable = kind === 'purchase_order' ? 'purchase_orders' : 'orders';
+    documentId = record.id;
+    const { data: priorDocument, error: documentReadError } = await client
+      .from(targetTable)
+      .select('*')
+      .eq('id', documentId)
+      .maybeSingle();
+    if (documentReadError) throw new Error(`อ่านเอกสารเดิมก่อนบันทึกไม่สำเร็จ: ${documentReadError.message}`);
+    previousDocument = priorDocument;
+
+    if (inbox.status === 'verified' && inbox.drive_file_id && inbox.drive_file_location) {
+      return res.json({
+        success: true,
+        alreadyConfirmed: true,
+        driveFileId: inbox.drive_file_id,
+        driveFileLocation: inbox.drive_file_location,
+        driveWebViewLink: inbox.drive_web_view_link || `https://drive.google.com/file/d/${inbox.drive_file_id}/view`
+      });
+    }
+
+    const { data: runtimeConfigs, error: runtimeConfigError } = await client
+      .from('system_config')
+      .select('config_key,config_value')
+      .in('config_key', ['drive_config', 'line_bot_config']);
+    if (runtimeConfigError) throw new Error(`โหลดการตั้งค่า LINE/Drive ไม่สำเร็จ: ${runtimeConfigError.message}`);
+    for (const config of runtimeConfigs || []) {
+      if (config.config_key === 'drive_config' && config.config_value) {
+        saveStoredDriveConfig(config.config_value);
+      } else if (config.config_key === 'line_bot_config' && config.config_value) {
+        lineBotConfig = { ...lineBotConfig, ...config.config_value, strictZeroPushQuota: true };
+      }
+    }
+
+    driveCfg = getStoredDriveConfig();
+    if (!driveCfg.isEnabled || !driveCfg.rootFolderId) {
+      throw new Error('ยังไม่ได้ตั้งค่า Google Drive สำหรับจัดเก็บภาพ');
+    }
+    driveToken = await getDriveAccessToken();
+    gasMode = Boolean(driveCfg.connectionMode === 'gas' || (!driveToken && driveCfg.gasWebAppUrl));
+    if (!driveToken && !gasMode) throw new Error('ไม่สามารถเชื่อมต่อ Google Drive ได้');
+    if (gasMode && !driveCfg.gasWebAppUrl) throw new Error('ยังไม่ได้ตั้งค่า Google Apps Script Web App URL');
+
+    const docType = kind === 'purchase_order' ? 'purchase_order' : String(record.docType || 'delivery_order');
+    if (!['purchase_order', 'delivery_order', 'dest_weighbridge', 'tax_invoice'].includes(docType)) {
+      throw new Error('ประเภทเอกสารไม่รองรับการยืนยันจากกล่อง LINE');
+    }
+    targetZone = docType === 'purchase_order'
+      ? 'zone_01'
+      : docType === 'dest_weighbridge'
+        ? 'zone_03'
+        : docType === 'tax_invoice'
+          ? 'zone_04'
+          : 'zone_02';
+    sourceZone = typeof inbox.drive_file_location === 'string' && /^zone_0[0-4]$/.test(inbox.drive_file_location)
+      ? inbox.drive_file_location
+      : 'zone_00';
+    const docNumber = String(
+      kind === 'purchase_order'
+        ? record.poNumber || 'NEW'
+        : record.col6 || record.col4 || record.col17 || record.col1 || 'NEW'
+    );
+    const docDate = String(
+      kind === 'purchase_order'
+        ? record.orderDate || ''
+        : docType === 'dest_weighbridge'
+          ? record.col16 || record.col7 || ''
+          : record.col7 || ''
+    );
+    const safeDate = sanitizeDriveName(docDate || new Date().toISOString().slice(0, 10));
+    const safeDocNo = sanitizeDriveName(docNumber);
+    const prefix = docType === 'purchase_order'
+      ? 'PO'
+      : docType === 'dest_weighbridge'
+        ? 'WB'
+        : docType === 'tax_invoice'
+          ? 'INV'
+          : 'DO';
+    let extension = 'jpg';
+    let finalFileName = `${prefix}_${safeDate}_${safeDocNo}.${extension}`;
+    rollbackFileName = `LINE_${sanitizeDriveName(inboxId)}.${extension}`;
+
+    let zones: Record<string, string> = {};
+    if (driveToken) {
+      zones = await ensureStandardDriveZones(driveToken, driveCfg.rootFolderId);
+      if (!zones.ZONE_00 || !zones.ZONE_01 || !zones.ZONE_02 || !zones.ZONE_03 || !zones.ZONE_04) {
+        throw new Error('สร้างหรืออ่านโฟลเดอร์มาตรฐาน Google Drive ไม่ครบ');
+      }
+    }
+    const zoneFolderIds: Record<string, string> = driveToken
+      ? {
+          zone_00: zones.ZONE_00,
+          zone_01: zones.ZONE_01,
+          zone_02: zones.ZONE_02,
+          zone_03: zones.ZONE_03,
+          zone_04: zones.ZONE_04
+        }
+      : {};
+
+    let subfolderName: string | undefined;
+    if (docType === 'delivery_order') {
+      subfolderName = `${sanitizeDriveName(record.col1 || 'TR')}_DO-${safeDocNo}`;
+    } else if (docType === 'purchase_order') {
+      subfolderName = `${safeDocNo}_${sanitizeDriveName(record.storeName || 'SUPPLIER')}`;
+    }
+    targetFolderId = zoneFolderIds[targetZone] || '';
+    sourceFolderId = zoneFolderIds[sourceZone] || zoneFolderIds.zone_00 || '';
+    if (driveToken && subfolderName) {
+      targetFolderId = await getOrCreateSubfolder(driveToken, targetFolderId, subfolderName);
+    }
+
+    driveFileId = typeof inbox.drive_file_id === 'string' ? inbox.drive_file_id : '';
+    let driveWebViewLink = typeof inbox.drive_web_view_link === 'string' ? inbox.drive_web_view_link : '';
+    if (!driveFileId) {
+      const storedImage = typeof inbox.image_url === 'string' ? inbox.image_url.trim() : '';
+      const isStoredImageBase64 = /^data:image\/[^;]+;base64,/i.test(storedImage) ||
+        /^[A-Za-z0-9+/=\r\n]+$/.test(storedImage);
+      let base64Image = isStoredImageBase64 && storedImage.length > 50 ? storedImage : '';
+      let mimeType = base64Image.match(/^data:(image\/[^;]+);base64,/i)?.[1] || 'image/jpeg';
+      if (!base64Image && inbox.line_message_id) {
+        if (!lineBotConfig.channelAccessToken) throw new Error('ยังไม่ได้ตั้งค่า LINE Channel Access Token สำหรับกู้ภาพ');
+        const lineResponse = await fetch(
+          `https://api-data.line.me/v2/bot/message/${encodeURIComponent(inbox.line_message_id)}/content`,
+          { headers: { Authorization: `Bearer ${lineBotConfig.channelAccessToken}` } }
+        );
+        if (!lineResponse.ok) {
+          throw new Error(`LINE ส่งภาพต้นฉบับกลับมาไม่ได้ (HTTP ${lineResponse.status})`);
+        }
+        mimeType = lineResponse.headers.get('content-type') || 'image/jpeg';
+        if (!mimeType.startsWith('image/')) throw new Error('ข้อมูลที่ LINE ส่งกลับมาไม่ใช่ไฟล์ภาพ');
+        base64Image = `data:${mimeType};base64,${Buffer.from(await lineResponse.arrayBuffer()).toString('base64')}`;
+      }
+      extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
+      finalFileName = `${prefix}_${safeDate}_${safeDocNo}.${extension}`;
+      rollbackFileName = `LINE_${sanitizeDriveName(inboxId)}.${extension}`;
+      const imageBytes = Buffer.from(base64Image.replace(/^data:[a-zA-Z0-9/+-]+;base64,/i, ''), 'base64');
+      if (!imageBytes.length) throw new Error('ไม่พบภาพในฐานข้อมูลและไม่สามารถดึงภาพจาก LINE ได้');
+
+      if (gasMode && driveCfg.gasWebAppUrl) {
+        const uploaded = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+          action: 'upload',
+          rootFolderId: driveCfg.rootFolderId,
+          targetZone: 'zone_00',
+          fileName: rollbackFileName,
+          base64Image
+        });
+        if (!uploaded?.success || !uploaded.fileId) {
+          throw new Error(uploaded?.error || 'อัปโหลดภาพเข้ากล่องพัก Google Drive ไม่สำเร็จ');
+        }
+        driveFileId = uploaded.fileId;
+        driveWebViewLink = uploaded.webViewLink || `https://drive.google.com/file/d/${driveFileId}/view`;
+      } else if (driveToken) {
+        let uploaded = await findDriveFileByName(driveToken, zoneFolderIds.zone_00, rollbackFileName);
+        if (!uploaded) {
+          uploaded = await uploadFileToDrive({
+            accessToken: driveToken,
+            folderId: zoneFolderIds.zone_00,
+            fileName: rollbackFileName,
+            base64Data: base64Image,
+            mimeType
+          });
+        }
+        driveFileId = uploaded.fileId;
+        driveWebViewLink = uploaded.webViewLink || `https://drive.google.com/file/d/${driveFileId}/view`;
+      }
+      sourceZone = 'zone_00';
+      sourceFolderId = zoneFolderIds.zone_00 || '';
+    }
+    if (!driveFileId) throw new Error('ไม่พบ Drive File ID หลังเตรียมภาพ');
+
+    if (gasMode && driveCfg.gasWebAppUrl) {
+      driveMayHaveChanged = true;
+      const moved = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+        action: 'rename_and_move',
+        rootFolderId: driveCfg.rootFolderId,
+        fileId: driveFileId,
+        newFileName: finalFileName,
+        targetZone,
+        subfolderName
+      });
+      if (!moved?.success) throw new Error(moved?.error || 'เปลี่ยนชื่อหรือย้ายภาพใน Google Drive ไม่สำเร็จ');
+      targetFolderId = moved.targetFolderId || targetFolderId;
+      driveWebViewLink = moved.webViewLink || driveWebViewLink || `https://drive.google.com/file/d/${driveFileId}/view`;
+    } else if (driveToken) {
+      driveMayHaveChanged = true;
+      const renameResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?fields=id,name,parents`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${driveToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ name: finalFileName })
+        }
+      );
+      if (!renameResponse.ok) throw new Error(`เปลี่ยนชื่อไฟล์ใน Google Drive ไม่สำเร็จ: ${await renameResponse.text()}`);
+      if (sourceFolderId !== targetFolderId) {
+        await moveDriveFile(driveToken, driveFileId, sourceFolderId, targetFolderId);
+      }
+      driveWebViewLink = driveWebViewLink || `https://drive.google.com/file/d/${driveFileId}/view`;
+    }
+
+    const savedRecord = {
+      ...record,
+      driveFileId,
+      driveFolderId: targetFolderId || undefined,
+      lineInboxId: inboxId
+    };
+    const documentRow = kind === 'purchase_order'
+      ? mapPOToSupabase(savedRecord)
+      : mapOrderToSupabase(savedRecord);
+    if (kind === 'order') await preserveRestrictedOrderFields(client, actor, [documentRow]);
+
+    documentWriteAttempted = true;
+    const { error: documentWriteError } = await client
+      .from(targetTable)
+      .upsert(documentRow, { onConflict: 'id' });
+    if (documentWriteError) throw new Error(`บันทึกเอกสารไม่สำเร็จ: ${documentWriteError.message}`);
+
+    const verifiedAt = new Date().toISOString();
+    const extractedData = {
+      ...(inbox.extracted_data || {}),
+      ...savedRecord,
+      verifiedOrderId: kind === 'purchase_order' ? savedRecord.poNumber : savedRecord.col1,
+      verifiedBy: actor.fullName,
+      verifiedAt,
+      driveFileId,
+      driveFileLocation: targetZone,
+      driveWebViewLink
+    };
+    inboxWriteAttempted = true;
+    const { data: updatedInbox, error: inboxWriteError } = await client
+      .from('line_inbox')
+      .update({
+        status: 'verified',
+        drive_file_id: driveFileId,
+        drive_file_location: targetZone,
+        drive_web_view_link: driveWebViewLink,
+        doc_number: docNumber,
+        doc_date: docDate || null,
+        store_name: savedRecord.storeName || savedRecord.col8 || null,
+        extracted_data: extractedData
+      })
+      .eq('id', inboxId)
+      .select('id')
+      .maybeSingle();
+    if (inboxWriteError) throw new Error(`บันทึกสถานะกล่อง LINE ไม่สำเร็จ: ${inboxWriteError.message}`);
+    if (!updatedInbox) throw new Error('ไม่พบรายการ LINE ขณะบันทึกสถานะยืนยัน');
+
+    return res.json({
+      success: true,
+      driveFileId,
+      driveFolderId: targetFolderId || undefined,
+      driveFileLocation: targetZone,
+      driveWebViewLink,
+      verifiedAt
+    });
+  } catch (err: any) {
+    const rollbackErrors: string[] = [];
+    if (client && inboxWriteAttempted && previousInbox) {
+      try {
+        const { error } = await client.from('line_inbox').upsert(previousInbox, { onConflict: 'id' });
+        if (error) throw error;
+      } catch (rollbackError: any) {
+        rollbackErrors.push(`กู้สถานะกล่อง LINE กลับไม่สำเร็จ: ${rollbackError?.message || rollbackError}`);
+      }
+    }
+    if (client && documentWriteAttempted && targetTable && documentId) {
+      try {
+        const result = previousDocument
+          ? await client.from(targetTable).upsert(previousDocument, { onConflict: 'id' })
+          : await client.from(targetTable).delete().eq('id', documentId);
+        if (result.error) throw result.error;
+      } catch (rollbackError: any) {
+        rollbackErrors.push(`ยกเลิกการบันทึกเอกสารกลับไม่สำเร็จ: ${rollbackError?.message || rollbackError}`);
+      }
+    }
+    if (driveMayHaveChanged && driveFileId && driveCfg && targetZone && sourceZone) {
+      try {
+        if (gasMode && driveCfg.gasWebAppUrl) {
+          const rollback = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+            action: 'rename_and_move',
+            rootFolderId: driveCfg.rootFolderId,
+            fileId: driveFileId,
+            newFileName: rollbackFileName,
+            targetZone: sourceZone
+          });
+          if (!rollback?.success) throw new Error(rollback?.error || 'Google Apps Script ไม่ยืนยันการย้อนย้ายภาพ');
+        } else if (driveToken) {
+          const fileResponse = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?fields=parents`,
+            { headers: { Authorization: `Bearer ${driveToken}` } }
+          );
+          if (!fileResponse.ok) throw new Error(`อ่านตำแหน่งไฟล์เพื่อย้อนกลับไม่สำเร็จ (HTTP ${fileResponse.status})`);
+          const fileInfo = await fileResponse.json() as { parents?: string[] };
+          for (const parentId of fileInfo.parents || []) {
+            if (parentId !== sourceFolderId) await moveDriveFile(driveToken, driveFileId, parentId, sourceFolderId);
+          }
+          const renameResponse = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}`,
+            {
+              method: 'PATCH',
+              headers: {
+                Authorization: `Bearer ${driveToken}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ name: rollbackFileName })
+            }
+          );
+          if (!renameResponse.ok) throw new Error(`คืนชื่อไฟล์เดิมไม่สำเร็จ (HTTP ${renameResponse.status})`);
+        }
+      } catch (rollbackError: any) {
+        rollbackErrors.push(`ย้อนภาพกลับไปยังกล่องพักไม่สำเร็จ: ${rollbackError?.message || rollbackError}`);
+      }
+    }
+
+    const errorMessage = err?.message || 'ยืนยันเอกสารจาก LINE ไม่สำเร็จ';
+    console.error('[LINE Inbox Confirm] Confirmation failed:', errorMessage, rollbackErrors);
+    return res.status(500).json({
+      success: false,
+      error: rollbackErrors.length
+        ? `${errorMessage} และการย้อนกลับมีข้อผิดพลาด: ${rollbackErrors.join(' | ')}`
+        : errorMessage,
+      rollbackSucceeded: rollbackErrors.length === 0
+    });
+  }
+});
+
 app.post('/api/drive/recover-order-line-image', async (req: Request, res: Response) => {
   try {
     const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
