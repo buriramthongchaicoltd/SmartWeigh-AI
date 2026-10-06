@@ -73,6 +73,61 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
 const normalizeDocumentText = (value: string) =>
   value.toLocaleLowerCase().replace(/[\s.,:;!?'"“”‘’()\-_/]+/g, '');
 
+const loadInboxImage = async (item: LineBillInboxItem, signal?: AbortSignal): Promise<string> => {
+  if (item.image && item.image.length > 10) return item.image;
+
+  let imageError = '';
+  let driveWebViewLink = item.driveWebViewLink;
+  try {
+    const response = await fetch(`/api/line/inbox/image/${encodeURIComponent(item.id)}`, { signal });
+    const data = await response.json();
+    if (response.ok && data.success && typeof data.image === 'string' && data.image.length > 50) {
+      return data.image;
+    }
+    if (typeof data.driveWebViewLink === 'string') driveWebViewLink = data.driveWebViewLink;
+    imageError = data.error || `โหลดรูปจากกล่องพัก LINE ไม่สำเร็จ (HTTP ${response.status})`;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    imageError = error instanceof Error ? error.message : 'โหลดรูปจากกล่องพัก LINE ไม่สำเร็จ';
+  }
+
+  let driveFileId = item.driveFileId;
+  if (!driveFileId && driveWebViewLink) {
+    try {
+      const url = new URL(driveWebViewLink);
+      if (['drive.google.com', 'docs.google.com'].includes(url.hostname)) {
+        driveFileId = url.pathname.match(/\/(?:file\/)?d\/([^/]+)/)?.[1] ||
+          url.searchParams.get('id') ||
+          undefined;
+      }
+    } catch {
+      // An invalid stored link can still be reported through the image endpoint error below.
+    }
+  }
+  if (!driveFileId || !/^[a-zA-Z0-9_-]{5,200}$/.test(driveFileId)) {
+    throw new Error(imageError || 'ไม่พบรูปภาพหรือรหัสไฟล์ Google Drive ของรายการนี้');
+  }
+
+  const driveResponse = await fetch(`/api/drive/image/${encodeURIComponent(driveFileId)}`, { signal });
+  if (!driveResponse.ok) {
+    const result = await driveResponse.json().catch(() => null);
+    throw new Error(result?.error || `โหลดรูปจาก Google Drive ไม่สำเร็จ (HTTP ${driveResponse.status})`);
+  }
+  const imageBlob = await driveResponse.blob();
+  if (!imageBlob.type.startsWith('image/')) {
+    throw new Error(`ข้อมูลจาก Google Drive ไม่ใช่รูปภาพ (${imageBlob.type || 'ไม่ทราบชนิดไฟล์'})`);
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string'
+      ? resolve(reader.result)
+      : reject(new Error('แปลงรูปภาพจาก Google Drive ไม่สำเร็จ'));
+    reader.onerror = () => reject(new Error('อ่านข้อมูลรูปภาพจาก Google Drive ไม่สำเร็จ'));
+    reader.readAsDataURL(imageBlob);
+  });
+};
+
 export const LineInboxView: React.FC<LineInboxViewProps> = ({
   inboxItems,
   onUpdateInboxItem,
@@ -320,14 +375,9 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     if (image) return;
 
     try {
-      const resp = await fetch(`/api/line/inbox/image/${item.id}`);
-      if (!resp.ok) throw new Error(`Image request failed: ${resp.status}`);
-      const data = await resp.json();
-      const loadedImage = data.success && data.image ? data.image : null;
-      if (loadedImage) {
-        hoverImageCache.current.set(item.id, loadedImage);
-        setPreloadedImageVersion(version => version + 1);
-      }
+      const loadedImage = await loadInboxImage(item);
+      hoverImageCache.current.set(item.id, loadedImage);
+      setPreloadedImageVersion(version => version + 1);
       if (hoveredPreviewId.current === item.id) {
         setHoverImagePreview(current => current?.id === item.id
           ? { ...current, image: loadedImage, loading: false }
@@ -502,15 +552,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       while (nextIndex < queue.length && !controller.signal.aborted) {
         const item = queue[nextIndex++];
         try {
-          const response = await fetch(`/api/line/inbox/image/${item.id}`, {
-            signal: controller.signal
-          });
-          if (!response.ok) throw new Error(`Image request failed: ${response.status}`);
-          const data = await response.json();
-          if (!data.success || !data.image) {
-            markImageLoaded();
-            continue;
-          }
+          const imageData = await loadInboxImage(item, controller.signal);
 
           const image = new Image();
           const previewImage = await new Promise<string>((resolve, reject) => {
@@ -528,7 +570,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               resolve(canvas.toDataURL('image/jpeg', 0.82));
             };
             image.onerror = () => reject(new Error('Could not decode bill image'));
-            image.src = data.image;
+            image.src = imageData;
           });
           if (controller.signal.aborted) return;
           hoverImageCache.current.set(item.id, previewImage);
@@ -577,11 +619,12 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   // AI Re-Scan on Row
   const handleCardAIRescan = async (item: LineBillInboxItem) => {
-    if (!item.image || rescanningId) return;
+    if (rescanningId) return;
     setRescanningId(item.id);
     try {
+      const image = await loadInboxImage(item);
       const res = await rescanBillForTargetDocType(
-        item.image,
+        image,
         item.detectedDocType,
         item.extractedData
       );
@@ -610,8 +653,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       } else {
         showToast(res.error || 'ไม่สามารถอ่านข้อมูลใหม่ได้', 'info');
       }
-    } catch {
-      showToast('เกิดข้อผิดพลาดในการสแกนซ้ำ', 'info');
+    } catch (error) {
+      showToast(
+        error instanceof Error ? `สแกนซ้ำไม่สำเร็จ: ${error.message}` : 'เกิดข้อผิดพลาดในการสแกนซ้ำ',
+        'info'
+      );
     } finally {
       setRescanningId(null);
     }

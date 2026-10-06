@@ -13,8 +13,8 @@
 
 | ส่วนประกอบ | เทคโนโลยีที่ใช้ | หน้าที่หลัก |
 | :--- | :--- | :--- |
-| **1. Core Transactional Database** | **Supabase Cloud (PostgreSQL + Realtime)** | จัดเก็บข้อมูลตาราง 39 คอลัมน์, ใบสั่งซื้อ (PO), ตั๋วชั่งปลายทาง, ใบกำกับภาษี, ทะเบียนร้านค้า, โครงการ, กล่องพัก LINE, สิทธิ์ผู้ใช้งาน และรหัสอ้างอิงไฟล์ (`drive_file_id`, `drive_folder_id`) พร้อมซิงก์หน้าจอทุกเครื่องแบบ Realtime |
-| **2. File Storage & Zero-Junk Engine** | **Google Drive API (Service Account / OAuth2)** | จัดเก็บรูปถ่ายบิลและเอกสารแนบทั้งหมด แยกโฟลเดอร์ตามประเภทและเลขที่เอกสารอัตโนมัติ ย้ายไฟล์มารวมชุดเมื่อชนบิลสำเร็จ และลบไฟล์เก่า/ไฟล์ที่ถูกลบออกจากระบบทันที (Zero-Junk Cleanup) |
+| **1. Core Transactional Database** | **Supabase Cloud (PostgreSQL)** | จัดเก็บข้อมูลตาราง 39 คอลัมน์, ใบสั่งซื้อ (PO), ตั๋วชั่งปลายทาง, ใบกำกับภาษี, ทะเบียนร้านค้า, โครงการ, กล่องพัก LINE, สิทธิ์ผู้ใช้งาน และรหัสอ้างอิงไฟล์ (`drive_file_id`, `drive_folder_id`); วิธี refresh/sync หน้าจอแตกต่างตาม feature โดย LINE Inbox ใช้ API polling ทุก 8 วินาที ไม่ใช่ Supabase Realtime subscription |
+| **2. File Storage & Zero-Junk Engine** | **Google Drive API (Apps Script Web App / Service Account)** | จัดเก็บรูปถ่ายบิลและเอกสารแนบ แยกโฟลเดอร์ตามประเภทและเลขที่เอกสารอัตโนมัติ และย้ายไฟล์ตามสถานะการตรวจรับ/จับคู่; การนำไฟล์ไปถังขยะและการบันทึกฐานข้อมูลเป็นคนละขั้นตอน ไม่ใช่ transaction เดียว |
 
 ### สถานะและข้อจำกัดด้านความปลอดภัยหลังทวนโค้ด
 - `.supabase_config.json` ที่เคยถูก track ถูกนำออกแล้ว; service-role credential และ `DATABASE_URL` อ่านจาก runtime environment เท่านั้น. เนื่องจาก credential เดิมยังอยู่ใน Git history ให้ถือว่า compromised และเพิกถอน/หมุนก่อนใช้งานต่อ; อย่าคัดลอก secret ลงเอกสารหรือ log
@@ -78,11 +78,11 @@
 
 | ลำดับ | เหตุการณ์ในระบบ (System Event) | การทำงานที่ฐานข้อมูล Supabase | การทำงานที่ Google Drive อัตโนมัติ (Zero-Junk & Auto-Move) |
 | :---: | :--- | :--- | :--- |
-| **1** | **บอท LINE รับรูปบิลใหม่จากกลุ่ม** | สร้างเรคคอร์ดใหม่ในตาราง `line_inbox` พร้อมบันทึก `drive_file_id` | อัปโหลดรูปเข้าโฟลเดอร์ `00_กล่องพักบิล_LINE_รอตรวจรับ` |
-| **2** | **กดลบรายการในกล่องพักบิล LINE** | ตรวจ `drive_file_id` และลบเรคคอร์ดออกจากตาราง `line_inbox` หลังเตรียมไฟล์สำเร็จ | ถ้าไม่มี `orders`/`purchase_orders` อ้างถึง ให้ย้ายไฟล์จาก `00` ไปกักกันใน `99`; ถ้ายังมีเอกสารอ้างถึงให้เก็บไว้; หากย้ายล้มเหลวไม่ลบแถว LINE |
-| **3** | **กดยืนยันตรวจรับบิลเป็น `ใบส่งของ (DO)`** | บันทึกลงตาราง `orders` และอัปเดตสถานะใน `line_inbox` เป็น `verified` | สร้างโฟลเดอร์ใบงาน `02_ใบงานหลัก_DO_ครบชุด/TR-xxxx_DO-xxxx` แล้วย้ายไฟล์จาก `00` เข้าไปทันที |
+| **1** | **บอท LINE รับรูปบิลใหม่จากกลุ่ม** | ตรวจ signature และบันทึกแถวสถานะ `queued` ใน `line_inbox` ก่อนตอบ HTTP 200; หลัง ACK จึงทำ OCR และอัปโหลดไฟล์ โดยบันทึก `drive_file_id` เมื่อ upload สำเร็จ | พยายามอัปโหลดรูปเข้าโฟลเดอร์ `00_กล่องพักบิล_LINE_รอตรวจรับ`; หาก process หยุดหรือ upload ล้มเหลว แถวคิวยังคงอยู่เพื่อ manual/daily recovery |
+| **2** | **กดลบรายการในกล่องพักบิล LINE** | ตรวจ references แล้วลบ row หลัง API จัดการไฟล์ตอบว่าสำเร็จ; หาก Drive API ล้มเหลวจะไม่ลบ row | ถ้าไม่มี `orders`/`purchase_orders` หรือ LINE row อื่นอ้างถึง ให้นำไฟล์ไปถังขยะ; หากยังมี reference ให้เก็บไฟล์ไว้. Drive trash และ Supabase delete เป็นขั้นตอนแยกกัน จึงอาจเหลือ row ที่อ้างไฟล์ในถังขยะเมื่อ DB delete ล้มเหลวหลัง Drive สำเร็จ |
+| **3** | **กดยืนยันตรวจรับบิลเป็น `ใบส่งของ (DO)`** | ย้ายไฟล์ให้สำเร็จก่อน แล้วปรับ local Order/Inbox state; การ sync ไป `orders`/`line_inbox` ใช้ debounced DB sync ไม่ใช่การบันทึก transaction แบบ synchronous | สร้างโฟลเดอร์ใบงาน `02_ใบงานหลัก_DO_ครบชุด/TR-xxxx_DO-xxxx` แล้วย้ายไฟล์จาก `00` เข้าไปก่อนบันทึก state |
 | **3.1** | **กดยืนยันตรวจรับรายการ LINE เป็น `ใบสั่งซื้อ (PO)`** | ย้ายไฟล์จาก `00` ไป `01` ให้สำเร็จก่อน; จากนั้นบันทึก `purchase_orders` พร้อม `drive_file_id` แล้วเปลี่ยน `line_inbox.status` เป็น `verified` ในฐานข้อมูลก่อนปิดหน้าตรวจรับ | หากไม่มี Drive ID, ย้ายไฟล์ไม่สำเร็จ, หรือบันทึก PO/สถานะคิวไม่สำเร็จ จะไม่ถือว่าการตรวจรับสำเร็จ; หากบันทึก PO แล้วอัปเดต Inbox ไม่ได้ ระบบพยายามย้อน PO และแจ้งข้อผิดพลาด |
-| **4** | **กดยืนยันตรวจรับบิลเป็น `ตั๋วชั่งปลายทาง` (ยังไม่เจอ DO)** | บันทึกลงตาราง `orders` (`doc_type = 'dest_weighbridge'`) | ย้ายไฟล์ไปพักไว้ที่โฟลเดอร์ `03_ตั๋วชั่งปลายทาง_รอจับคู่DO` |
+| **4** | **กดยืนยันตรวจรับบิลเป็น `ตั๋วชั่งปลายทาง` (ยังไม่เจอ DO)** | ย้ายไฟล์ก่อน แล้วปรับ local Order/Inbox state ซึ่ง sync ไป `orders`/`line_inbox` แบบ debounced (`doc_type = 'dest_weighbridge'`) | ย้ายไฟล์ไปพักไว้ที่โฟลเดอร์ `03_ตั๋วชั่งปลายทาง_รอจับคู่DO` |
 | **5** | **เมื่อ `ตั๋วชั่งปลายทาง` หรือ `ใบกำกับภาษี` จับคู่ชนกับ `DO` สำเร็จ** | อัปเดต `matched_dest_ticket_id` / `linked_via_doc_no` และซิงก์น้ำหนักช่อง 16–21 เข้าใบ DO | **ย้ายไฟล์รูปตั๋วชั่ง/ใบกำกับภาษี** จากโฟลเดอร์ `03` หรือ `04` เข้าไปรวมในโฟลเดอร์ `02_ใบงานหลัก_DO_ครบชุด/TR-xxxx` ของใบ DO คู่นั้นทันที |
 | **6** | **เมื่อกดยกเลิกการจับคู่บิล (Unlink)** | ล้างค่าการผูกบิลใน Supabase | ย้ายไฟล์ตั๋วชั่งกลับไปยัง `03_ตั๋วชั่งปลายทาง_รอจับคู่DO` (หรือย้ายใบกำกับภาษีกลับไป `04`) อัตโนมัติ |
 | **7** | **แก้ไขเลขที่เอกสาร (เช่น แก้เลข DO)** | อัปเดตเลขที่เอกสารใน Supabase | สั่งเปลี่ยนชื่อโฟลเดอร์เดิม (`Rename Folder`) ตาม `drive_folder_id` โดยไม่ต้องย้ายไฟล์ |
@@ -94,7 +94,9 @@
 
 **LINE Webhook durable acceptance:** Webhook ตรวจ `x-line-signature` ด้วย raw request body และต้องมี Channel Secret ก่อนประมวลผลรูปภาพทุกครั้ง ระบบ insert/upsert แถวสถานะ `queued` ใน `line_inbox` ก่อนตอบ HTTP 200 โดยใช้ `LINE_{messageId}` และ `ON CONFLICT DO NOTHING` เพื่อให้ LINE retry หลัง timeout ได้โดยไม่เขียนซ้ำ; หาก Supabase ยังไม่รับแถว ระบบตอบ HTTP 503 แทน success. หลัง ACK จึงดาวน์โหลดรูป, วิเคราะห์ AI, อัปโหลด Drive, ตอบด้วย LINE Reply API และอัปเดตแถวเดิม. หาก process หยุดหลัง durable acceptance แถวที่ยังไม่มี Drive ID/OCR จะเข้า flow Daily/Manual LINE Inbox Drive Sync; ภาพต้นฉบับยังขึ้นกับ LINE retention จนกว่าจะอัปโหลด Drive สำเร็จ. Reply token ไม่ได้เก็บถาวรและใช้ซ้ำไม่ได้; สถานะการตอบกลับล้มเหลวถูกบันทึกใน `extracted_data` และแสดงบนกล่องพัก แต่ไม่สามารถรับประกันการ retry ข้อความหลัง token หมดอายุ.
 
-**LINE verification save gate:** เมื่อผู้ใช้ยืนยันเอกสารจาก LINE Inbox ระบบต้องมี `drive_file_id` และ Drive API ต้องยืนยันว่าไฟล์อยู่ในโซนปลายทางก่อนเขียนรายการธุรกิจ. สำหรับ PO ระบบบันทึก `purchase_orders` และอัปเดตแถว `line_inbox` เป็น `verified` แบบ synchronous ผ่าน API; หากการอัปเดต Inbox ล้มเหลว ระบบพยายามย้อนการเขียน PO และคงหน้าตรวจรับไว้. การย้าย Drive กับการเขียนฐานข้อมูลไม่ใช่ distributed transaction; หาก DB ล้มเหลวหลังย้ายไฟล์ ไฟล์อาจย้ายแล้วแต่ไม่มี PO โดยรายการ LINE ยังคงตรวจรับซ้ำได้ และ endpoint ย้ายไฟล์รองรับการเรียกซ้ำเมื่อไฟล์อยู่โซนเป้าหมายแล้ว.
+**LINE verification save gate:** เมื่อผู้ใช้ยืนยันเอกสารจาก LINE Inbox ระบบต้องมี `drive_file_id` และ Drive API ต้องยืนยันว่าไฟล์อยู่ในโซนปลายทางก่อนเขียนรายการธุรกิจ. สำหรับ PO ระบบบันทึก `purchase_orders` และอัปเดตแถว `line_inbox` เป็น `verified` แบบ synchronous ผ่าน API; หากการอัปเดต Inbox ล้มเหลว ระบบพยายามย้อนการเขียน PO และคงหน้าตรวจรับไว้. สำหรับ DO/ตั๋วชั่ง/เอกสารที่เก็บใน `orders` การย้าย Drive เกิดก่อน แต่การเปลี่ยน Order/Inbox state ถูก sync จาก local state แบบ debounced จึงไม่มีการยืนยัน DB แบบ synchronous หรือ rollback ที่เทียบเท่า PO. การย้าย Drive กับการเขียนฐานข้อมูลไม่ใช่ distributed transaction; หาก DB ล้มเหลวหลังย้ายไฟล์ ไฟล์อาจย้ายแล้วแต่ไม่มีระเบียนธุรกิจ โดยรายการ LINE ยังคงตรวจรับซ้ำได้ และ endpoint ย้ายไฟล์รองรับการเรียกซ้ำเมื่อไฟล์อยู่โซนเป้าหมายแล้ว.
+
+**LINE Inbox list/image behavior:** `GET /api/line/inbox` เลือกข้อมูลล่าสุดสูงสุด 500 แถวและไม่ดึง `image_url` เพื่อป้องกัน payload Base64 ขนาดใหญ่; UI refreshes ด้วย polling ทุก 8 วินาที ไม่ใช่ Supabase Realtime subscription. รูปโหลดแยกเมื่อดู/สแกน และ UI เตรียมภาพตัวอย่างของรายการที่กรองอยู่พร้อมกันไม่เกิน 3 รายการ. `mapLineInboxToSupabase` ปัจจุบันตั้ง `image_url` เป็น `null`; ต้นฉบับควรอยู่ใน Google Drive เมื่อ upload สำเร็จ หรือดึงจาก LINE ได้ชั่วคราวภายใน retention window. Manual sync ตรวจรายการค้างทั้งหมดเป็น batch (UI ส่ง batch size 5; API รองรับได้สูงสุด 10) ส่วน daily recovery ทำงานเวลา 06:00 Asia/Bangkok ใน server process และตรวจย้อนหลัง 3 วัน จึงเป็น best-effort ไม่ใช่ external cron. ปุ่ม AI rescan ใช้ภาพในรายการก่อน จากนั้นขอภาพจาก LINE endpoint และ fallback ไป authenticated Drive image proxy โดยใช้ `drive_file_id` หรือรหัสที่ดึงจาก `drive_web_view_link`.
 
 **LINE Inbox deletion:** เมื่อลบ row `line_inbox` ระบบนำไฟล์ใน `drive_file_id` ไปถังขยะของ Google Drive ทันที หากไม่มี row `line_inbox`, `orders` หรือ `purchase_orders` อื่นอ้างอิงไฟล์นั้น; ถ้ามี reference อื่นให้เก็บไฟล์ไว้และลบเฉพาะ row ที่ผู้ใช้เลือก หากลบไฟล์ไม่สำเร็จให้หยุด ไม่ลบ row เพื่อไม่ให้เกิดไฟล์ขยะที่ไร้ reference ไฟล์ในถังขยะยังสามารถกู้คืนได้ตามนโยบายถังขยะของ Google Drive
 
@@ -259,6 +261,18 @@ CREATE TABLE IF NOT EXISTS public.line_inbox (
   extracted_data JSONB DEFAULT '{}'::jsonb,
   store_suggestion JSONB
 );
+
+-- Additive columns also present in src/utils/supabaseClient.ts for existing installations
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS image_hash TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS drive_file_location TEXT DEFAULT 'zone_00';
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS drive_web_view_link TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS doc_number TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS doc_date TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS store_name TEXT;
+ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS is_bill_document BOOLEAN DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_line_inbox_doc_number ON public.line_inbox (doc_number);
+CREATE INDEX IF NOT EXISTS idx_line_inbox_status ON public.line_inbox (status);
+CREATE INDEX IF NOT EXISTS idx_line_inbox_received_at ON public.line_inbox (received_at DESC);
 
 -- 4. ตารางทะเบียนร้านค้า (Stores / Suppliers)
 CREATE TABLE IF NOT EXISTS public.stores (

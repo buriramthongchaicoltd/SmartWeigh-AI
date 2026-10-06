@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-06] Repair LINE Inbox Rescan and Refresh Handover Documentation
+
+### การเปลี่ยนแปลง
+- แก้ AI rescan ในกล่องพัก LINE ให้โหลดภาพจาก endpoint ของ LINE ก่อน และ fallback ไป authenticated Google Drive image proxy ได้เมื่อรายการไม่มีภาพใน memory; อ่าน Drive link ที่ API ส่งกลับมาได้ด้วย
+- ปรับ Handover และ Database Blueprint ให้ตรงกับ polling 8 วินาที, จำกัดรายการล่าสุด 500 แถว, แยก payload ภาพ, recovery/manual sync และข้อจำกัดของ timer ใน server process
+- เติม additive columns/indexes ของ `line_inbox` ใน SQL Blueprint และแยก save gate ของ PO แบบ synchronous ออกจาก Order/Inbox state ที่ sync แบบ debounced
+- ระบุความเสี่ยงที่ Drive กับ Supabase ไม่ใช่ transaction เดียว รวมถึงกรณี Drive trash สำเร็จแต่การลบ row ล้มเหลว
+- แก้ README ที่ยังระบุระบบวางบิล/ช่อง RR ว่าเป็นแผนอนาคต และย้ำว่า RR ไม่ใช่เอกสารอ้างอิงสำหรับการจับคู่ PO/DO
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build แสดงคำเตือนเดิมว่า JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Fix Original Document Image in Verification Viewer
 
 ### การเปลี่ยนแปลง
