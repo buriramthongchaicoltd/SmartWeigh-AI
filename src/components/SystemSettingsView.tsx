@@ -155,6 +155,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     connectionMode?: 'gas' | 'service_account';
     gasWebAppUrl?: string;
     hasGasSharedSecret?: boolean;
+    gasSecretSource?: 'env_var' | 'cloud_config' | 'none';
     hasGas?: boolean;
     rootFolderId?: string;
     rootFolderName?: string;
@@ -168,6 +169,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [isLoadingDriveConfig, setIsLoadingDriveConfig] = useState(false);
   const [isTestingDrive, setIsTestingDrive] = useState(false);
   const [isSavingDrive, setIsSavingDrive] = useState(false);
+  const [driveSetupSecret, setDriveSetupSecret] = useState('');
+  const [isSettingUpDriveSecret, setIsSettingUpDriveSecret] = useState(false);
 
   // Global Startup & Live Services Self-Test State
   const [startupStatus, setStartupStatus] = useState<{
@@ -319,6 +322,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             hasGas: data.config.hasGas,
             gasWebAppUrl: data.config.gasWebAppUrl,
               hasGasSharedSecret: data.config.hasGasSharedSecret,
+              gasSecretSource: data.config.gasSecretSource || 'none',
             rootFolderId: data.config.rootFolderId,
             rootFolderName: data.config.rootFolderName || prev?.rootFolderName,
             hasServiceAccount: data.config.hasServiceAccount,
@@ -366,6 +370,33 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       showToast(`บันทึกการตั้งค่า Google Drive ไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsSavingDrive(false);
+    }
+  };
+
+  const handleSetupDriveSecret = async () => {
+    setIsSettingUpDriveSecret(true);
+    try {
+      const res = await fetch('/api/drive/setup-secret', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.success || typeof data.secret !== 'string') {
+        throw new Error(data.error || 'สร้างรหัส Google Drive ไม่สำเร็จ');
+      }
+      setDriveSetupSecret(data.secret);
+      setDriveStatus(prev => ({
+        ...prev,
+        hasGasSharedSecret: true,
+        gasSecretSource: 'cloud_config'
+      }));
+      try {
+        await navigator.clipboard.writeText(data.secret);
+        showToast('สร้างและคัดลอกรหัสแล้ว นำไปวางใน Apps Script Script Properties ได้เลย');
+      } catch {
+        showToast('สร้างรหัสแล้ว แต่คัดลอกอัตโนมัติไม่ได้ กรุณาคัดลอกจากช่องรหัสด้านล่าง', 'info');
+      }
+    } catch (err) {
+      showToast(`ตั้งค่ารหัส Google Drive ไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
+    } finally {
+      setIsSettingUpDriveSecret(false);
     }
   };
 
@@ -2650,9 +2681,49 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
                     className="w-full px-3 py-2 rounded-xl border border-emerald-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-600 bg-white"
                   />
-                  <p className="text-[11px] text-emerald-800">
-                    สร้าง secret แบบสุ่มยาวอย่างน้อย 32 ตัวอักษร แล้วใส่ค่าเดียวกันทั้ง 2 จุด: Render → Service → Environment → <code>GOOGLE_APPS_SCRIPT_SHARED_SECRET</code> และ Apps Script → Project Settings → Script Properties → <code>SMARTWEIGH_SHARED_SECRET</code>. จากนั้น deploy Apps Script รุ่นล่าสุดและ redeploy service (อย่าวาง secret ในหน้านี้)
-                  </p>
+                  <div className="rounded-lg bg-white/80 border border-emerald-200 p-3 space-y-2">
+                    <p className="text-[11px] text-emerald-900 font-semibold">
+                      ไม่ต้องเปิด PowerShell หรือไปตั้งรหัสใน Render ครับ เว็บจะสร้างรหัสและเก็บไว้ให้เอง
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleSetupDriveSecret}
+                      disabled={isSettingUpDriveSecret || driveStatus?.gasSecretSource === 'env_var'}
+                      className="min-h-11 px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs disabled:opacity-50"
+                    >
+                      {isSettingUpDriveSecret
+                        ? 'กำลังสร้างรหัส...'
+                        : driveStatus?.gasSecretSource === 'env_var'
+                        ? 'รหัสถูกตั้งใน Server Environment แล้ว'
+                        : driveStatus?.hasGasSharedSecret
+                        ? 'คัดลอกรหัสสำหรับ Apps Script'
+                        : 'สร้างรหัสให้และคัดลอก'}
+                    </button>
+                    {driveSetupSecret && (
+                      <div className="space-y-1.5">
+                        <label htmlFor="drive-setup-secret" className="block font-bold text-emerald-900">
+                          คัดลอกรหัสนี้ไปวางใน Apps Script
+                        </label>
+                        <input
+                          id="drive-setup-secret"
+                          type="text"
+                          readOnly
+                          value={driveSetupSecret}
+                          onFocus={e => e.currentTarget.select()}
+                          className="w-full px-3 py-2 rounded-lg border border-emerald-300 bg-emerald-50 font-mono text-xs text-slate-900"
+                        />
+                      </div>
+                    )}
+                    <ol className="list-decimal pl-4 text-[11px] text-emerald-900 space-y-1">
+                      <li>กดปุ่มด้านบนเพื่อสร้างและคัดลอกรหัส (ไม่ต้องตั้งใน Render)</li>
+                      <li>เปิด <a href="https://script.google.com/home" target="_blank" rel="noreferrer" className="font-bold underline">Google Apps Script</a> → เลือกโปรเจกต์ Drive → <strong>Project Settings</strong> → <strong>Script Properties</strong></li>
+                      <li>เพิ่ม Property <code>SMARTWEIGH_SHARED_SECRET</code> แล้ววางรหัสที่คัดลอก กด Save</li>
+                      <li>กลับมาหน้านี้แล้วกดทดสอบ Google Drive</li>
+                    </ol>
+                    <p className="text-[10px] text-emerald-800">
+                      Google กำหนดให้เจ้าของ Apps Script บันทึก Script Property เองหนึ่งครั้ง; เว็บเก็บรหัสฝั่ง server แบบเข้ารหัสและไม่ส่งกลับมาเมื่อโหลดหน้าปกติ
+                    </p>
+                  </div>
                   <div className="flex items-center justify-between pt-1">
                     <button
                       type="button"

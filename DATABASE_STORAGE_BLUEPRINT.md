@@ -21,7 +21,7 @@
 - `getSupabaseClient()` ใช้ `SUPABASE_SERVICE_ROLE_KEY` จาก runtime environment เท่านั้น; ไม่ใช้ anon key สำหรับ backend เพราะ DDL ถอนสิทธิ์ `PUBLIC`, `anon`, `authenticated` และให้ `service_role` เท่านั้น. ตั้ง Project URL และ service-role key ใน Render Environment; ห้ามใส่ secret ใน browser/Git. ต้องนำ DDL ไป execute ใน Supabase SQL Editor ด้วยตนเอง; source change ไม่ปรับ cloud database อัตโนมัติ. หน้าตั้งค่าตรวจ 8 ตาราง รวม `system_config` ซึ่งใช้ `config_key` เป็น key
 - API ที่ไม่ใช่ health/login/LINE webhook บังคับ server session. การเขียน/ลบข้อมูลและไฟล์ถูกจำกัดตาม role ที่ backend; role `user` จำกัดตารางที่เขียนได้และไม่สามารถแก้ไขฟิลด์ราคา/การเงิน/การชำระเงินที่ถูกป้องกันผ่าน API. UI ไม่ใช่ security boundary
 - Login ใช้บัญชี `app_users`, password hash scrypt และ HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และหมดเมื่อ process restart/deploy. Master Admin ใหม่ต้อง bootstrap ด้วย `SYSTEM_MASTER_ADMIN_PASSWORD` ความยาวอย่างน้อย 16 ตัวอักษร; บัญชีเดิมที่ยังใช้ `@Admin` สามารถล็อกอินได้ ส่วน `123456` ถูกปฏิเสธ และ runtime secret ใช้หมุนรหัส Master เดิมได้
-- GAS ต้องมี secret อย่างน้อย 32 ตัวอักษรที่ตรงกันระหว่าง `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ฝั่ง server กับ Script Property `SMARTWEIGH_SHARED_SECRET`; ต้อง deploy `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้ endpoint ปฏิเสธ request ที่ไม่มี secret
+- GAS ต้องมี secret อย่างน้อย 32 ตัวอักษรตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`; Admin สร้างและคัดลอก secret จากหน้าตั้งค่าได้ โดยระบบเก็บค่าเข้ารหัสใน `system_config` และใช้ service-role key/`DATABASE_URL` ที่ server เพื่อเข้ารหัส. หากหมุน database credential ต้องสร้าง GAS secret ใหม่และอัปเดต Script Property เพราะค่าเดิมถอดรหัสไม่ได้. รองรับ `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ใน Environment เป็น override เดิม แต่ไม่จำเป็นสำหรับการตั้งค่าใหม่. ต้อง deploy `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้ endpoint ปฏิเสธ request ที่ไม่มี secret
 - การเปลี่ยนแปลงนี้ไม่ได้หมุน key, รัน DDL, deploy GAS หรือทดสอบ production จริง. ผู้ดูแลต้องทำขั้นตอนภายนอกและตรวจ service logs หลัง deploy
 
 ---
@@ -319,7 +319,7 @@ CREATE TABLE IF NOT EXISTS public.billing_notes (
    - `SUPABASE_URL` — Project URL สำหรับ backend
    - `SUPABASE_SERVICE_ROLE_KEY` — runtime secret สำหรับ backend `server.ts` เท่านั้น; ห้ามตั้งเป็น `VITE_*` หรือส่งให้ browser
    - `SYSTEM_MASTER_ADMIN_PASSWORD` — รหัส bootstrap/กู้คืน Master Admin ยาวอย่างน้อย 16 ตัวอักษร
-   - `GOOGLE_APPS_SCRIPT_SHARED_SECRET` — shared secret สำหรับ GAS ยาวอย่างน้อย 32 ตัวอักษร; ต้องตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`
+   - ทางเลือกเดิม: `GOOGLE_APPS_SCRIPT_SHARED_SECRET` — ใช้ override รหัสที่สร้างในหน้า Settings; หากตั้งค่านี้ต้องให้ค่าตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`
 2. **สำหรับ Google Drive API (Zero-Junk Storage):**
    - `GOOGLE_DRIVE_ROOT_FOLDER_ID` — รหัสโฟลเดอร์หลักบน Google Drive ที่แชร์สิทธิ์ให้ระบบแล้ว
    - `GOOGLE_SERVICE_ACCOUNT_JSON` (หรือ `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`) — สำหรับให้เซิร์ฟเวอร์สร้างโฟลเดอร์ ย้ายไฟล์ และสั่งลบไฟล์ขยะอัตโนมัติได้ตลอด 24 ชม.

@@ -258,6 +258,7 @@ app.use('/api', (req: Request, res: Response, next) => {
     '/database/migrate-local-to-cloud',
     '/database/test',
     '/drive/config',
+    '/drive/setup-secret',
     '/drive/test',
     '/line/config',
     '/startup/retest'
@@ -2933,6 +2934,13 @@ async function restoreConfigsFromSupabase() {
     for (const row of data) {
       if (row.config_key === 'gemini_config' && row.config_value?.geminiApiKey) {
         saveSystemConfig(row.config_value);
+      } else if (row.config_key === 'drive_shared_secret' && row.config_value) {
+        try {
+          cloudDriveSharedSecret = decryptDriveSharedSecret(row.config_value);
+        } catch (err: any) {
+          cloudDriveSharedSecret = '';
+          console.error('[Drive Config] Could not decrypt saved Google Drive secret:', err?.message);
+        }
       } else if (row.config_key === 'drive_config' && row.config_value) {
         saveStoredDriveConfig(row.config_value);
         if (Object.prototype.hasOwnProperty.call(row.config_value, 'gasSharedSecret')) {
@@ -3652,6 +3660,42 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
 // ============================================================================
 
 const DRIVE_CONFIG_FILE_PATH = path.resolve(__dirname, '.google_drive_config.json');
+let cloudDriveSharedSecret = '';
+
+function encryptDriveSharedSecret(secret: string) {
+  const keyMaterial = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.DATABASE_URL;
+  if (!keyMaterial) {
+    throw new Error('ต้องตั้งค่า Supabase service-role key หรือ DATABASE_URL ก่อนบันทึกรหัส Google Drive');
+  }
+  const key = crypto.createHash('sha256').update(`smartweigh-drive-secret:${keyMaterial}`).digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return {
+    version: 1,
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    encrypted: encrypted.toString('base64')
+  };
+}
+
+function decryptDriveSharedSecret(value: any) {
+  if (!value || value.version !== 1 || typeof value.iv !== 'string' ||
+      typeof value.tag !== 'string' || typeof value.encrypted !== 'string') {
+    throw new Error('รูปแบบรหัส Google Drive ที่บันทึกไว้ไม่ถูกต้อง');
+  }
+  const keyMaterial = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.DATABASE_URL;
+  if (!keyMaterial) {
+    throw new Error('ต้องตั้งค่า Supabase service-role key หรือ DATABASE_URL ก่อนอ่านรหัส Google Drive');
+  }
+  const key = crypto.createHash('sha256').update(`smartweigh-drive-secret:${keyMaterial}`).digest();
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(value.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(value.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(value.encrypted, 'base64')),
+    decipher.final()
+  ]).toString('utf8');
+}
 
 interface ServerDriveConfig {
   rootFolderId: string;
@@ -3704,7 +3748,7 @@ function getStoredDriveConfig(): ServerDriveConfig {
     rootFolderName: fileConfig.rootFolderName || '',
     connectionMode: connMode,
     gasWebAppUrl: gasUrl,
-    gasSharedSecret: (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || '').trim(),
+    gasSharedSecret: (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || cloudDriveSharedSecret).trim(),
     serviceAccountEmail: saEmail.trim(),
     serviceAccountPrivateKey: saKey.trim(),
     serviceAccountJson: rawSaJson.trim(),
@@ -3745,9 +3789,9 @@ async function callGasDriveApi(
   payload: any,
   signal?: AbortSignal
 ): Promise<any> {
-  const sharedSecret = (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || '').trim();
+  const sharedSecret = (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET || cloudDriveSharedSecret).trim();
   if (sharedSecret.length < 32) {
-    throw new Error('Google Apps Script ต้องตั้งค่า shared secret อย่างน้อย 32 ตัวอักษรทั้งในเซิร์ฟเวอร์และ Script Properties');
+    throw new Error('กรุณากด “สร้างรหัสและคัดลอก” ในหน้าตั้งค่า แล้วบันทึกรหัสใน Apps Script → Project Settings → Script Properties ชื่อ SMARTWEIGH_SHARED_SECRET');
   }
   const resp = await fetch(gasUrl, {
     method: 'POST',
@@ -4126,6 +4170,11 @@ app.get('/api/drive/config', async (req: Request, res: Response) => {
       connectionMode: cfg.connectionMode || (cfg.gasWebAppUrl ? 'gas' : 'service_account'),
       gasWebAppUrl: cfg.gasWebAppUrl || null,
       hasGasSharedSecret: (cfg.gasSharedSecret || '').length >= 32,
+      gasSecretSource: process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET?.trim()
+        ? 'env_var'
+        : cfg.gasSharedSecret
+        ? 'cloud_config'
+        : 'none',
       hasGas: Boolean(cfg.gasWebAppUrl),
       rootFolderId: cfg.rootFolderId,
       rootFolderName: cfg.rootFolderName || null,
@@ -4135,6 +4184,43 @@ app.get('/api/drive/config', async (req: Request, res: Response) => {
       lastTestedAt: cfg.lastTestedAt || null
     }
   });
+});
+
+app.post('/api/drive/setup-secret', async (req: Request, res: Response) => {
+  try {
+    if (process.env.GOOGLE_APPS_SCRIPT_SHARED_SECRET?.trim()) {
+      return res.status(409).json({
+        success: false,
+        error: 'มีรหัส Google Drive ที่ตั้งใน Environment อยู่แล้ว; เพื่อความปลอดภัยระบบจะไม่แสดงรหัสนั้นบนหน้าเว็บ'
+      });
+    }
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({
+        success: false,
+        error: 'ยังบันทึกรหัสให้ไม่ได้ กรุณาตรวจการเชื่อมต่อฐานข้อมูลก่อน'
+      });
+    }
+
+    const secret = cloudDriveSharedSecret || crypto.randomBytes(32).toString('base64url');
+    const { error } = await client.from('system_config').upsert({
+      config_key: 'drive_shared_secret',
+      config_value: encryptDriveSharedSecret(secret),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' });
+    if (error) {
+      throw new Error(`บันทึกรหัส Google Drive ไม่สำเร็จ: ${error.message}`);
+    }
+
+    cloudDriveSharedSecret = secret;
+    return res.json({ success: true, secret });
+  } catch (err: any) {
+    console.error('[Drive Config] Failed to set up Google Drive secret:', err?.message);
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'ตั้งค่ารหัส Google Drive ไม่สำเร็จ'
+    });
+  }
 });
 
 // 2. Save Google Drive configuration

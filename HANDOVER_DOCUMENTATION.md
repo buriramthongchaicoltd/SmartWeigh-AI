@@ -40,7 +40,7 @@
 - DDL ใน `src/utils/supabaseClient.ts` เปิด RLS, ลบ policy เดิมบนตารางแอป, เพิกถอนสิทธิ์ `anon`/`authenticated` และให้ `service_role` เท่านั้น. ผู้ดูแลต้องนำ DDL รุ่นนี้ไปรันใน Supabase จริง; การแก้ source ไม่เปลี่ยน production database อัตโนมัติ
 - API บังคับ role สำหรับการลบข้อมูลและการจัดการไฟล์; role `user` จำกัดตารางที่เขียนได้และ backend ป้องกันการเปลี่ยน RR/จำนวน/ราคา/การชำระเงินโดยตรง. ตรวจ session และ role ที่ server ทุกครั้ง ไม่ถือ UI เป็น security boundary
 - เมื่อยังไม่มี Master Admin ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; บัญชีเดิมที่ยังใช้ `@Admin` ล็อกอินได้เพื่อรองรับระบบเดิม ส่วน `123456` ถูกปฏิเสธ; runtime secret ใช้หมุนรหัส Master เดิมได้
-- Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Render ต้องมี `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ค่าเดียวกันอย่างน้อย 32 ตัวอักษร และต้อง deploy source รุ่นล่าสุด
+- Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Admin สร้างรหัสจากหน้า Settings ได้ ระบบเก็บไว้แบบเข้ารหัสใน `system_config` และไม่ต้องเพิ่มรหัสใน Render Environment. เจ้าของ Script ยังคงต้องบันทึก Property นี้ใน Apps Script หนึ่งครั้ง แล้ว deploy source รุ่นล่าสุด
 - **งานภายนอกที่ยังต้องทำโดยผู้ดูแล:** หมุน Supabase key, ตั้ง Render environment secrets, ใช้ DDL ปิด policy ในฐานข้อมูลจริง, deploy GAS รุ่นล่าสุด/ตั้ง Script Property และตรวจสอบ Git history กับสถานะ production. ยังไม่ได้เชื่อมต่อหรือแก้บริการ production จาก workspace นี้
 - Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
 
@@ -269,7 +269,7 @@
    - ตั้ง `SUPABASE_URL` และ `SYSTEM_MASTER_ADMIN_PASSWORD` (อย่างน้อย 16 ตัวอักษร); ห้ามใส่ key ใน browser, config file หรือ Git
    - นำ DDL รุ่นปัจจุบันจาก `src/utils/supabaseClient.ts` ไปรันใน Supabase SQL Editor เพื่อปิด public policies; ทดสอบการเชื่อมต่อหลังปรับ schema
 2. **ขั้นตอนที่ 2 (ผู้ดูแลระบบ): ปลอดภัยและเปิดใช้ Google Drive GAS**
-   - ตั้ง secret สุ่มอย่างน้อย 32 ตัวอักษรใน `GOOGLE_APPS_SCRIPT_SHARED_SECRET` หรือหน้าตั้งค่า server และตั้งค่าเดียวกันเป็น Script Property `SMARTWEIGH_SHARED_SECRET`
+   - ใช้หน้า Settings กดสร้างรหัส Google Drive แล้วตั้งเป็น Script Property `SMARTWEIGH_SHARED_SECRET`; ไม่ต้องตั้ง `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ใน Render เว้นแต่ต้องการใช้ค่า override เดิม
    - Deploy `google_apps_script_drive.gs` รุ่นล่าสุดใหม่; ทดสอบ POST ที่ไม่มี secret ต้องถูกปฏิเสธก่อนเปิดใช้
 3. **ขั้นตอนที่ 3 (ผู้ใช้งาน): ตั้งค่า Webhook สำหรับ LINE Official Account จริง**
    - นำ Webhook URL: `https://smartweigh-ai.onrender.com/api/line/webhook` ไปวางใน LINE Developers Console

@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-06] Simplify Google Drive Secret Setup in Settings
+
+### การเปลี่ยนแปลง
+- เพิ่มปุ่ม Admin สำหรับสร้างรหัส Google Drive แบบสุ่มจากหน้า Settings และคัดลอกให้ทันที; ไม่ต้องใช้ PowerShell หรือเพิ่มรหัสซ้ำใน Render Environment
+- เก็บรหัสใน `system_config` แบบ AES-256-GCM โดยใช้ server-side database credential เป็น key material; เปิดเผยผ่าน endpoint สำหรับ Admin เพื่อการตั้งค่าครั้งแรก/คัดลอกซ้ำเท่านั้น
+- ระบุข้อจำกัดในหน้าเว็บอย่างตรงไปตรงมาว่าเจ้าของ Apps Script ต้องเพิ่ม `SMARTWEIGH_SHARED_SECRET` ใน Script Properties เองหนึ่งครั้ง เนื่องจากเว็บไม่มีสิทธิ์แก้ Google project settings
+- ปรับคำแนะนำใน GAS source และเอกสาร handover/blueprint ให้ตรงกับ flow ใหม่; ยังคงรองรับ Environment secret เดิมเป็น override
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแจ้งเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามขนาดแอปปัจจุบัน
+- ยังไม่ได้ทดสอบสร้าง/ถอดรหัส secret บน production หรือเชื่อมต่อ Apps Script จริง
+
 ## [2026-10-06] Correct Settings Connection and Schema Readiness
 
 ### การเปลี่ยนแปลง
