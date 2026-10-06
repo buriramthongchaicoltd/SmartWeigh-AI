@@ -40,7 +40,7 @@ interface VerifyModalProps {
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
   onClose: () => void;
-  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean | Promise<boolean>;
+  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
   onRecoverLineImage?: (orderId: string) => Promise<{
     image: string;
@@ -74,7 +74,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [enableWeighbridgePricing, setEnableWeighbridgePricing] = useState(false);
   const [enableDOWeighing, setEnableDOWeighing] = useState(false);
   const [projectMissingError, setProjectMissingError] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [remappedNotice, setRemappedNotice] = useState<string | null>(null);
   const [isRecoveringLineImage, setIsRecoveringLineImage] = useState(false);
   const [isRescanningAI, setIsRescanningAI] = useState(false);
@@ -606,9 +605,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     return { finalizedOrder, storeToSave };
   };
 
-  const handleFormSubmit = async (e: React.FormEvent) => {
+  const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
 
     // Strict Mandatory Check: "ชื่อโครงการ (ช่อง 2)" must be present before confirming save
     if (!form.col2 || !form.col2.trim()) {
@@ -617,12 +615,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
 
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
-    setIsSaving(true);
-    try {
-      if (await onSaveOrder(finalizedOrder, storeToSave, true)) onClose();
-    } finally {
-      setIsSaving(false);
-    }
+    if (onSaveOrder(finalizedOrder, storeToSave, true)) onClose();
   };
 
   return (
@@ -649,8 +642,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            disabled={isSaving}
-            className="text-slate-400 hover:text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-slate-800 transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+            className="text-slate-400 hover:text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -3130,7 +3122,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                 <button
                   type="button"
                   onClick={onClose}
-                  disabled={isSaving}
                   className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium transition cursor-pointer text-xs"
                 >
                   ยกเลิก
@@ -3145,11 +3136,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    disabled={isSaving}
-                    className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200 disabled:opacity-60 disabled:cursor-wait"
+                    className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
                   >
                     <Save className="w-4 h-4" />
-                    <span>{isSaving ? 'กำลังบันทึกและจัดเก็บภาพ...' : 'ยืนยันบันทึกข้อมูลเอกสาร'}</span>
+                    <span>ยืนยันบันทึกข้อมูลเอกสาร</span>
                   </button>
                 </div>
               </div>

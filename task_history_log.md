@@ -4,19 +4,6 @@
 
 ---
 
-## [2026-10-06] Make LINE Document Confirmation All-or-Retry
-
-### การเปลี่ยนแปลง
-- เพิ่ม `POST /api/line/inbox/confirm-document` ให้ยืนยัน DO/ตั๋วชั่ง/ใบกำกับ/PO เป็นชุดเดียว: เตรียมหรือกู้ภาพจาก LINE, ย้ายไฟล์เข้าโซน, บันทึกเอกสารและ Drive reference, แล้วเปลี่ยนรายการ LINE เป็น `verified`
-- รองรับกรณีไม่มี Drive ID โดยดึงภาพจาก LINE และอัปโหลดด้วยชื่อชั่วคราวที่ผูกกับ inbox ID เพื่อให้ลองใหม่ได้โดยไม่สร้างไฟล์ซ้ำ
-- หากขั้นตอนล้มเหลว server พยายามคืนเอกสาร/รายการ LINE เดิมและย้ายภาพกลับโซนต้นทาง; แจ้ง error และผล rollback ให้ผู้ใช้ โดยไม่ปิด modal หรือเอารายการออกจากคิว
-- ปรับ Verify/PO modal ให้รอผลยืนยันและป้องกันการกดซ้ำระหว่างทำงาน; ตัดการย้าย Drive แบบ fire-and-forget เดิมออกจากเส้นทางยืนยันบิล
-- อัปเดต HANDOVER_DOCUMENTATION.md และ DATABASE_STORAGE_BLUEPRINT.md
-
-### การตรวจสอบ
-- ตรวจ `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
-- ยังไม่ได้ทดสอบ LINE Content API, Supabase หรือ Google Drive จริง; ต้องตรวจหลัง deploy
-
 ## [2026-10-06] Hide Confirmed Bills from the LINE Inbox Queue
 
 ### การเปลี่ยนแปลง

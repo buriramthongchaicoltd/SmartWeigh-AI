@@ -424,7 +424,7 @@ export default function App() {
   const [editingStore, setEditingStore] = useState<StoreMerchant | null>(null);
 
   // Toast Notification
-  const [toast, setToast] = useState<{ message: string; type?: 'success' | 'info' | 'error' } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type?: 'success' | 'info' } | null>(null);
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
@@ -529,11 +529,11 @@ export default function App() {
     return () => clearInterval(timer);
   }, [authenticatedUser, syncWebhookQueueToLocal]);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
       setToast(null);
-    }, type === 'error' ? 7000 : 3200);
+    }, 3200);
   };
 
   // Google Drive Verified-Only Move Trigger
@@ -1042,7 +1042,7 @@ export default function App() {
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
-  const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
+  const handleSaveOrder = (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): boolean => {
     const isExistingRecord = orders.some(o => o.id === order.id);
     if (!isExistingRecord) {
       const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
@@ -1050,41 +1050,6 @@ export default function App() {
       );
       if (blockingDups.length > 0 && !allowDuplicate) {
         showToast(`พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาตรวจสอบและยืนยันก่อนบันทึก`, 'info');
-        return false;
-      }
-    }
-
-    let lineDriveConfirmation: {
-      driveFileId: string;
-      driveFolderId?: string;
-      driveFileLocation?: LineBillInboxItem['driveFileLocation'];
-      driveWebViewLink?: string;
-    } | null = null;
-    if (order.lineInboxId && lineInbox.some(item => item.id === order.lineInboxId && item.status !== 'verified')) {
-      try {
-        const response = await fetch('/api/line/inbox/confirm-document', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: 'order', inboxId: order.lineInboxId, record: order })
-        });
-        const result = await response.json();
-        if (!response.ok || !result.success || typeof result.driveFileId !== 'string' || !result.driveFileId) {
-          showToast(`ยืนยันไม่สำเร็จ รายการยังอยู่ในสถานะรอตรวจสอบ: ${result.error || `HTTP ${response.status}`}`, 'error');
-          return false;
-        }
-        lineDriveConfirmation = {
-          driveFileId: result.driveFileId,
-          driveFolderId: result.driveFolderId,
-          driveFileLocation: result.driveFileLocation,
-          driveWebViewLink: result.driveWebViewLink
-        };
-        order = {
-          ...order,
-          driveFileId: result.driveFileId,
-          driveFolderId: result.driveFolderId
-        };
-      } catch (error: any) {
-        showToast(`ยืนยันไม่สำเร็จ รายการยังอยู่ในสถานะรอตรวจสอบ: ${error?.message || 'เชื่อมต่อระบบไม่ได้'}`, 'error');
         return false;
       }
     }
@@ -1479,9 +1444,6 @@ export default function App() {
 
           return {
             ...item,
-            driveFileId: lineDriveConfirmation?.driveFileId || item.driveFileId,
-            driveFileLocation: lineDriveConfirmation?.driveFileLocation || item.driveFileLocation,
-            driveWebViewLink: lineDriveConfirmation?.driveWebViewLink || item.driveWebViewLink,
             status: 'verified' as const,
             verifiedOrderId: order.col1,
             verifiedBy: currentUser.fullName,
@@ -1503,6 +1465,37 @@ export default function App() {
             }
           };
         });
+
+        // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
+        const inboxItem = prev.find(i => i.id === order.lineInboxId);
+        if (inboxItem?.driveFileId) {
+          // ใช้ col6 สำหรับ DO/WB/INV, col4 สำหรับ PO; ถ้าว่างใช้ col17 (ตั๋วปลายทาง)
+          const docNumber = order.col6 || order.col4 || order.col17 || order.col1 || '';
+          // ใช้ col7 (วันที่รับสินค้า) เป็นหลัก, col16 (วันที่ปลายทาง) สำหรับ dest_weighbridge
+          const docDate = (order.docType === 'dest_weighbridge' && order.col16)
+            ? order.col16
+            : order.col7 || new Date().toISOString().slice(0, 10);
+
+          fetch('/api/drive/rename-and-move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileId: inboxItem.driveFileId,
+              docType: order.docType || 'delivery_order',
+              docDate,
+              docNumber
+            })
+          })
+            .then(r => r.json())
+            .then(result => {
+              if (result.success) {
+                console.log(`[Drive] Renamed & moved: ${result.newFileName} → ${result.targetZone}`);
+              } else {
+                console.warn('[Drive] rename-and-move failed:', result.error);
+              }
+            })
+            .catch(err => console.warn('[Drive] rename-and-move error:', err));
+        }
 
         return updatedInbox;
       });
@@ -1809,7 +1802,7 @@ export default function App() {
       body: JSON.stringify({ orderId })
     });
     const result = await response.json();
-    if (!response.ok || !result.success || typeof result.driveFileId !== 'string' || !result.driveFileId) {
+    if (!response.ok || !result.success) {
       throw new Error(result.error || `กู้ภาพจาก LINE ไม่สำเร็จ (HTTP ${response.status})`);
     }
     if (typeof result.image !== 'string' || typeof result.driveFileId !== 'string') {
@@ -1834,49 +1827,13 @@ export default function App() {
   };
 
   // ================= PO MANAGEMENT HANDLERS =================
-  const handleSavePO = async (savedPO: PurchaseOrder): Promise<boolean> => {
+  const handleSavePO = (savedPO: PurchaseOrder) => {
     const isExistingPO = pos.some(p => p.id === savedPO.id);
     if (!isExistingPO) {
       const blockingPODups = checkDuplicatePO(savedPO, pos, savedPO.image);
       if (blockingPODups.length > 0) {
         showToast(`🚫 บล็อกการนำเข้า PO ซ้ำ: เลขที่ ${blockingPODups[0].matchedPO.poNumber} มีอยู่ในระบบแล้ว`);
-        return false;
-      }
-    }
-
-    let lineDriveConfirmation: {
-      driveFileId: string;
-      driveFolderId?: string;
-      driveFileLocation?: LineBillInboxItem['driveFileLocation'];
-      driveWebViewLink?: string;
-    } | null = null;
-    if (savedPO.lineInboxId && lineInbox.some(item => item.id === savedPO.lineInboxId && item.status !== 'verified')) {
-      try {
-        const response = await fetch('/api/line/inbox/confirm-document', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: 'purchase_order', inboxId: savedPO.lineInboxId, record: savedPO })
-        });
-        const result = await response.json();
-        if (!response.ok || !result.success) {
-          showToast(`ยืนยัน PO ไม่สำเร็จ รายการยังอยู่ในสถานะรอตรวจสอบ: ${result.error || `HTTP ${response.status}`}`, 'error');
-          return false;
-        }
-        lineDriveConfirmation = {
-          driveFileId: result.driveFileId,
-          driveFolderId: result.driveFolderId,
-          driveFileLocation: result.driveFileLocation,
-          driveWebViewLink: result.driveWebViewLink
-        };
-        savedPO = {
-          ...savedPO,
-          driveFileId: result.driveFileId,
-          driveFolderId: result.driveFolderId,
-          driveFileLocation: result.driveFileLocation
-        };
-      } catch (error: any) {
-        showToast(`ยืนยัน PO ไม่สำเร็จ รายการยังอยู่ในสถานะรอตรวจสอบ: ${error?.message || 'เชื่อมต่อระบบไม่ได้'}`, 'error');
-        return false;
+        return;
       }
     }
 
@@ -1944,9 +1901,6 @@ export default function App() {
           item.id === savedPO.lineInboxId
             ? {
                 ...item,
-                driveFileId: lineDriveConfirmation?.driveFileId || item.driveFileId,
-                driveFileLocation: lineDriveConfirmation?.driveFileLocation || item.driveFileLocation,
-                driveWebViewLink: lineDriveConfirmation?.driveWebViewLink || item.driveWebViewLink,
                 status: 'verified',
                 verifiedOrderId: savedPO.poNumber,
                 verifiedBy: currentUser.fullName,
@@ -2004,7 +1958,6 @@ export default function App() {
     } else {
       showToast(`บันทึกใบสั่งซื้อ ${savedPO.poNumber} เรียบร้อยแล้ว!`);
     }
-    return true;
   };
 
   const handleDeletePO = (id: string) => {
@@ -3033,14 +2986,8 @@ export default function App() {
 
       {/* Toast Notification */}
       {toast && (
-        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2 text-xs font-semibold border print:hidden ${
-          toast.type === 'error'
-            ? 'bg-rose-950 text-white border-rose-700'
-            : 'bg-slate-900 text-white border-slate-700'
-        }`}>
-          {toast.type === 'error'
-            ? <AlertTriangle className="w-4 h-4 text-rose-300 shrink-0" />
-            : <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
+        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2 text-xs font-semibold animate-bounce border border-slate-700 print:hidden">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{toast.message}</span>
         </div>
       )}

@@ -27,7 +27,7 @@ interface POEditModalProps {
   existingOrders?: OrderRecord[];
   initialStoreName?: string;
   onClose: () => void;
-  onSave: (po: PurchaseOrder) => boolean | Promise<boolean>;
+  onSave: (po: PurchaseOrder) => void;
 }
 
 export const POEditModal: React.FC<POEditModalProps> = ({
@@ -43,7 +43,6 @@ export const POEditModal: React.FC<POEditModalProps> = ({
 }) => {
   const [confirmDuplicatePOOverride, setConfirmDuplicatePOOverride] = useState(false);
   const [projectMissingError, setProjectMissingError] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
   const [formData, setFormData] = useState<Partial<PurchaseOrder>>({
     poNumber: '',
     orderDate: new Date().toISOString().split('T')[0],
@@ -267,17 +266,7 @@ export const POEditModal: React.FC<POEditModalProps> = ({
     }
   };
 
-  const saveAndClose = async (poToSave: PurchaseOrder) => {
-    if (isSaving) return;
-    setIsSaving(true);
-    try {
-      if (await onSave(poToSave)) onClose();
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleOverwriteExistingPO = async (existing: PurchaseOrder) => {
+  const handleOverwriteExistingPO = (existing: PurchaseOrder) => {
     const matchedStore = stores.find(s => s.name.trim().toLowerCase() === formData.storeName?.trim().toLowerCase());
     const mergedPO: PurchaseOrder = {
       ...existing,
@@ -299,12 +288,12 @@ export const POEditModal: React.FC<POEditModalProps> = ({
       image: formData.image || existing.image || null,
       updatedAt: new Date().toISOString()
     };
-    await saveAndClose(mergedPO);
+    onSave(mergedPO);
+    onClose();
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
 
     // Strict Hard Block: Never allow saving a duplicate PO as a new record
     if (duplicatePOMatch) {
@@ -354,7 +343,8 @@ export const POEditModal: React.FC<POEditModalProps> = ({
       lineReceivedAt: formData.lineReceivedAt || po?.lineReceivedAt
     };
 
-    await saveAndClose(finalPO);
+    onSave(finalPO);
+    onClose();
   };
 
   return (
@@ -385,8 +375,7 @@ export const POEditModal: React.FC<POEditModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            disabled={isSaving}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -504,17 +493,15 @@ export const POEditModal: React.FC<POEditModalProps> = ({
                   <button
                     type="button"
                     onClick={onClose}
-                    disabled={isSaving}
-                    className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-wait"
+                    className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shadow-xs transition cursor-pointer flex items-center gap-1.5"
                   >
                     <X className="w-3.5 h-3.5" />
                     <span>ยกเลิกการนำเข้า PO ซ้ำนี้ (ไม่บันทึกเข้าระบบ)</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleOverwriteExistingPO(duplicatePOMatch.matchedPO)}
-                    disabled={isSaving}
-                    className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 rounded-lg text-xs font-semibold transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                    onClick={() => handleOverwriteExistingPO(duplicatePOMatch.matchedPO)}
+                    className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-300 rounded-lg text-xs font-semibold transition cursor-pointer"
                   >
                     🔄 อัปเดตทับ PO เดิม ({duplicatePOMatch.matchedPO.poNumber})
                   </button>
@@ -914,8 +901,7 @@ export const POEditModal: React.FC<POEditModalProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                disabled={isSaving}
-                className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer"
               >
                 ยกเลิก
               </button>
@@ -931,11 +917,10 @@ export const POEditModal: React.FC<POEditModalProps> = ({
               ) : (
                 <button
                   type="submit"
-                  disabled={isSaving}
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
-                  <span>{isSaving ? 'กำลังบันทึกและจัดเก็บภาพ...' : po ? 'บันทึกการแก้ไข PO' : 'ยืนยันเปิดใบสั่งซื้อ'}</span>
+                  <span>{po ? 'บันทึกการแก้ไข PO' : 'ยืนยันเปิดใบสั่งซื้อ'}</span>
                 </button>
               )}
             </div>
