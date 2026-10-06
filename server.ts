@@ -244,7 +244,7 @@ app.use('/api', (req: Request, res: Response, next) => {
       crypto.timingSafeEqual(Buffer.from(internalToken), Buffer.from(INTERNAL_API_TOKEN))) {
     return next();
   }
-  const publicPaths = new Set(['/auth/login', '/auth/me', '/auth/logout', '/status', '/line/webhook']);
+  const publicPaths = new Set(['/auth/login', '/auth/me', '/auth/logout', '/status', '/line/webhook', '/startup/auto-check']);
   if (publicPaths.has(req.path)) return next();
 
   const user = getAuthenticatedUser(req);
@@ -409,21 +409,55 @@ const startupStatus: {
   ranAt: string | null;
   supabase: 'ok' | 'error' | 'not_configured' | 'pending';
   supabaseMessage: string;
+  isConnected: boolean;
+  databaseConfigured: boolean;
+  schemaTested: boolean;
+  databaseMode: 'supabase_rest' | 'postgres_direct' | 'offline';
+  databaseLatencyMs?: number;
+  tables: Record<string, boolean>;
+  tableCounts: Record<string, number>;
+  tableErrors: Record<string, string>;
+  isSchemaReady: boolean;
   drive: 'ok' | 'error' | 'not_configured' | 'pending';
   driveMessage: string;
-  gemini: 'ok' | 'not_configured';
+  gemini: 'ok' | 'error' | 'not_configured' | 'pending';
   geminiMessage: string;
+  line: 'ok' | 'error' | 'not_configured' | 'pending';
+  lineMessage: string;
   allReady: boolean;
 } = {
   ranAt: null,
   supabase: 'pending',
   supabaseMessage: 'ยังไม่ได้ทดสอบ',
+  isConnected: false,
+  databaseConfigured: false,
+  schemaTested: false,
+  databaseMode: 'offline',
+  tables: {
+    orders: false,
+    purchase_orders: false,
+    line_inbox: false,
+    stores: false,
+    projects: false,
+    app_users: false,
+    system_config: false,
+    billing_notes: false
+  },
+  tableCounts: {},
+  tableErrors: {},
+  isSchemaReady: false,
   drive: 'pending',
   driveMessage: 'ยังไม่ได้ทดสอบ',
-  gemini: 'not_configured',
-  geminiMessage: 'ยังไม่ได้ตั้งค่า',
+  gemini: 'pending',
+  geminiMessage: 'กำลังตรวจสอบ',
+  line: 'pending',
+  lineMessage: 'กำลังตรวจสอบ',
   allReady: false
 };
+let startupSelfTestPromise: Promise<void> | null = null;
+let startupSelfTestCompletedAt = 0;
+
+const STARTUP_SELF_TEST_CACHE_MS = 60_000;
 
 // Shared Gemini client instance
 const getGeminiClient = () => {
@@ -5719,6 +5753,91 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
 // ============================================================================
 // STARTUP AUTO-TEST: ถ้ามีการตั้งค่าไว้แล้ว ทดสอบการเชื่อมต่อทันทีตอน startup
 // ============================================================================
+async function testStartupDatabase() {
+  const startTime = Date.now();
+  const cfg = getStoredDbConfig();
+  const tables = Object.fromEntries(
+    Object.keys(startupStatus.tables).map(tableName => [tableName, false])
+  ) as Record<string, boolean>;
+  const tableCounts: Record<string, number> = {};
+  const tableErrors: Record<string, string> = {};
+
+  if (cfg.pgConnectionString?.startsWith('postgres')) {
+    const pool = getPgPool(cfg);
+    if (!pool) throw new Error('รูปแบบ PostgreSQL Connection String ไม่ถูกต้อง');
+    try {
+      const client = await pool.connect();
+      try {
+        const pingRes = await client.query('SELECT version() as ver;');
+        const tablesRes = await client.query(
+          `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';`
+        );
+        const existingTables = new Set(tablesRes.rows.map(row => row.table_name));
+        Object.keys(tables).forEach(tableName => {
+          tables[tableName] = existingTables.has(tableName);
+        });
+        return {
+          isConnected: true,
+          schemaTested: true,
+          databaseMode: 'postgres_direct' as const,
+          databaseLatencyMs: Date.now() - startTime,
+          serverVersion: pingRes.rows[0]?.ver || 'PostgreSQL',
+          tables,
+          tableCounts,
+          tableErrors,
+          isSchemaReady: Object.values(tables).every(Boolean)
+        };
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.end();
+    }
+  }
+
+  const client = getSupabaseClient(cfg);
+  if (!client) throw new Error('เซิร์ฟเวอร์ยังไม่มี Supabase Project URL หรือ SUPABASE_SERVICE_ROLE_KEY');
+
+  const probe = await client.from('line_inbox').select('id').limit(1);
+  const schemaOrPermissionError = (error: { code?: string; message?: string }) =>
+    error.code === '42P01' ||
+    error.code === 'PGRST205' ||
+    error.code === '42501' ||
+    error.message?.includes('does not exist') ||
+    error.message?.includes('Could not find');
+  if (probe.error && !schemaOrPermissionError(probe.error)) {
+    throw new Error(probe.error.message || 'เชื่อมต่อ Supabase ไม่สำเร็จ');
+  }
+
+  await Promise.all(Object.keys(tables).map(async tableName => {
+    const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
+    const { count, error } = await client
+      .from(tableName)
+      .select(primaryKey, { count: 'exact', head: true });
+
+    if (!error) {
+      tables[tableName] = true;
+      tableCounts[tableName] = count ?? 0;
+    } else if (error.code === '42501') {
+      tables[tableName] = true;
+      tableErrors[tableName] = 'พบตาราง แต่ไม่มีสิทธิ์อ่านข้อมูล';
+    } else {
+      tableErrors[tableName] = error.message || 'ไม่สามารถตรวจสอบตารางได้';
+    }
+  }));
+
+  return {
+    isConnected: true,
+    schemaTested: true,
+    databaseMode: 'supabase_rest' as const,
+    databaseLatencyMs: Date.now() - startTime,
+    tables,
+    tableCounts,
+    tableErrors,
+    isSchemaReady: Object.values(tables).every(Boolean)
+  };
+}
+
 async function runStartupSelfTest() {
   console.log('[Startup] Running self-test for configured services...');
   startupStatus.ranAt = new Date().toISOString();
@@ -5740,32 +5859,44 @@ async function runStartupSelfTest() {
     (dbCfg.supabaseUrl && dbCfg.supabaseServiceRoleKey) ||
     dbCfg.pgConnectionString
   );
+  startupStatus.databaseConfigured = dbConfigured;
 
   if (dbConfigured) {
     try {
-      const supaClient = getSupabaseClient(dbCfg);
-      if (supaClient) {
-        const { error } = await supaClient.from('line_inbox').select('id').limit(1);
-        if (!error) {
-          startupStatus.supabase = 'ok';
-          startupStatus.supabaseMessage = 'เชื่อมต่อ Supabase Cloud สำเร็จ ✅';
-          console.log('[Startup] ✅ Supabase: เชื่อมต่อสำเร็จ');
-          saveStoredDbConfig({ lastTestedAt: new Date().toISOString() });
-          // Restore all cloud-persisted configs (Drive, LINE OA, Gemini) from Supabase system_config
-          await restoreConfigsFromSupabase();
-        } else {
-          startupStatus.supabase = 'error';
-          startupStatus.supabaseMessage = `เชื่อมต่อได้แต่มีข้อผิดพลาด: ${error.message}`;
-          console.warn('[Startup] ⚠️  Supabase:', error.message);
-        }
-      }
+      const dbTest = await testStartupDatabase();
+      Object.assign(startupStatus, dbTest);
+      startupStatus.supabase = 'ok';
+      startupStatus.supabaseMessage = dbTest.isSchemaReady
+        ? 'เชื่อมต่อฐานข้อมูลสำเร็จ และตรวจครบทุกตาราง ✅'
+        : 'เชื่อมต่อฐานข้อมูลสำเร็จ แต่พบตารางที่ยังไม่มีหรืออ่านไม่ได้';
+      console.log('[Startup] ✅ Database: เชื่อมต่อแล้ว ตรวจ schema 8 ตารางเสร็จ');
+      saveStoredDbConfig({ lastTestedAt: new Date().toISOString() });
+      // Restore all cloud-persisted configs (Drive, LINE OA, Gemini) from Supabase system_config
+      await restoreConfigsFromSupabase();
     } catch (err: any) {
       startupStatus.supabase = 'error';
+      startupStatus.isConnected = false;
+      startupStatus.schemaTested = true;
+      startupStatus.tables = Object.fromEntries(
+        Object.keys(startupStatus.tables).map(tableName => [tableName, false])
+      );
+      startupStatus.tableCounts = {};
+      startupStatus.tableErrors = {};
+      startupStatus.isSchemaReady = false;
       startupStatus.supabaseMessage = err?.message || 'เชื่อมต่อ Supabase ล้มเหลว';
       console.warn('[Startup] ⚠️  Supabase self-test error:', err?.message);
     }
   } else {
     startupStatus.supabase = 'not_configured';
+    startupStatus.isConnected = false;
+    startupStatus.schemaTested = false;
+    startupStatus.databaseMode = 'offline';
+    startupStatus.tables = Object.fromEntries(
+      Object.keys(startupStatus.tables).map(tableName => [tableName, false])
+    );
+    startupStatus.tableCounts = {};
+    startupStatus.tableErrors = {};
+    startupStatus.isSchemaReady = false;
     startupStatus.supabaseMessage = 'ยังไม่ได้ตั้งค่า Supabase';
     console.log('[Startup] ℹ️  Supabase: ยังไม่ได้ตั้งค่า (ข้ามการทดสอบ)');
   }
@@ -5827,27 +5958,107 @@ async function runStartupSelfTest() {
 
   // --- 3. Check Gemini Key ---
   const geminiKey = getActiveGeminiApiKey();
+  let geminiApiError: string | null = null;
+  if (geminiKey && geminiKey.length > 5) {
+    try {
+      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+        headers: { 'x-goog-api-key': geminiKey },
+        signal: AbortSignal.timeout(8_000)
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        geminiApiError = body?.error?.message || `Gemini API ตอบกลับ ${response.status}`;
+      }
+    } catch (err: any) {
+      geminiApiError = err?.message || 'เชื่อมต่อ Gemini API ไม่สำเร็จ';
+    }
+  }
   if (geminiKey && geminiKey.length > 5) {
     startupStatus.gemini = 'ok';
-    startupStatus.geminiMessage = 'Gemini API Key พร้อมใช้งาน ✅';
-    console.log('[Startup] ✅ Gemini API Key: พร้อมสแกนบิล');
+    startupStatus.geminiMessage = 'เชื่อมต่อ Gemini API สำเร็จ ✅';
+    console.log(`[Startup] Gemini API test result: ${geminiApiError ? 'error' : 'ok'}`);
   } else {
     startupStatus.gemini = 'not_configured';
     startupStatus.geminiMessage = 'ยังไม่ได้ตั้งค่า Gemini API Key — ระบบ AI จะยังไม่ทำงาน';
     console.warn('[Startup] ⚠️  Gemini API Key: ยังไม่ได้ตั้งค่า');
   }
 
+  if (geminiApiError) {
+    startupStatus.gemini = 'error';
+    startupStatus.geminiMessage = geminiApiError;
+    console.warn('[Startup] ⚠️  Gemini API self-test error:', geminiApiError);
+  }
+
+  if (lineBotConfig.channelAccessToken) {
+    try {
+      const response = await fetch('https://api.line.me/v2/bot/info', {
+        headers: { Authorization: `Bearer ${lineBotConfig.channelAccessToken}` },
+        signal: AbortSignal.timeout(8_000)
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        startupStatus.line = 'error';
+        startupStatus.lineMessage = body?.message || `LINE API ตอบกลับ ${response.status}`;
+      } else {
+        startupStatus.line = 'ok';
+        startupStatus.lineMessage = `LINE Channel Access Token ใช้งานได้${body?.displayName ? ` — ${body.displayName}` : ''} ✅`;
+      }
+    } catch (err: any) {
+      startupStatus.line = 'error';
+      startupStatus.lineMessage = err?.message || 'เชื่อมต่อ LINE Messaging API ไม่สำเร็จ';
+    }
+  } else {
+    startupStatus.line = 'not_configured';
+    startupStatus.lineMessage = 'ยังไม่ได้ตั้งค่า LINE Channel Access Token';
+  }
+
   startupStatus.allReady = (
-    (startupStatus.supabase === 'ok' || startupStatus.supabase === 'not_configured') &&
+    (startupStatus.supabase === 'not_configured' ||
+      (startupStatus.supabase === 'ok' && startupStatus.isSchemaReady)) &&
     (startupStatus.drive === 'ok' || startupStatus.drive === 'not_configured') &&
-    startupStatus.gemini === 'ok'
+    startupStatus.gemini === 'ok' &&
+    (startupStatus.line === 'ok' || startupStatus.line === 'not_configured')
   );
 
-  console.log(`[Startup] Self-test done — Supabase:${startupStatus.supabase} Drive:${startupStatus.drive} Gemini:${startupStatus.gemini} 🚀`);
+  console.log(`[Startup] Self-test done — Supabase:${startupStatus.supabase} Drive:${startupStatus.drive} Gemini:${startupStatus.gemini} LINE:${startupStatus.line} 🚀`);
 }
+
+async function ensureStartupSelfTest(force = false) {
+  if (startupSelfTestPromise) return startupSelfTestPromise;
+  if (
+    !force &&
+    startupSelfTestCompletedAt &&
+    Date.now() - startupSelfTestCompletedAt < STARTUP_SELF_TEST_CACHE_MS
+  ) {
+    return;
+  }
+
+  startupSelfTestPromise = (async () => {
+    await restoreConfigsFromSupabase();
+    await runStartupSelfTest();
+    startupSelfTestCompletedAt = Date.now();
+  })();
+  try {
+    await startupSelfTestPromise;
+  } finally {
+    startupSelfTestPromise = null;
+  }
+}
+
+// Run the same checks from the initial login page, with a short server-side cooldown.
+app.post('/api/startup/auto-check', async (_req: Request, res: Response) => {
+  try {
+    await ensureStartupSelfTest();
+    res.json({ success: true, ranAt: startupStatus.ranAt, allReady: startupStatus.allReady });
+  } catch (err: any) {
+    console.error('[Startup] Automatic self-test failed:', err?.message || err);
+    res.status(500).json({ success: false, error: 'การตรวจสอบระบบอัตโนมัติไม่สำเร็จ' });
+  }
+});
 
 // GET /api/startup/status — Return startup self-test results for the Settings UI
 app.get('/api/startup/status', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
   res.json({
     success: true,
     ...startupStatus
@@ -5857,8 +6068,7 @@ app.get('/api/startup/status', (_req: Request, res: Response) => {
 // POST /api/startup/retest — Re-run startup self-test on demand & return fresh status
 app.post('/api/startup/retest', async (_req: Request, res: Response) => {
   try {
-    await restoreConfigsFromSupabase();
-    await runStartupSelfTest();
+    await ensureStartupSelfTest(true);
     res.json({
       success: true,
       ...startupStatus
@@ -5887,7 +6097,7 @@ async function startServer() {
   app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT}`);
     // Run self-test after server is up (non-blocking)
-    setImmediate(() => runStartupSelfTest().catch(err => console.warn('[Startup] Self-test unexpected error:', err)));
+    setImmediate(() => ensureStartupSelfTest().catch(err => console.warn('[Startup] Self-test unexpected error:', err)));
   });
 }
 

@@ -332,6 +332,21 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    fetch('/api/startup/auto-check', { method: 'POST' })
+      .then(async response => {
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          throw new Error(result.error || 'การตรวจสอบระบบเริ่มต้นไม่สำเร็จ');
+        }
+      })
+      .catch(error => {
+        if (!cancelled) console.warn('[Startup] Automatic service check failed:', error);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     const restoreSession = async () => {
       try {
         const response = await fetch('/api/auth/me');

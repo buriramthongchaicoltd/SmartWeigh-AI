@@ -180,10 +180,19 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     supabaseMessage: string;
     drive: 'ok' | 'error' | 'not_configured' | 'pending';
     driveMessage: string;
-    gemini: 'ok' | 'not_configured';
+    gemini: 'ok' | 'error' | 'not_configured' | 'pending';
     geminiMessage: string;
-    line: 'ok' | 'not_configured' | 'pending';
+    line: 'ok' | 'error' | 'not_configured' | 'pending';
     lineMessage: string;
+    isConnected?: boolean;
+    databaseConfigured?: boolean;
+    schemaTested?: boolean;
+    databaseMode?: 'supabase_rest' | 'postgres_direct' | 'offline';
+    databaseLatencyMs?: number;
+    tables?: Record<string, boolean>;
+    tableCounts?: Record<string, number>;
+    tableErrors?: Record<string, string>;
+    isSchemaReady?: boolean;
     allReady: boolean;
   } | null>(null);
   const [isSelfTestingAll, setIsSelfTestingAll] = useState(false);
@@ -494,89 +503,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     }
   };
 
-  // Auto-test silently in background after configs load — ถ้าตั้งค่าไว้แล้วให้ทดสอบทันที
-  const runSilentAutoTest = async (dbConfigured: boolean, driveConfigured: boolean) => {
-    if (dbConfigured) {
-      try {
-        const res = await fetch('/api/database/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}) // use server's stored config
-        });
-        const data = await res.json();
-        setDbStatus(prev => ({
-          ...prev,
-          ...data,
-          isConfigured: true,
-          isConnected: Boolean(data.success && data.isConnected),
-          message: data.isConnected
-            ? `✅ เชื่อมต่อสำเร็จ (${data.latencyMs ?? '—'} ms) — พร้อมใช้งาน`
-            : data.error || 'เชื่อมต่อไม่สำเร็จ กรุณาตรวจสอบ Key'
-        }));
-        // ถ้าต่อได้สำเร็จ และในแอปยังไม่มี orders/pos/stores ให้ซิงก์ดึงข้อมูลมาแสดงทันที
-        if (data.success && data.isConnected && orders.length === 0 && pos.length === 0 && stores.length === 0) {
-          if (onReloadDatabase) {
-            onReloadDatabase();
-          } else if (onSyncFromCloud) {
-            handleSyncFromCloud();
-          }
-        }
-      } catch {
-        // silent — don't show error toast on auto-test
-      }
-    }
-
-    if (driveConfigured) {
-      try {
-        const res = await fetch('/api/drive/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}) // use server's stored config
-        });
-        const data = await res.json();
-        setDriveStatus(prev => ({
-          ...prev,
-          isConfigured: true,
-          isConnected: Boolean(data.success),
-          rootFolderName: data.rootFolderName || prev?.rootFolderName,
-          zonesCreated: data.zonesCreated || prev?.zonesCreated,
-          message: data.success
-            ? `✅ เชื่อมต่อ Google Drive สำเร็จ${data.rootFolderName ? ` — ${data.rootFolderName}` : ''}`
-            : data.error || 'เชื่อมต่อ Drive ไม่สำเร็จ'
-        }));
-      } catch {
-        // silent
-      }
-    }
-  };
-
-  const fetchStartupStatus = async () => {
-    try {
-      const res = await fetch('/api/startup/status');
-      const data = await res.json();
-      if (data.success) {
-        setStartupStatus(data);
-        if (data.drive === 'ok') {
-          setDriveStatus(prev => ({
-            ...prev,
-            isConfigured: true,
-            isConnected: true,
-            message: data.driveMessage || '✅ เชื่อมต่อ Google Drive สำเร็จ'
-          }));
-        } else if (data.drive === 'error') {
-          setDriveStatus(prev => ({
-            ...prev,
-            isConfigured: true,
-            isConnected: false,
-            message: data.driveMessage || 'เชื่อมต่อ Drive ไม่สำเร็จ'
-          }));
-        }
-      }
-    } catch {
-      // silent
-    }
-  };
-
   const handleRunFullSelfTest = async () => {
     setIsSelfTestingAll(true);
     try {
@@ -584,13 +510,29 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       const data = await res.json();
       if (data.success) {
         setStartupStatus(data);
+        if (data.schemaTested) {
+          setDbStatus(prev => prev ? ({
+            ...prev,
+            isConnected: Boolean(data.isConnected),
+            mode: data.databaseMode || prev.mode,
+            latencyMs: data.databaseLatencyMs,
+            tables: data.tables || {},
+            tableCounts: data.tableCounts || {},
+            tableErrors: data.tableErrors || {},
+            schemaTested: true,
+            isSchemaReady: Boolean(data.isSchemaReady),
+            message: data.supabaseMessage
+          }) : prev);
+        }
         await Promise.all([loadDatabaseConfig(), loadDriveConfig()]);
         if (onReloadDatabase) {
           await onReloadDatabase();
         } else if (onSyncFromCloud) {
           await handleSyncFromCloud();
         }
-        showToast('ทดสอบระบบอัตโนมัติ (Self-Test) ทั้งหมดสำเร็จเรียบร้อย');
+        showToast(data.allReady
+          ? 'ทดสอบการเชื่อมต่อระบบที่ตั้งค่าไว้สำเร็จ'
+          : 'ตรวจสอบแล้ว แต่มีบางระบบที่ยังตั้งค่าไม่ครบหรือเชื่อมต่อไม่สำเร็จ ดูรายละเอียดในสถานะระบบ', 'info');
       } else {
         showToast(data.error || 'การทดสอบตนเองไม่สำเร็จ', 'info');
       }
@@ -603,83 +545,83 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
 
   useEffect(() => {
     const initLoad = async () => {
-      // 1. Load all configs in parallel and fetch startup health status
+      // 1. Load configuration; the shared self-test runs independently below.
       await Promise.all([
         loadDatabaseConfig(),
         loadDriveConfig(),
         loadSystemConfig(),
-        loadLineConfig(),
-        fetchStartupStatus()
+        loadLineConfig()
       ]);
     };
     initLoad();
   }, []);
 
-  // 2. Auto-test silently once after isConfigured is known (runs exactly once per page-open)
-  const autoTestDoneRef = React.useRef(false);
+  // Join the self-test started on the login page, then load its detailed report.
   useEffect(() => {
-    if (autoTestDoneRef.current) return;
-    const dbReady = Boolean(dbStatus?.isConfigured);
-    const driveReady = Boolean(driveStatus?.isConfigured);
-    // Only run when at least one service is configured
-    if (dbReady || driveReady) {
-      autoTestDoneRef.current = true;
-      // ใช้ /api/startup/retest แทน runSilentAutoTest เพราะ retest จะ restore configs ก่อน แล้วค่อย test
-      // ป้องกัน race condition ระหว่าง restoreConfigsFromSupabase() กับ /api/drive/test
-      fetch('/api/startup/retest', { method: 'POST' })
-        .then(r => r.json())
-        .then(async data => {
-          if (data.success) {
-            setStartupStatus(data);
-            // อัปเดต Drive status จาก startup result
-            if (data.drive === 'ok') {
-              setDriveStatus(prev => ({
-                ...prev,
-                isConfigured: true,
-                isConnected: true,
-                message: data.driveMessage || '✅ เชื่อมต่อ Google Drive สำเร็จ'
-              }));
-            } else if (data.drive === 'error') {
-              setDriveStatus(prev => ({
-                ...prev,
-                isConfigured: true,
-                isConnected: false,
-                message: data.driveMessage || 'เชื่อมต่อ Drive ไม่สำเร็จ'
-              }));
-            }
-          }
-          if (dbReady) {
-            const schemaRes = await fetch('/api/database/test', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({})
-            });
-            const schemaData = await schemaRes.json();
-            if (!schemaRes.ok || !schemaData.success) {
-              throw new Error(schemaData.error || 'ตรวจสอบตารางฐานข้อมูลไม่สำเร็จ');
-            }
-            setDbStatus(prev => ({
-              ...prev,
-              ...schemaData,
-              isConfigured: Boolean(schemaData.isConnected),
-              isConnected: Boolean(schemaData.isConnected),
-              schemaTested: true
-            }));
-          }
-        })
-        .catch(err => {
-          console.error('Automatic database self-test failed:', err);
-          if (dbReady) {
-            setDbStatus(prev => prev ? ({
-                ...prev,
-                schemaTested: true,
-                isConnected: false,
-                message: err instanceof Error ? err.message : 'ตรวจสอบฐานข้อมูลไม่สำเร็จ'
-              }) : prev);
-          }
-        });
-    }
-  }, [dbStatus?.isConfigured, driveStatus?.isConfigured]);
+    let cancelled = false;
+    const loadSelfTestReport = async () => {
+      try {
+        const checkResponse = await fetch('/api/startup/auto-check', { method: 'POST' });
+        const checkResult = await checkResponse.json();
+        if (!checkResponse.ok || !checkResult.success) {
+          throw new Error(checkResult.error || 'การตรวจสอบระบบอัตโนมัติไม่สำเร็จ');
+        }
+
+        const statusResponse = await fetch('/api/startup/status');
+        const status = await statusResponse.json();
+        if (!statusResponse.ok || !status.success) {
+          throw new Error(status.error || 'โหลดผลตรวจสอบระบบไม่สำเร็จ');
+        }
+        if (cancelled) return;
+
+        setStartupStatus(status);
+        if (status.drive === 'ok' || status.drive === 'error') {
+          setDriveStatus(prev => ({
+            ...prev,
+            isConfigured: true,
+            isConnected: status.drive === 'ok',
+            message: status.driveMessage
+          }));
+        }
+        setDbStatus(prev => ({
+          ...prev,
+          isConfigured: Boolean(status.databaseConfigured),
+          isEnabled: prev?.isEnabled ?? true,
+          isConnected: Boolean(status.isConnected),
+          mode: status.databaseMode || prev?.mode || 'offline',
+          supabaseUrl: prev?.supabaseUrl || '',
+          hasServiceKey: prev?.hasServiceKey ?? false,
+          hasPgConnection: prev?.hasPgConnection ?? false,
+          latencyMs: status.databaseLatencyMs,
+          tables: status.tables || {},
+          tableCounts: status.tableCounts || {},
+          tableErrors: status.tableErrors || {},
+          schemaTested: Boolean(status.schemaTested),
+          isSchemaReady: Boolean(status.isSchemaReady),
+          message: status.supabaseMessage
+        }));
+      } catch (error) {
+        console.error('Automatic service self-test failed:', error);
+        if (cancelled) return;
+        const message = error instanceof Error ? error.message : 'การตรวจสอบระบบไม่สำเร็จ';
+        showToast(`ตรวจสอบการเชื่อมต่ออัตโนมัติไม่สำเร็จ: ${message}`, 'info');
+        setStartupStatus(prev => prev ? {
+          ...prev,
+          supabase: prev.databaseConfigured ? 'error' : prev.supabase,
+          supabaseMessage: prev.databaseConfigured ? message : prev.supabaseMessage
+        } : prev);
+        setDbStatus(prev => prev?.isConfigured ? ({
+          ...prev,
+          schemaTested: true,
+          isConnected: false,
+          message
+        }) : prev);
+      }
+    };
+
+    void loadSelfTestReport();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleSaveDbConfig = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -1030,6 +972,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     setPreviewPayload(null);
   };
 
+  const hasStartupError = Boolean(
+    startupStatus?.supabase === 'error' ||
+    (startupStatus?.supabase === 'ok' && startupStatus.schemaTested && !startupStatus.isSchemaReady) ||
+    startupStatus?.drive === 'error' ||
+    startupStatus?.gemini === 'error' ||
+    startupStatus?.line === 'error'
+  );
+  const isStartupCheckPending = !startupStatus || [
+    startupStatus.supabase,
+    startupStatus.drive,
+    startupStatus.gemini,
+    startupStatus.line
+  ].some(status => status === 'pending');
+
   return (
     <div className="space-y-4">
       {/* Top Sub-Navigation Banner */}
@@ -1116,24 +1072,26 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             <div>
               <div className="flex items-center gap-2.5 flex-wrap">
                 <h3 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
-                  ความพร้อมของระบบจริง 100% (Verified Real-Time Cloud & APIs)
+                  สถานะการเชื่อมต่อฐานข้อมูลและระบบภายนอก
                 </h3>
-                {((dbStatus?.isConnected || startupStatus?.supabase === 'ok') &&
-                  (driveStatus?.isConnected || startupStatus?.drive === 'ok') &&
-                  (geminiConfig.hasKey || startupStatus?.gemini === 'ok')) ? (
+                {startupStatus?.allReady && !hasStartupError ? (
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-xs font-bold flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                    พร้อมใช้งานจริงครบทุกระบบ (100% Online)
+                    ตรวจบริการที่ตั้งค่าแล้วเสร็จ
+                  </span>
+                ) : hasStartupError ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-400/30 text-xs font-bold">
+                    พบระบบที่เชื่อมต่อไม่สำเร็จ
                   </span>
                 ) : (
                   <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-amber-400"></span>
-                    ตรวจพบการตั้งค่าแล้ว (พร้อมทดสอบด่วน)
+                    <span className={`w-2 h-2 rounded-full bg-amber-400 ${isStartupCheckPending ? 'animate-pulse' : ''}`}></span>
+                    {isStartupCheckPending ? 'กำลังตรวจสอบอัตโนมัติ...' : 'ตรวจสอบแล้ว — มีบริการที่ยังไม่ได้ตั้งค่า'}
                   </span>
                 )}
               </div>
               <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                ระบบเชื่อมต่อ <strong>Supabase Cloud</strong> และ <strong>Google Drive</strong> จริงโดยอัตโนมัติ — <span className="text-emerald-400 font-bold">ไม่จำเป็นต้องตั้งค่าใหม่</span> ระบบจะทดสอบตัวเองอัตโนมัติตอนเปิดและพร้อมทำงานทันที
+                ระบบเริ่มตรวจฐานข้อมูล 8 ตาราง, Google Drive, Gemini API และ LINE Token ตั้งแต่เปิดหน้าเข้าสู่ระบบ
               </p>
             </div>
           </div>
@@ -1159,7 +1117,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             className={`p-3.5 rounded-xl border transition cursor-pointer ${
               (dbStatus?.isConnected || startupStatus?.supabase === 'ok')
                 ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
-                : (dbStatus?.isConfigured || startupStatus?.supabase === 'error')
+                : startupStatus?.supabase === 'error'
+                ? 'bg-rose-950/30 border-rose-500/40 hover:bg-rose-950/50'
+                : dbStatus?.isConfigured
                 ? 'bg-amber-950/30 border-amber-500/40 hover:bg-amber-950/50'
                 : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
             }`}
@@ -1171,8 +1131,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </span>
               {(dbStatus?.isConnected || startupStatus?.supabase === 'ok') ? (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : startupStatus?.supabase === 'error' ? (
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
               ) : (dbStatus?.isConfigured) ? (
-                <span className="w-2 h-2 rounded-full bg-amber-400"></span>
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
               ) : (
                 <span className="w-2 h-2 rounded-full bg-slate-500"></span>
               )}
@@ -1182,8 +1144,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <span className="text-emerald-300">
                   ✅ เชื่อมต่อสำเร็จ {dbStatus?.latencyMs ? `(${dbStatus.latencyMs} ms)` : '(พร้อมใช้งาน)'}
                 </span>
+              ) : startupStatus?.supabase === 'error' ? (
+                <span className="text-rose-300">❌ {startupStatus.supabaseMessage}</span>
               ) : dbStatus?.isConfigured ? (
-                <span className="text-amber-300">⚠️ ตั้งค่าแล้ว (คลิกเพื่อทดสอบ)</span>
+                <span className="text-amber-300">⏳ กำลังตรวจสอบฐานข้อมูลและ 8 ตารางอัตโนมัติ...</span>
               ) : (
                 <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
               )}
@@ -1241,8 +1205,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           <div
             onClick={() => setSubTab('database')}
             className={`p-3.5 rounded-xl border transition cursor-pointer ${
-              (geminiConfig.hasKey || startupStatus?.gemini === 'ok')
+              startupStatus?.gemini === 'ok'
                 ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : startupStatus?.gemini === 'error'
+                ? 'bg-rose-950/30 border-rose-500/40 hover:bg-rose-950/50'
                 : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
             }`}
           >
@@ -1251,15 +1217,23 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <Sparkles className="w-4 h-4 text-violet-400" />
                 3. Google Gemini AI
               </span>
-              {(geminiConfig.hasKey || startupStatus?.gemini === 'ok') ? (
+              {startupStatus?.gemini === 'ok' ? (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : startupStatus?.gemini === 'error' ? (
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+              ) : geminiConfig.hasKey ? (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
               ) : (
                 <span className="w-2 h-2 rounded-full bg-rose-400"></span>
               )}
             </div>
             <div className="text-[11px] font-semibold">
-              {(geminiConfig.hasKey || startupStatus?.gemini === 'ok') ? (
-                <span className="text-emerald-300">✅ Key พร้อมสแกนบิล OCR</span>
+              {startupStatus?.gemini === 'ok' ? (
+                <span className="text-emerald-300">✅ เชื่อมต่อ Gemini API สำเร็จ</span>
+              ) : startupStatus?.gemini === 'error' ? (
+                <span className="text-rose-300">❌ {startupStatus.geminiMessage}</span>
+              ) : geminiConfig.hasKey ? (
+                <span className="text-amber-300">⏳ ตั้งค่าแล้ว — กำลังทดสอบ Gemini API...</span>
               ) : (
                 <span className="text-rose-300">⚠️ ยังไม่ระบุ Key</span>
               )}
@@ -1273,8 +1247,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           <div
             onClick={() => setSubTab('database')}
             className={`p-3.5 rounded-xl border transition cursor-pointer ${
-              (lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok')
+              startupStatus?.line === 'ok'
                 ? 'bg-emerald-950/40 border-emerald-500/40 hover:bg-emerald-950/60'
+                : startupStatus?.line === 'error'
+                ? 'bg-rose-950/30 border-rose-500/40 hover:bg-rose-950/50'
                 : 'bg-slate-800/50 border-slate-700 hover:bg-slate-800'
             }`}
           >
@@ -1283,15 +1259,23 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <MessageSquare className="w-4 h-4 text-emerald-400" />
                 4. LINE OA Webhook
               </span>
-              {(lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok') ? (
+              {startupStatus?.line === 'ok' ? (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-xs shadow-emerald-400"></span>
+              ) : startupStatus?.line === 'error' ? (
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span>
+              ) : lineConfig.hasChannelAccessToken ? (
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
               ) : (
                 <span className="w-2 h-2 rounded-full bg-slate-500"></span>
               )}
             </div>
             <div className="text-[11px] font-semibold">
-              {(lineConfig.hasChannelAccessToken || startupStatus?.line === 'ok') ? (
-                <span className="text-emerald-300">✅ Webhook พร้อมรับบิล</span>
+              {startupStatus?.line === 'ok' ? (
+                <span className="text-emerald-300">✅ LINE Token ใช้งานได้</span>
+              ) : startupStatus?.line === 'error' ? (
+                <span className="text-rose-300">❌ {startupStatus.lineMessage}</span>
+              ) : lineConfig.hasChannelAccessToken ? (
+                <span className="text-amber-300">⏳ ตั้งค่าแล้ว — กำลังทดสอบ LINE Token...</span>
               ) : (
                 <span className="text-slate-400">ยังไม่ได้ตั้งค่า Token</span>
               )}
@@ -2008,6 +1992,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs ${
                     dbStatus?.isConnected
                       ? 'bg-emerald-600 text-white'
+                      : dbStatus?.schemaTested
+                      ? 'bg-rose-600 text-white'
                       : dbStatus?.isConfigured
                       ? 'bg-amber-500 text-white'
                       : 'bg-slate-800 text-white'
@@ -2025,10 +2011,14 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                         เชื่อมต่อสำเร็จ ({dbStatus.latencyMs} ms)
                       </span>
+                    ) : dbStatus?.schemaTested ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-xs flex items-center gap-1">
+                        ตรวจสอบไม่สำเร็จ
+                      </span>
                     ) : dbStatus?.isConfigured ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold text-xs flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-                        ตั้งค่าแล้ว (รอทดสอบการเชื่อมต่อ)
+                        กำลังตรวจสอบการเชื่อมต่ออัตโนมัติ...
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-semibold text-xs">
@@ -2281,7 +2271,11 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                             </span>
                           ) : !dbStatus?.schemaTested ? (
                             <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-medium">
-                              {dbStatus?.isConfigured ? 'กำลังตรวจสอบ...' : 'รอทดสอบการเชื่อมต่อ'}
+                              {dbStatus?.isConfigured ? 'กำลังตรวจสอบ...' : 'ยังไม่ได้ตั้งค่าฐานข้อมูล'}
+                            </span>
+                          ) : !dbStatus?.isConnected ? (
+                            <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10px] font-medium">
+                              ตรวจสอบไม่ได้
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-medium">
@@ -2404,10 +2398,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <h3 className="text-base font-bold text-slate-900">
                       2. Google Gemini AI API Key (ระบบอ่านบิล & OCR แยกรายการอัตโนมัติ)
                     </h3>
-                    {geminiConfig.hasKey ? (
+                    {startupStatus?.gemini === 'ok' ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                        ตั้งค่าแล้ว ({geminiConfig.keySource === 'env_var' ? 'Environment Variable' : 'UI Config'})
+                        ทดสอบ Gemini API แล้ว
+                      </span>
+                    ) : startupStatus?.gemini === 'error' ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-xs flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        ตั้งค่าแล้ว แต่เชื่อมต่อ Gemini ไม่สำเร็จ
+                      </span>
+                    ) : geminiConfig.hasKey ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold text-xs flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        กำลังทดสอบ Gemini API...
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-700 font-bold text-xs flex items-center gap-1">
@@ -2490,10 +2494,20 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <h3 className="text-base font-bold text-slate-900">
                       3. ระบบเชื่อมต่อ LINE Official Account (Messaging API Bot)
                     </h3>
-                    {lineConfig.hasChannelAccessToken ? (
+                    {startupStatus?.line === 'ok' ? (
                       <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-xs flex items-center gap-1">
                         <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                        ตั้งค่าแล้ว (พร้อมรับบิลจากกลุ่ม LINE)
+                        LINE Token ใช้งานได้
+                      </span>
+                    ) : startupStatus?.line === 'error' ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-xs flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        ตั้งค่า Token แล้ว แต่ทดสอบไม่ผ่าน
+                      </span>
+                    ) : lineConfig.hasChannelAccessToken ? (
+                      <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold text-xs flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        กำลังทดสอบ LINE Token...
                       </span>
                     ) : (
                       <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold text-xs flex items-center gap-1">

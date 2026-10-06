@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-06] Run Connection Self-Test from the Login Page
+
+### การเปลี่ยนแปลง
+- เรียก `/api/startup/auto-check` ทันทีเมื่อแอปเปิด โดยไม่ต้องรอผู้ใช้เข้าสู่ระบบ; ฝั่ง server รวมงานตรวจที่กำลังทำอยู่และใช้ผลล่าสุดภายใน 60 วินาทีเพื่อลดการเรียกบริการภายนอกซ้ำ
+- ขยาย self-test ให้ตรวจการเชื่อมต่อฐานข้อมูลและ schema ทั้ง 8 ตาราง รวมถึงเรียก Google Drive, Gemini Models API และ LINE Bot Info API จริง
+- ปรับหน้า Settings ให้ใช้ผลตรวจเดียวกันและแสดงผลผิดพลาดจริง แทนป้าย “ตั้งค่าแล้ว (รอทดสอบการเชื่อมต่อ)” และไม่อ้างว่า LINE Token test พิสูจน์ Webhook แล้ว
+- ปรับ Handover และ Database Blueprint ให้ตรงกับพฤติกรรมใหม่
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังมีคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- ยังไม่ได้ทดสอบ API กับบริการ production จริง; LINE check ยืนยัน Token เท่านั้น ไม่ได้ทดสอบ webhook delivery
+
 ## [2026-10-06] Unify LINE Bot Settings and Add Connection Test
 
 ### การเปลี่ยนแปลง
