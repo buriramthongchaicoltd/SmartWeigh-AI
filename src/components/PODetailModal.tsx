@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   X, 
   Printer, 
@@ -37,6 +37,94 @@ interface PODetailModalProps {
   onUnlinkOrderFromPO?: (orderId: string) => void;
 }
 
+const getPOImageSource = (po: PurchaseOrder): string | null => {
+  const image = typeof po.image === 'string' ? po.image.trim() : '';
+  if (image.startsWith('data:image/')) return image;
+
+  let driveFileId = po.driveFileId && /^[a-zA-Z0-9_-]{5,200}$/.test(po.driveFileId)
+    ? po.driveFileId
+    : undefined;
+
+  if (image) {
+    try {
+      const url = new URL(image, window.location.origin);
+      if (['drive.google.com', 'docs.google.com'].includes(url.hostname)) {
+        driveFileId ||= url.pathname.match(/\/(?:file\/)?d\/([^/]+)/)?.[1] ||
+          url.searchParams.get('id') ||
+          undefined;
+      } else {
+        return image;
+      }
+    } catch {
+      return image;
+    }
+  }
+
+  return driveFileId && /^[a-zA-Z0-9_-]{5,200}$/.test(driveFileId)
+    ? `/api/drive/image/${encodeURIComponent(driveFileId)}`
+    : null;
+};
+
+const POOriginalImagePreview: React.FC<{ po: PurchaseOrder }> = ({ po }) => {
+  const imageSource = getPOImageSource(po);
+  const [imageLoadError, setImageLoadError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+
+  useEffect(() => {
+    setImageLoadError(false);
+    setRetryCount(0);
+  }, [imageSource, po.id]);
+
+  const retryImageSource = imageSource && retryCount > 0 && imageSource.startsWith('/api/drive/image/')
+    ? `${imageSource}?retry=${retryCount}`
+    : imageSource;
+
+  return (
+    <aside className="lg:col-span-5 print:hidden">
+      <div className="lg:sticky lg:top-0 rounded-xl border border-slate-700 bg-slate-950 p-3 text-white">
+        <div className="mb-3 flex items-center gap-2">
+          <ImageIcon className="h-4 w-4 text-blue-300" />
+          <h3 className="text-xs font-semibold">ภาพต้นฉบับ PO</h3>
+        </div>
+        <div className="flex min-h-[280px] max-h-[65vh] items-center justify-center overflow-auto rounded-lg border border-slate-700 bg-slate-900 p-2">
+          {imageSource && !imageLoadError ? (
+            <img
+              key={`${po.id}-${retryCount}`}
+              src={retryImageSource || undefined}
+              alt={`ภาพเอกสารใบสั่งซื้อ ${po.poNumber}`}
+              onLoad={() => setImageLoadError(false)}
+              onError={() => setImageLoadError(true)}
+              className="max-h-[62vh] max-w-full rounded object-contain"
+            />
+          ) : (
+            <div className="px-4 py-8 text-center text-xs text-slate-300" role={imageLoadError ? 'alert' : undefined}>
+              <ImageIcon className="mx-auto mb-2 h-8 w-8 text-slate-500" />
+              <p className="font-medium">
+                {imageLoadError ? 'โหลดภาพ PO ไม่สำเร็จ' : 'ไม่พบภาพต้นฉบับของ PO นี้'}
+              </p>
+              {imageLoadError && (
+                <p className="mt-1 text-slate-400">ตรวจสอบการเชื่อมต่อหรือสิทธิ์ Google Drive</p>
+              )}
+            </div>
+          )}
+        </div>
+        {imageLoadError && (
+          <button
+            type="button"
+            onClick={() => {
+              setImageLoadError(false);
+              setRetryCount(count => count + 1);
+            }}
+            className="mt-3 min-h-10 w-full rounded-lg border border-slate-600 px-3 py-2 text-xs font-semibold text-slate-100 hover:bg-slate-800"
+          >
+            ลองโหลดภาพอีกครั้ง
+          </button>
+        )}
+      </div>
+    </aside>
+  );
+};
+
 export const PODetailModal: React.FC<PODetailModalProps> = ({
   isOpen,
   po,
@@ -50,7 +138,6 @@ export const PODetailModal: React.FC<PODetailModalProps> = ({
   onUnlinkOrderFromPO
 }) => {
   const [activeTab, setActiveTab] = useState<'document' | 'tickets'>('document');
-  const [showPOImage, setShowPOImage] = useState<boolean>(true);
 
   if (!isOpen || !po) return null;
 
@@ -67,7 +154,7 @@ export const PODetailModal: React.FC<PODetailModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl my-8 overflow-hidden flex flex-col max-h-[90vh] animate-fadeIn border border-slate-200">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-7xl my-8 overflow-hidden flex flex-col max-h-[90vh] animate-fadeIn border border-slate-200">
         
         {/* Top Bar */}
         <div className="px-6 py-3.5 bg-slate-900 text-white flex items-center justify-between">
@@ -150,11 +237,14 @@ export const PODetailModal: React.FC<PODetailModalProps> = ({
         </div>
 
         {/* Modal Scroll Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
 
           {/* VIEW TAB 1: FORMAL PURCHASE ORDER SLIP */}
           {activeTab === 'document' && (
-            <div className="bg-white border border-slate-300 rounded-xl p-8 shadow-sm space-y-6 print:border-none print:shadow-none print:p-0">
+            <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
+              <POOriginalImagePreview key={po.id} po={po} />
+              <div className="min-w-0 lg:col-span-7 print:col-span-12">
+            <div className="bg-white border border-slate-300 rounded-xl p-5 md:p-8 shadow-sm space-y-6 print:border-none print:shadow-none print:p-0">
               
               {/* Document Header */}
               <div className="flex flex-wrap items-start justify-between border-b-2 border-slate-900 pb-5 gap-4">
@@ -204,34 +294,6 @@ export const PODetailModal: React.FC<PODetailModalProps> = ({
                   )}
                 </div>
               </div>
-
-              {/* Scanned Original PO Document Preview (If image exists) */}
-              {po.image && (
-                <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-3 print:hidden">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                      <ImageIcon className="w-4 h-4 text-blue-600" />
-                      <span>ภาพเอกสารใบสั่งซื้อต้นฉบับ (Original Scanned Document)</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowPOImage(!showPOImage)}
-                      className="text-xs text-blue-600 hover:text-blue-800 font-medium cursor-pointer"
-                    >
-                      {showPOImage ? 'ซ่อนรูปภาพ' : 'แสดงรูปภาพ'}
-                    </button>
-                  </div>
-                  {showPOImage && (
-                    <div className="border border-slate-200 rounded-lg overflow-hidden max-h-96 flex items-center justify-center bg-slate-900/5 p-2">
-                      <img 
-                        src={po.image} 
-                        alt={`ภาพเอกสาร PO ${po.poNumber}`}
-                        className="max-h-88 object-contain rounded shadow-xs" 
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
 
               {/* Vendor & Project Info Box */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -337,6 +399,8 @@ export const PODetailModal: React.FC<PODetailModalProps> = ({
                 </div>
               </div>
 
+            </div>
+              </div>
             </div>
           )}
 

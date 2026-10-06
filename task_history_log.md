@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Fix PO Detail Image and Split View Layout
+
+### การเปลี่ยนแปลง
+- ปรับรายละเอียด PO ให้แสดงภาพต้นฉบับทางซ้ายและรายละเอียด/เอกสาร PO ทางขวาบนจอใหญ่ พร้อมเรียงเป็นแนวตั้งบนจอแคบ
+- แก้ภาพ Drive ส่วนตัวที่ไม่แสดง โดย resolve Drive file ID/URL ไปยัง authenticated `/api/drive/image/:fileId` และเพิ่มข้อความผิดพลาดกับปุ่มลองใหม่
+- อัปเดต Handover ให้ระบุ layout และวิธีโหลดภาพ PO
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build แสดงคำเตือนเดิมว่า JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Group Google Drive Audit Panel Actions
 
 ### การเปลี่ยนแปลง
