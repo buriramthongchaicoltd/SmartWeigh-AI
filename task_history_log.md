@@ -4,6 +4,15 @@
 
 ---
 
+## [2026-10-06] Group Google Drive Audit Panel Actions
+
+### การเปลี่ยนแปลง
+- จัดกลุ่มปุ่มตรวจเทียบ, ยกเลิกการตรวจ และปิดแผงไว้ติดกันชิดขวา ลดปัญหาปุ่มปิดแยกตำแหน่งเมื่อแถบหัวข้อ wrap
+- อัปเดต Handover ให้ตรงกับตำแหน่งปุ่มใน UI
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build แสดงคำเตือนเดิมว่า JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Add Close and Reopen Controls for Google Drive Audit
 
 ### การเปลี่ยนแปลง
