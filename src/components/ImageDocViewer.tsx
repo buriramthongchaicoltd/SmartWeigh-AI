@@ -24,6 +24,20 @@ interface CropBox {
   height: number; // percentage 0-100
 }
 
+const getImageSource = (image: string | null) => {
+  if (!image) return undefined;
+  try {
+    const url = new URL(image);
+    if (!['drive.google.com', 'docs.google.com'].includes(url.hostname)) return image;
+    const fileId = url.pathname.match(/\/(?:file\/)?d\/([^/]+)/)?.[1] || url.searchParams.get('id');
+    return fileId && /^[a-zA-Z0-9_-]{5,200}$/.test(fileId)
+      ? `/api/drive/image/${encodeURIComponent(fileId)}`
+      : image;
+  } catch {
+    return image;
+  }
+};
+
 export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
   image,
   title = 'ภาพเอกสารต้นฉบับ',
@@ -31,6 +45,8 @@ export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
 }) => {
   const [currentImage, setCurrentImage] = useState<string | null>(image);
   const [originalImage, setOriginalImage] = useState<string | null>(image);
+  const [fallbackImageSource, setFallbackImageSource] = useState<string | null>(null);
+  const [imageLoadError, setImageLoadError] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [isCropping, setIsCropping] = useState(false);
   const [cropBox, setCropBox] = useState<CropBox>({ x: 5, y: 5, width: 90, height: 90 });
@@ -45,14 +61,23 @@ export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const driveImageSource = getImageSource(currentImage);
+  const displayImageSource = fallbackImageSource || driveImageSource;
 
   // Sync when prop image changes
   useEffect(() => {
     setCurrentImage(image);
     setOriginalImage(image);
+    setFallbackImageSource(null);
+    setImageLoadError(false);
     setZoom(1);
     setIsCropping(false);
   }, [image]);
+
+  useEffect(() => {
+    setFallbackImageSource(null);
+    setImageLoadError(false);
+  }, [currentImage]);
 
   // Rotate 90 degrees clockwise (physically alters canvas image data)
   const handleRotateCw = () => {
@@ -74,7 +99,7 @@ export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
       setCurrentImage(rotatedBase64);
       onImageChange?.(rotatedBase64);
     };
-    img.src = currentImage;
+    img.src = displayImageSource || currentImage;
   };
 
   // Start Crop Mode
@@ -113,7 +138,7 @@ export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
       setIsCropping(false);
       onImageChange?.(croppedBase64);
     };
-    img.src = currentImage;
+    img.src = displayImageSource || currentImage;
   };
 
   // Cancel Crop Mode
@@ -306,13 +331,33 @@ export const ImageDocViewer: React.FC<ImageDocViewerProps> = ({
       >
         {currentImage ? (
           <div className="relative inline-block max-h-full max-w-full">
-            <img
-              ref={imageRef}
-              src={currentImage}
-              alt="ภาพเอกสารต้นฉบับ"
-              style={{ transform: !isCropping ? `scale(${zoom})` : 'none' }}
-              className="max-h-[75vh] max-w-full object-contain transition-transform duration-150 rounded-md shadow-2xl block"
-            />
+            {imageLoadError ? (
+              <div className="px-6 py-8 text-center text-amber-200 text-xs" role="alert">
+                <FileText className="w-8 h-8 mx-auto mb-2 text-amber-300" />
+                <p className="font-semibold">โหลดภาพเอกสารไม่สำเร็จ</p>
+                <p className="mt-1 text-slate-400">ตรวจสอบการเชื่อมต่อหรือสิทธิ์เข้าถึง Google Drive</p>
+              </div>
+            ) : (
+              <img
+                ref={imageRef}
+                src={displayImageSource}
+                alt="ภาพเอกสารต้นฉบับ"
+                onLoad={() => setImageLoadError(false)}
+                onError={() => {
+                  if (
+                    driveImageSource?.startsWith('/api/drive/image/') &&
+                    !fallbackImageSource &&
+                    currentImage !== driveImageSource
+                  ) {
+                    setFallbackImageSource(currentImage);
+                    return;
+                  }
+                  setImageLoadError(true);
+                }}
+                style={{ transform: !isCropping ? `scale(${zoom})` : 'none' }}
+                className="max-h-[75vh] max-w-full object-contain transition-transform duration-150 rounded-md shadow-2xl block"
+              />
+            )}
 
             {/* Interactive Crop Overlay */}
             {isCropping && (

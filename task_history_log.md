@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Fix Original Document Image in Verification Viewer
+
+### การเปลี่ยนแปลง
+- ปรับ `ImageDocViewer` ให้ URL ของ Google Drive ใช้ endpoint ภาพที่ยืนยันสิทธิ์ของระบบ แทนการเปิด Drive URL ส่วนตัวใน `<img>` โดยตรง
+- หาก proxy โหลดไม่สำเร็จ จะลอง URL เดิมเป็น fallback และแสดงข้อความแจ้งเมื่อทั้งสองทางโหลดภาพไม่ได้
+- ใช้แหล่งภาพที่ resolve แล้วกับการหมุน/ครอป โดยยังบันทึกภาพที่แก้ไขเป็น Base64 ตาม contract เดิม
+
+### การตรวจสอบ
+- ตรวจ TypeScript และ production build หลังแก้ไข
+
 ## [2026-10-06] Preload Document Preview Images Before Hover
 
 ### การเปลี่ยนแปลง
