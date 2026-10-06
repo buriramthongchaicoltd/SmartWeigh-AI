@@ -42,6 +42,8 @@ function doPost(e) {
       return handleTestConnection(payload);
     } else if (action === 'upload') {
       return handleUploadFile(payload);
+    } else if (action === 'get_image') {
+      return handleGetImage(payload);
     } else if (action === 'sync_verified_move') {
       return handleMoveFile(payload);
     } else if (action === 'rename_and_move') {
@@ -197,6 +199,56 @@ function handleUploadFile(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function handleGetImage(payload) {
+  if (!payload.fileId || !payload.rootFolderId) {
+    return jsonResponse({ success: false, error: 'กรุณาระบุ fileId และ rootFolderId' });
+  }
+
+  try {
+    var file = DriveApp.getFileById(payload.fileId);
+    if (!isFileUnderRoot(file, payload.rootFolderId)) {
+      return jsonResponse({ success: false, error: 'ไฟล์รูปภาพไม่ได้อยู่ในโฟลเดอร์ระบบที่กำหนด' });
+    }
+    var blob = file.getBlob();
+    var bytes = blob.getBytes();
+    if (!bytes.length || bytes.length > 15 * 1024 * 1024) {
+      return jsonResponse({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
+    }
+    return jsonResponse({
+      success: true,
+      mimeType: blob.getContentType(),
+      base64Data: Utilities.base64Encode(bytes)
+    });
+  } catch (err) {
+    return jsonResponse({ success: false, error: 'อ่านภาพจาก Google Drive ไม่สำเร็จ: ' + err.toString() });
+  }
+}
+
+function isFileUnderRoot(file, rootFolderId) {
+  var pendingFolders = [];
+  var checkedFolders = {};
+  var parents = file.getParents();
+  while (parents.hasNext()) {
+    pendingFolders.push(parents.next().getId());
+  }
+
+  for (var depth = 0; pendingFolders.length && depth < 8; depth++) {
+    var folderId = pendingFolders.shift();
+    if (folderId === rootFolderId) {
+      return true;
+    }
+    if (checkedFolders[folderId]) {
+      continue;
+    }
+    checkedFolders[folderId] = true;
+    var folderParents = DriveApp.getFolderById(folderId).getParents();
+    while (folderParents.hasNext()) {
+      pendingFolders.push(folderParents.next().getId());
+    }
+  }
+  return false;
 }
 
 function handleMoveFile(payload) {

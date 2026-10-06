@@ -130,6 +130,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     docTypeLabel: string;
     docNo: string;
     imageUrl?: string | null;
+    fallbackImageUrl?: string | null;
+    imageLoadFailed?: boolean;
     matchStatus?: 'auto_flagged' | 'verified' | 'manual';
     referenceNote?: string;
     details: { label: string; value: string; highlight?: boolean; alert?: boolean }[];
@@ -1831,9 +1833,10 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       zoneBadge: 'โซน 1 • คอลัมน์ 4 (ใบสั่งซื้อ PO)',
                       docTypeLabel: 'ใบสั่งซื้อ (Purchase Order)',
                       docNo: row.col4,
-                      imageUrl: matchedPO?.image || (matchedPO?.driveFileId
-                        ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(matchedPO.driveFileId)}`
-                        : undefined),
+                      imageUrl: matchedPO?.driveFileId
+                        ? `/api/drive/image/${encodeURIComponent(matchedPO.driveFileId)}`
+                        : matchedPO?.image,
+                      fallbackImageUrl: matchedPO?.driveFileId ? matchedPO.image : undefined,
                       matchStatus: poNeedsReview ? 'auto_flagged' : row.poMatchStatus,
                       referenceNote:
                         row.referenceSource === 'handwritten'
@@ -3150,7 +3153,24 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   src={hoveredDocPreview.imageUrl}
                   alt={hoveredDocPreview.docNo}
                   className="max-h-full max-w-full object-contain"
+                  onError={() => {
+                    if (hoveredDocPreview.fallbackImageUrl) {
+                      setHoveredDocPreview(current => current
+                        ? { ...current, imageUrl: current.fallbackImageUrl, fallbackImageUrl: undefined }
+                        : current);
+                      return;
+                    }
+                    setHoveredDocPreview(current => current
+                      ? { ...current, imageUrl: undefined, imageLoadFailed: true }
+                      : current);
+                  }}
                 />
+              ) : hoveredDocPreview.imageLoadFailed ? (
+                <div className="text-center px-4 py-6 text-amber-300 space-y-1">
+                  <FileImage className="w-8 h-8 mx-auto opacity-70" />
+                  <div className="font-semibold">โหลดภาพจาก Google Drive ไม่สำเร็จ</div>
+                  <div className="text-[10px] text-slate-300">ตรวจสอบสิทธิ์ไฟล์หรือการตั้งค่า Drive แล้วลองใหม่</div>
+                </div>
               ) : (
                 <div className="text-center px-4 py-6 text-slate-400 space-y-1">
                   <FileImage className="w-8 h-8 mx-auto text-slate-500 opacity-60" />

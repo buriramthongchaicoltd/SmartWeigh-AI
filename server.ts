@@ -4394,6 +4394,117 @@ async function getOrCreateSubfolder(accessToken: string, parentFolderId: string,
 // GOOGLE DRIVE API ENDPOINTS
 // ----------------------------------------------------------------------------
 
+app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
+  const fileId = String(req.params.fileId || '');
+  if (!/^[a-zA-Z0-9_-]{5,200}$/.test(fileId)) {
+    return res.status(400).json({ success: false, error: 'รหัสไฟล์ Google Drive ไม่ถูกต้อง' });
+  }
+
+  try {
+    await restoreConfigsFromSupabase();
+    const driveCfg = getStoredDriveConfig();
+    if (!driveCfg.isEnabled) {
+      return res.status(503).json({ success: false, error: 'Google Drive ถูกปิดใช้งาน' });
+    }
+    if (!driveCfg.rootFolderId) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่าโฟลเดอร์หลักของ Google Drive' });
+    }
+
+    const token = await getDriveAccessToken();
+    const isGasMode = Boolean(driveCfg.connectionMode === 'gas' || (!token && driveCfg.gasWebAppUrl));
+    if (isGasMode) {
+      if (!driveCfg.gasWebAppUrl) {
+        return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script Web App URL' });
+      }
+      const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+        action: 'get_image',
+        fileId,
+        rootFolderId: driveCfg.rootFolderId
+      });
+      if (!result?.success || typeof result.base64Data !== 'string') {
+        throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
+      }
+      const contentType = String(result.mimeType || '');
+      if (!contentType.startsWith('image/')) {
+        return res.status(415).json({ success: false, error: 'ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ' });
+      }
+      const imageBytes = Buffer.from(result.base64Data, 'base64');
+      if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
+        return res.status(imageBytes.length ? 413 : 422).json({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
+      }
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      return res.send(imageBytes);
+    }
+
+    if (!token) {
+      return res.status(503).json({ success: false, error: 'ไม่สามารถเชื่อมต่อ Google Drive ได้' });
+    }
+
+    const metadataResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType%2Csize%2Cparents&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
+    );
+    if (!metadataResponse.ok) {
+      const detail = await metadataResponse.text();
+      throw new Error(`อ่านข้อมูลไฟล์จาก Google Drive ไม่สำเร็จ (${metadataResponse.status}): ${detail.slice(0, 200)}`);
+    }
+    const metadata = await metadataResponse.json() as { mimeType?: string; size?: string; parents?: string[] };
+    if (!metadata.mimeType?.startsWith('image/')) {
+      return res.status(415).json({ success: false, error: 'ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ' });
+    }
+    if (Number(metadata.size) > 15 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: 'ไฟล์รูปภาพมีขนาดใหญ่เกิน 15 MB' });
+    }
+
+    const pendingFolders = [...(metadata.parents || [])];
+    const checkedFolders = new Set<string>();
+    let fileIsInConfiguredRoot = false;
+    for (let depth = 0; pendingFolders.length && depth < 8; depth += 1) {
+      const folderId = pendingFolders.shift()!;
+      if (folderId === driveCfg.rootFolderId) {
+        fileIsInConfiguredRoot = true;
+        break;
+      }
+      if (checkedFolders.has(folderId)) continue;
+      checkedFolders.add(folderId);
+      const parentResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=parents&supportsAllDrives=true`,
+        { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) }
+      );
+      if (!parentResponse.ok) {
+        const detail = await parentResponse.text();
+        throw new Error(`ตรวจสอบตำแหน่งไฟล์ใน Google Drive ไม่สำเร็จ (${parentResponse.status}): ${detail.slice(0, 200)}`);
+      }
+      const parentMetadata = await parentResponse.json() as { parents?: string[] };
+      pendingFolders.push(...(parentMetadata.parents || []));
+    }
+    if (!fileIsInConfiguredRoot) {
+      return res.status(403).json({ success: false, error: 'ไฟล์รูปภาพไม่ได้อยู่ในโฟลเดอร์ระบบที่กำหนด' });
+    }
+
+    const imageResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30000) }
+    );
+    if (!imageResponse.ok) {
+      const detail = await imageResponse.text();
+      throw new Error(`ดาวน์โหลดภาพจาก Google Drive ไม่สำเร็จ (${imageResponse.status}): ${detail.slice(0, 200)}`);
+    }
+    const imageBytes = Buffer.from(await imageResponse.arrayBuffer());
+    if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
+      return res.status(imageBytes.length ? 413 : 422).json({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
+    }
+    res.setHeader('Content-Type', metadata.mimeType);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.send(imageBytes);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Drive Image] Failed to load image', { fileId, message });
+    return res.status(502).json({ success: false, error: `โหลดภาพจาก Google Drive ไม่สำเร็จ: ${message}` });
+  }
+});
+
 // 1. Get Google Drive configuration
 app.get('/api/drive/config', async (req: Request, res: Response) => {
   // Ensure latest config is restored from Supabase system_config (handles Render redeploys)

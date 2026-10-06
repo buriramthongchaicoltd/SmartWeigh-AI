@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-06] Load PO Hover Images Through Drive Proxy
+
+### การเปลี่ยนแปลง
+- เปลี่ยน PO hover preview ให้โหลดไฟล์ด้วย Drive file ID ผ่าน API ฝั่ง server แทน URL Google Drive โดยตรง ซึ่งอาจแสดงภาพเสียเมื่อไฟล์ไม่เปิดสาธารณะ
+- เพิ่ม image proxy ที่ตรวจสอบ file ID, ชนิดไฟล์, ขนาด และตำแหน่งภายใต้โฟลเดอร์ระบบ พร้อมรองรับทั้ง Service Account และ Google Apps Script
+- เพิ่มข้อความแจ้งเมื่อโหลดภาพไม่สำเร็จ และคง URL เดิมเป็น fallback สำหรับไฟล์ที่เปิดดูได้จาก browser
+- โหมด Google Apps Script ต้อง deploy source รุ่นที่มี action `get_image` ก่อนใช้งาน proxy ได้; โหมด Service Account ไม่ต้องอัปเดต GAS
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build`, ตรวจ syntax ของ Apps Script ด้วย Node.js และ `git diff --check`; build ยังแสดงคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- ยังไม่ได้ทดสอบกับไฟล์ Drive จริงใน production
+
 ## [2026-10-06] Persist and Clearly Show PO Match Review
 
 ### การเปลี่ยนแปลง
