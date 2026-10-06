@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-06] Run Database Schema Check Automatically in Settings
+
+### การเปลี่ยนแปลง
+- หลัง self-test ระบบและ restore config ในหน้า Settings เสร็จ ให้เรียก database test อัตโนมัติเพื่อตรวจครบทั้ง 8 ตาราง โดยไม่ต้องให้ผู้ใช้กดทดสอบซ้ำ
+- แยกสถานะตารางที่ยังไม่ได้ตรวจ/กำลังตรวจ ออกจาก “ยังไม่มีตาราง” เพื่อไม่ให้แสดงผลผิดก่อนผลตรวจกลับมา
+- หากการตรวจอัตโนมัติล้มเหลว ให้บันทึกและแสดง error แทนการกลืนความล้มเหลวแบบเงียบ
+
+### การตรวจสอบ
+- รอผล `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- ยังไม่ได้ตรวจผลจากฐานข้อมูล production
+
 ## [2026-10-06] Simplify Google Drive Secret Setup in Settings
 
 ### การเปลี่ยนแปลง

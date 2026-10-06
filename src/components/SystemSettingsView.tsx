@@ -124,6 +124,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     lastTestedAt?: string | null;
     message?: string;
     tables?: Record<string, boolean>;
+    schemaTested?: boolean;
     tableCounts?: Record<string, number>;
     tableErrors?: Record<string, string>;
     isSchemaReady?: boolean;
@@ -601,7 +602,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       // ป้องกัน race condition ระหว่าง restoreConfigsFromSupabase() กับ /api/drive/test
       fetch('/api/startup/retest', { method: 'POST' })
         .then(r => r.json())
-        .then(data => {
+        .then(async data => {
           if (data.success) {
             setStartupStatus(data);
             // อัปเดต Drive status จาก startup result
@@ -621,9 +622,35 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               }));
             }
           }
+          if (dbReady) {
+            const schemaRes = await fetch('/api/database/test', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({})
+            });
+            const schemaData = await schemaRes.json();
+            if (!schemaRes.ok || !schemaData.success) {
+              throw new Error(schemaData.error || 'ตรวจสอบตารางฐานข้อมูลไม่สำเร็จ');
+            }
+            setDbStatus(prev => ({
+              ...prev,
+              ...schemaData,
+              isConfigured: Boolean(schemaData.isConnected),
+              isConnected: Boolean(schemaData.isConnected),
+              schemaTested: true
+            }));
+          }
         })
-        .catch(() => {
-          // silent fail — ไม่รบกวน user
+        .catch(err => {
+          console.error('Automatic database self-test failed:', err);
+          if (dbReady) {
+            setDbStatus(prev => prev ? ({
+                ...prev,
+                schemaTested: true,
+                isConnected: false,
+                message: err instanceof Error ? err.message : 'ตรวจสอบฐานข้อมูลไม่สำเร็จ'
+              }) : prev);
+          }
         });
     }
   }, [dbStatus?.isConfigured, driveStatus?.isConfigured]);
@@ -2225,6 +2252,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                             <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold flex items-center gap-1">
                               <Check className="w-3 h-3" />
                               <span>พบตาราง</span>
+                            </span>
+                          ) : !dbStatus?.schemaTested ? (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-medium">
+                              {dbStatus?.isConfigured ? 'กำลังตรวจสอบ...' : 'รอทดสอบการเชื่อมต่อ'}
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-medium">
