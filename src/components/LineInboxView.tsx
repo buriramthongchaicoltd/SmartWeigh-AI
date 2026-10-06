@@ -39,6 +39,7 @@ interface LineInboxViewProps {
   onDeleteInboxItem: (id: string) => Promise<void>;
   onOpenVerifyFromInbox: (item: LineBillInboxItem) => void;
   onSyncWebhookQueue: () => Promise<void>;
+  onOpenSystemSettings: () => void;
   showToast: (msg: string, type?: 'success' | 'info') => void;
 }
 
@@ -75,6 +76,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   onDeleteInboxItem,
   onOpenVerifyFromInbox,
   onSyncWebhookQueue,
+  onOpenSystemSettings,
   showToast
 }) => {
   const [statusFilter, setStatusFilter] = useState<
@@ -771,12 +773,12 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
             <button
               type="button"
-              onClick={() => setIsConfigOpen(true)}
+              onClick={onOpenSystemSettings}
               className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
-              title="ตั้งค่าเชื่อมต่อ LINE OA Webhook"
+              title="ไปตั้งค่า LINE OA ที่หน้าตั้งค่าระบบ"
             >
               <Settings className="w-3.5 h-3.5 text-emerald-400" />
-              <span>ตั้งค่า LINE OA</span>
+              <span>ตั้งค่า LINE ที่หน้าตั้งค่าระบบ</span>
             </button>
           </div>
         </div>
@@ -1468,7 +1470,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       )}
 
       {/* LINE OA Webhook Configuration Modal */}
-      {isConfigOpen && (
+      {false && isConfigOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl border border-slate-200">
             <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">

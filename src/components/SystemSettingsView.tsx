@@ -254,6 +254,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [showLineToken, setShowLineToken] = useState(false);
   const [showLineSecret, setShowLineSecret] = useState(false);
   const [isSavingLine, setIsSavingLine] = useState(false);
+  const [isTestingLine, setIsTestingLine] = useState(false);
+  const [lineTestMessage, setLineTestMessage] = useState('');
   const [copiedLineWebhook, setCopiedLineWebhook] = useState(false);
 
   const lineWebhookUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/api/line/webhook`;
@@ -265,8 +267,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       if (data.success && data.config) {
         setLineConfig({
           enabled: data.config.enabled !== undefined ? Boolean(data.config.enabled) : true,
-          channelAccessToken: data.config.channelAccessToken || '',
-          channelSecret: data.config.channelSecret || '',
+          channelAccessToken: '',
+          channelSecret: '',
           autoQuoteReply: data.config.autoQuoteReply !== undefined ? Boolean(data.config.autoQuoteReply) : true,
           filterNonBillImages: data.config.filterNonBillImages !== undefined ? Boolean(data.config.filterNonBillImages) : true,
           hasChannelAccessToken: Boolean(data.config.hasChannelAccessToken || data.config.channelAccessToken),
@@ -289,15 +291,39 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       });
       const data = await res.json();
       if (data.success) {
-        showToast('บันทึกการตั้งค่า LINE OA สำเร็จเรียบร้อยแล้ว');
-        loadLineConfig();
+        showToast(data.message || 'บันทึกการตั้งค่า LINE OA สำเร็จเรียบร้อยแล้ว');
+        await loadLineConfig();
       } else {
         showToast(data.error || 'บันทึกการตั้งค่า LINE ไม่สำเร็จ', 'info');
       }
-    } catch {
-      showToast('เกิดข้อผิดพลาดในการบันทึก LINE OA', 'info');
+    } catch (err) {
+      showToast(`บันทึกการตั้งค่า LINE ไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsSavingLine(false);
+    }
+  };
+
+  const handleTestLineConnection = async () => {
+    setIsTestingLine(true);
+    setLineTestMessage('');
+    try {
+      const res = await fetch('/api/line/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channelAccessToken: lineConfig.channelAccessToken })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'ทดสอบ LINE ไม่สำเร็จ');
+      }
+      setLineTestMessage(`เชื่อมต่อ LINE สำเร็จ: ${data.botName}`);
+      showToast(`LINE ใช้งานได้: ${data.botName}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'ไม่สามารถติดต่อ LINE API ได้';
+      setLineTestMessage(message);
+      showToast(message, 'info');
+    } finally {
+      setIsTestingLine(false);
     }
   };
 
@@ -2605,7 +2631,24 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 </label>
               </div>
 
-              <div className="flex items-center justify-end pt-1">
+              {lineTestMessage && (
+                <div className={`rounded-lg border p-3 text-xs ${
+                  lineTestMessage.startsWith('เชื่อมต่อ LINE สำเร็จ')
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : 'border-rose-200 bg-rose-50 text-rose-800'
+                }`}>
+                  {lineTestMessage}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleTestLineConnection}
+                  disabled={isTestingLine || isSavingLine}
+                  className="min-h-11 px-4 py-2.5 rounded-xl border border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50 font-bold text-xs disabled:opacity-50"
+                >
+                  {isTestingLine ? 'กำลังทดสอบ LINE...' : 'ทดสอบ LINE'}
+                </button>
                 <button
                   type="submit"
                   disabled={isSavingLine}

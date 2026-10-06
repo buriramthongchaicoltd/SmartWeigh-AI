@@ -4,6 +4,19 @@
 
 ---
 
+## [2026-10-06] Unify LINE Bot Settings and Add Connection Test
+
+### การเปลี่ยนแปลง
+- เปลี่ยนปุ่มตั้งค่า LINE ในกล่องพักบิลให้เปิดหน้าตั้งค่าระบบแทน modal ที่แยกอีกชุดหนึ่ง
+- ปรับ API โหลดการตั้งค่าไม่ส่ง Channel Access Token/Channel Secret กลับ browser; ส่งเฉพาะสถานะว่ามีค่าแล้วและตัวเลือกที่ไม่เป็นความลับ
+- ให้การบันทึก LINE ต้องเขียนลง `system_config` สำเร็จก่อนตอบว่าสำเร็จ เพื่อไม่ให้ config หายหรือแสดง success-shaped fallback บน Render
+- เพิ่มปุ่มทดสอบ Channel Access Token กับ LINE Messaging API และแสดงผล/ข้อผิดพลาดในหน้าตั้งค่าระบบ
+- อัปเดต handover ให้ระบุจุดตั้งค่า LINE หลักเพียงแห่งเดียว
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแจ้งเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามขนาดแอปปัจจุบัน
+- ยังไม่ได้ยืนยัน Token, webhook delivery หรือการรับบิลจริงกับ LINE production
+
 ## [2026-10-06] Run Database Schema Check Automatically in Settings
 
 ### การเปลี่ยนแปลง

@@ -273,4 +273,5 @@
    - Deploy `google_apps_script_drive.gs` รุ่นล่าสุดใหม่; ทดสอบ POST ที่ไม่มี secret ต้องถูกปฏิเสธก่อนเปิดใช้
 3. **ขั้นตอนที่ 3 (ผู้ใช้งาน): ตั้งค่า Webhook สำหรับ LINE Official Account จริง**
    - นำ Webhook URL: `https://smartweigh-ai.onrender.com/api/line/webhook` ไปวางใน LINE Developers Console
-   - ใส่ `Channel Access Token` และ `Channel Secret` ในการตั้งค่าระบบ แล้วทดสอบส่งรูปบิลเข้ากลุ่ม LINE โครงการ
+   - ตั้ง `Channel Access Token` และ `Channel Secret` ที่หน้าตั้งค่าระบบเท่านั้น; ปุ่มตั้งค่าในกล่องพักบิลจะพาไปยังหน้าตั้งค่าระบบเดียวกัน
+   - กด `ทดสอบ LINE` เพื่อตรวจสอบ Token กับ LINE Messaging API ก่อนทดสอบส่งรูปบิลเข้ากลุ่ม LINE โครงการ

@@ -261,6 +261,7 @@ app.use('/api', (req: Request, res: Response, next) => {
     '/drive/setup-secret',
     '/drive/test',
     '/line/config',
+    '/line/test',
     '/startup/retest'
   ]);
   const isUserManagementWrite =
@@ -2126,16 +2127,23 @@ app.get('/api/line/config', async (_req: Request, res: Response) => {
   return res.json({
     success: true,
     config: {
-      ...lineBotConfig,
+      enabled: lineBotConfig.enabled,
+      autoQuoteReply: lineBotConfig.autoQuoteReply,
+      replyOnDuplicate: lineBotConfig.replyOnDuplicate,
+      replyOnUnclearImage: lineBotConfig.replyOnUnclearImage,
+      filterNonBillImages: lineBotConfig.filterNonBillImages,
+      strictZeroPushQuota: true,
+      allowedGroupNames: lineBotConfig.allowedGroupNames,
       hasChannelAccessToken: Boolean(lineBotConfig.channelAccessToken),
       hasChannelSecret: Boolean(lineBotConfig.channelSecret)
     }
   });
 });
 
-app.post('/api/line/config', (req: Request, res: Response) => {
+app.post('/api/line/config', async (req: Request, res: Response) => {
+  await restoreConfigsFromSupabase();
   const body = req.body || {};
-  lineBotConfig = {
+  const nextConfig: ServerLineBotConfig = {
     ...lineBotConfig,
     enabled: body.enabled !== undefined ? Boolean(body.enabled) : lineBotConfig.enabled,
     channelAccessToken: (typeof body.channelAccessToken === 'string' && body.channelAccessToken.trim())
@@ -2151,13 +2159,95 @@ app.post('/api/line/config', (req: Request, res: Response) => {
     strictZeroPushQuota: true, // Always enforce 0 push quota
     allowedGroupNames: Array.isArray(body.allowedGroupNames) ? body.allowedGroupNames : lineBotConfig.allowedGroupNames
   };
+
+  const client = getSupabaseClient();
+  if (!client) {
+    return res.status(503).json({
+      success: false,
+      error: 'บันทึกการตั้งค่า LINE ไม่ได้ เพราะระบบฐานข้อมูลยังไม่พร้อม กรุณาทดสอบ Supabase ในหน้าตั้งค่าระบบ'
+    });
+  }
+  let error: { message: string } | null;
+  try {
+    ({ error } = await client.from('system_config').upsert({
+      config_key: 'line_bot_config',
+      config_value: nextConfig,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' }));
+  } catch (err: any) {
+    console.error('[LINE Config] Failed to persist configuration:', err?.message);
+    return res.status(500).json({
+      success: false,
+      error: `บันทึกการตั้งค่า LINE ลงฐานข้อมูลไม่สำเร็จ: ${err?.message || 'เชื่อมต่อฐานข้อมูลไม่ได้'}`
+    });
+  }
+  if (error) {
+    console.error('[LINE Config] Failed to persist configuration:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: `บันทึกการตั้งค่า LINE ลงฐานข้อมูลไม่สำเร็จ: ${error.message}`
+    });
+  }
+
+  lineBotConfig = nextConfig;
   try {
     fs.writeFileSync(LINE_CONFIG_FILE_PATH, JSON.stringify(lineBotConfig, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('[LINE Config] Failed to save .line_config.json', err);
+    console.warn('[LINE Config] Could not write local cache; cloud config was saved', err);
   }
-  persistConfigToSupabase('line_bot_config', lineBotConfig);
-  return res.json({ success: true, config: lineBotConfig });
+  return res.json({
+    success: true,
+    message: 'บันทึกการตั้งค่า LINE สำเร็จ',
+    config: {
+      enabled: lineBotConfig.enabled,
+      autoQuoteReply: lineBotConfig.autoQuoteReply,
+      replyOnDuplicate: lineBotConfig.replyOnDuplicate,
+      replyOnUnclearImage: lineBotConfig.replyOnUnclearImage,
+      filterNonBillImages: lineBotConfig.filterNonBillImages,
+      strictZeroPushQuota: true,
+      allowedGroupNames: lineBotConfig.allowedGroupNames,
+      hasChannelAccessToken: Boolean(lineBotConfig.channelAccessToken),
+      hasChannelSecret: Boolean(lineBotConfig.channelSecret)
+    }
+  });
+});
+
+app.post('/api/line/test', async (req: Request, res: Response) => {
+  try {
+    await restoreConfigsFromSupabase();
+    const accessToken = typeof req.body?.channelAccessToken === 'string' && req.body.channelAccessToken.trim()
+      ? req.body.channelAccessToken.trim()
+      : lineBotConfig.channelAccessToken;
+    if (!accessToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'ยังไม่มี Channel Access Token ในหน้าตั้งค่าระบบ'
+      });
+    }
+
+    const response = await fetch('https://api.line.me/v2/bot/info', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10000)
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      return res.status(400).json({
+        success: false,
+        error: `LINE ปฏิเสธ Token (${response.status}): ${result.message || 'ตรวจสอบ Channel Access Token ในหน้าตั้งค่าระบบ'}`
+      });
+    }
+    return res.json({
+      success: true,
+      botName: result.displayName || result.basicId || 'LINE Official Account',
+      message: 'LINE Channel Access Token ใช้งานได้'
+    });
+  } catch (err: any) {
+    console.error('[LINE Config] Connection test failed:', err?.message);
+    return res.status(502).json({
+      success: false,
+      error: `ทดสอบ LINE ไม่สำเร็จ: ${err?.message || 'เชื่อมต่อ LINE API ไม่ได้'}`
+    });
+  }
 });
 
 // 2. Poll & Acknowledge Incoming Webhook Queue for Browser localStorage Sync

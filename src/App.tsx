@@ -2717,6 +2717,7 @@ export default function App() {
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}
+              onOpenSystemSettings={() => setActiveTab('settings')}
               showToast={showToast}
             />
           )}
