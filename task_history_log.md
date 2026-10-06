@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-06] Preload Document Preview Images Before Hover
+
+### การเปลี่ยนแปลง
+- เพิ่มการโหลดภาพ PO, DO และตั๋วปลายทางล่วงหน้าเมื่อจุดแสดงตัวอย่างอยู่ในระยะ 600 px จาก viewport เพื่อให้ภาพพร้อมก่อนผู้ใช้ชี้เมาส์
+- จำกัดการโหลดพร้อมกันไม่เกิน 2 ภาพและรวม URL ซ้ำ ป้องกันการดึงภาพของทุกรายการพร้อมกัน; ยังคงใช้ fallback URL เดิมเมื่อ Drive proxy โหลดไม่สำเร็จ
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- Build ยังคงแสดงคำเตือนเดิมเรื่อง JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Restore Hover Images When Drive Proxy Is Unavailable
 
 ### การเปลี่ยนแปลง

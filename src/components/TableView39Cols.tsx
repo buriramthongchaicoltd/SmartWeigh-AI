@@ -34,6 +34,27 @@ const extractGoogleDriveFileId = (imageUrl?: string | null): string | undefined 
   }
 };
 
+const getDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
+  const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
+  return fileId
+    ? `/api/drive/image/${encodeURIComponent(fileId)}`
+    : imageUrl || undefined;
+};
+
+const getDocPreviewFallbackImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
+  const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
+  if (!fileId) return undefined;
+  const proxyUrl = getDocPreviewImageUrl(fileId, imageUrl);
+  return imageUrl && imageUrl !== proxyUrl
+    ? imageUrl
+    : `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+};
+
+const getPreloadableDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
+  const source = getDocPreviewImageUrl(driveFileId, imageUrl);
+  return source && !source.startsWith('data:') ? source : undefined;
+};
+
 interface TableView39ColsProps {
   viewMode?: 'orders' | 'dest_wb' | 'tax_inv';
   onSwitchTab?: (tab: 'orders' | 'dest_wb' | 'tax_inv' | 'billing') => void;
@@ -71,6 +92,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   onOpenScan,
   externalFilter
 }) => {
+  const previewContainerRef = React.useRef<HTMLDivElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedProject, setSelectedProject] = useState('');
   const [selectedStore, setSelectedStore] = useState('');
@@ -211,18 +233,13 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     payload: Omit<NonNullable<typeof hoveredDocPreview>, 'rect'>
   ) => {
     const r = e.currentTarget.getBoundingClientRect();
-    const driveFileId = payload.driveFileId || extractGoogleDriveFileId(payload.imageUrl);
-    const imageUrl = driveFileId
-      ? `/api/drive/image/${encodeURIComponent(driveFileId)}`
-      : payload.imageUrl;
+    const imageUrl = getDocPreviewImageUrl(payload.driveFileId, payload.imageUrl);
     setHoveredDocPreview({
       ...payload,
       imageUrl,
-      fallbackImageUrl: driveFileId
-        ? payload.imageUrl && payload.imageUrl !== imageUrl
-          ? payload.imageUrl
-          : `https://drive.google.com/uc?export=view&id=${encodeURIComponent(driveFileId)}`
-        : payload.fallbackImageUrl,
+      fallbackImageUrl:
+        getDocPreviewFallbackImageUrl(payload.driveFileId, payload.imageUrl) ||
+        payload.fallbackImageUrl,
       rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
     });
   };
@@ -784,8 +801,64 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     });
   }, [allTaxInvoices, holdingMatchFilter, holdingSearchTerm]);
 
+  React.useEffect(() => {
+    const container = previewContainerRef.current;
+    if (!container || !('IntersectionObserver' in window)) return;
+
+    const pending: { src: string; fallback?: string }[] = [];
+    const queuedSources = new Set<string>();
+    const targets = container.querySelectorAll<HTMLElement>('[data-preview-image-src]');
+    let activeLoads = 0;
+    let stopped = false;
+
+    const loadNext = () => {
+      while (!stopped && activeLoads < 2 && pending.length > 0) {
+        const imageData = pending.shift();
+        if (!imageData) continue;
+        activeLoads += 1;
+        const image = new Image();
+        let triedFallback = false;
+        const finish = () => {
+          activeLoads -= 1;
+          loadNext();
+        };
+        image.onload = finish;
+        image.onerror = () => {
+          if (imageData.fallback && !triedFallback) {
+            triedFallback = true;
+            image.src = imageData.fallback;
+            return;
+          }
+          finish();
+        };
+        image.src = imageData.src;
+      }
+    };
+
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const target = entry.target as HTMLElement;
+        observer.unobserve(target);
+        const src = target.dataset.previewImageSrc;
+        if (!src || queuedSources.has(src)) return;
+        queuedSources.add(src);
+        pending.push({ src, fallback: target.dataset.previewImageFallback });
+      });
+      loadNext();
+    }, { rootMargin: '600px 0px' });
+
+    targets.forEach(target => observer.observe(target));
+
+    return () => {
+      stopped = true;
+      observer.disconnect();
+      pending.length = 0;
+    };
+  }, [viewMode, filteredOrders, filteredDestTickets, pos]);
+
   return (
-    <div className="space-y-3">
+    <div ref={previewContainerRef} className="space-y-3">
       {/* Dedicated Top-Level Tab View 1: ตั๋วชั่งน้ำหนักรถบรรทุกปลายทาง (dest_wb) */}
       {viewMode === 'dest_wb' && (
         <div className="space-y-3 animate-fadeIn">
@@ -890,6 +963,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                         Number(ticket.col22) ||
                         0;
                       const tDocNo = ticket.col17 || ticket.col6 || ticket.col1;
+                      const ticketPreviewSrc = getPreloadableDocPreviewImageUrl(ticket.driveFileId, ticket.image);
+                      const ticketPreviewFallback = getDocPreviewFallbackImageUrl(ticket.driveFileId, ticket.image);
                       const handleTicketHover = (e: React.MouseEvent<HTMLElement>) => {
                         openDocHoverPreview(e, {
                           rowId: ticket.id,
@@ -921,6 +996,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                             onClick={() => onInspectOrder(ticket)}
                             onMouseEnter={handleTicketHover}
                             onMouseLeave={closeDocHoverPreview}
+                            data-preview-image-src={ticketPreviewSrc}
+                            data-preview-image-fallback={ticketPreviewFallback}
                             className="hover:underline flex items-center gap-1 cursor-pointer"
                           >
                             <span>{ticket.col1}</span>
@@ -963,6 +1040,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                             onMouseEnter={handleTicketHover}
                             onMouseLeave={closeDocHoverPreview}
                             onClick={() => onInspectOrder(ticket)}
+                            data-preview-image-src={ticketPreviewSrc}
+                            data-preview-image-fallback={ticketPreviewFallback}
                             className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 cursor-pointer"
                           >
                             <span>{tDocNo}</span>
@@ -1901,6 +1980,18 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const hasOriginWeighbridge =
                     row.docType !== 'dest_weighbridge' &&
                     (Number(row.col13) > 0 || Number(row.col15) > 0 || row.docType === 'weighbridge');
+                  const poPreviewSrc = getPreloadableDocPreviewImageUrl(matchedPO?.driveFileId, matchedPO?.image);
+                  const poPreviewFallback = getDocPreviewFallbackImageUrl(matchedPO?.driveFileId, matchedPO?.image);
+                  const doPreviewSrc = getPreloadableDocPreviewImageUrl(row.driveFileId, row.image);
+                  const doPreviewFallback = getDocPreviewFallbackImageUrl(row.driveFileId, row.image);
+                  const destImg = linkedDestTicket?.image || (row.docType === 'dest_weighbridge' ? row.image : undefined);
+                  const destDriveFileId = linkedDestTicket?.image
+                    ? linkedDestTicket.driveFileId
+                    : row.docType === 'dest_weighbridge'
+                      ? row.driveFileId
+                      : undefined;
+                  const destPreviewSrc = getPreloadableDocPreviewImageUrl(destDriveFileId, destImg);
+                  const destPreviewFallback = getDocPreviewFallbackImageUrl(destDriveFileId, destImg);
 
                   // Helper payloads for hover preview on PO, DO/Origin, and Destination Ticket
                   const triggerPOHover = (e: React.MouseEvent<HTMLElement>) => {
@@ -1980,12 +2071,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const triggerDestHover = (e: React.MouseEvent<HTMLElement>) => {
                     if (!hasZone4Doc) return;
                     const destDocNo = effectiveCol17 || 'ตั๋วชั่งปลายทาง';
-                    const destImg = linkedDestTicket?.image || (row.docType === 'dest_weighbridge' ? row.image : undefined);
-                    const destDriveFileId = linkedDestTicket?.image
-                      ? linkedDestTicket.driveFileId
-                      : row.docType === 'dest_weighbridge'
-                        ? row.driveFileId
-                        : undefined;
                     const refDoText =
                       linkedDestTicket?.referenceDocNo ||
                       linkedDestTicket?.linkedViaDocNo ||
@@ -2076,6 +2161,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                               onClick={() => onInspectOrder(row)}
                               onMouseEnter={triggerDOHover}
                               onMouseLeave={closeDocHoverPreview}
+                              data-preview-image-src={doPreviewSrc}
+                              data-preview-image-fallback={doPreviewFallback}
                               className="font-mono font-bold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer text-left text-xs shrink-0"
                               title={`เลข TR: ${row.col1} (คลิกเพื่อเปิดตรวจสอบข้อมูลบิล)`}
                             >
@@ -2132,6 +2219,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 onMouseEnter={triggerPOHover}
                                 onMouseLeave={closeDocHoverPreview}
                                 onClick={() => setMatchingDOForPO(row)}
+                                data-preview-image-src={poPreviewSrc}
+                                data-preview-image-fallback={poPreviewFallback}
                                 className="relative p-1 rounded-md bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300 transition cursor-pointer"
                               >
                                 <FileImage className="w-3.5 h-3.5" />
@@ -2160,6 +2249,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 onMouseEnter={triggerDOHover}
                                 onMouseLeave={closeDocHoverPreview}
                                 onClick={() => onInspectOrder(row)}
+                                data-preview-image-src={doPreviewSrc}
+                                data-preview-image-fallback={doPreviewFallback}
                                 className="relative p-1 rounded-md bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition cursor-pointer"
                               >
                                 <FileImage className="w-3.5 h-3.5" />
@@ -2177,6 +2268,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 type="button"
                                 onMouseEnter={triggerDestHover}
                                 onMouseLeave={closeDocHoverPreview}
+                                data-preview-image-src={destPreviewSrc}
+                                data-preview-image-fallback={destPreviewFallback}
                                 onClick={() => {
                                   if (!visibleZones[4]) {
                                     setVisibleZones(prev => ({ ...prev, 4: true }));
@@ -2262,6 +2355,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   onMouseEnter={triggerPOHover}
                                   onMouseLeave={closeDocHoverPreview}
                                   onClick={() => setMatchingDOForPO(row)}
+                                  data-preview-image-src={poPreviewSrc}
+                                  data-preview-image-fallback={poPreviewFallback}
                                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 font-bold cursor-pointer"
                                 >
                                   <FileImage className="w-3 h-3 text-blue-600 shrink-0" />
@@ -2350,6 +2445,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 onMouseEnter={triggerDOHover}
                                 onMouseLeave={closeDocHoverPreview}
                                 onClick={() => onInspectOrder(row)}
+                                data-preview-image-src={doPreviewSrc}
+                                data-preview-image-fallback={doPreviewFallback}
                                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200 cursor-pointer"
                               >
                                 <FileImage className="w-3 h-3 text-sky-600 shrink-0" />
@@ -2426,6 +2523,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   onMouseEnter={triggerDestHover}
                                   onMouseLeave={closeDocHoverPreview}
                                   onClick={() => onInspectOrder(linkedDestTicket || row)}
+                                  data-preview-image-src={destPreviewSrc}
+                                  data-preview-image-fallback={destPreviewFallback}
                                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-50 hover:bg-teal-100 border border-teal-200 font-bold text-teal-900 cursor-pointer"
                                 >
                                   <FileImage className="w-3 h-3 text-teal-600 shrink-0" />
