@@ -47,6 +47,16 @@
 - `git diff --check` ผ่าน
 - Login กับ Supabase จริงหลัง deploy ต้องยืนยันใน Render; ยังไม่ได้เข้าถึง production
 
+## [2026-10-06] Restore Legacy Public Supabase Config
+
+### การเปลี่ยนแปลง
+- คืน `.supabase_config.json` สำหรับการ deploy เดิม โดยเก็บเฉพาะ Project URL และ public anon key; ไม่ใส่ service-role key กลับใน repository
+- ให้ backend โหลด anon key จาก config เดิมได้เมื่อไม่ได้ตั้ง environment variable เพื่อให้เชื่อมต่อ Supabase ตามรูปแบบก่อนหน้าได้
+
+### การตรวจสอบ
+- `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check` ผ่าน
+- ตรวจ production login หลัง deploy; anon access ต้องยังได้รับอนุญาตจาก RLS policies ที่ใช้อยู่
+
 ## [2026-10-05] Shorten LINE Bill Receipt Reply
 
 ### การเปลี่ยนแปลง

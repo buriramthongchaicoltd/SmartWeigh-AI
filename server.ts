@@ -2838,7 +2838,7 @@ function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
 
     // Credentials are runtime-only secrets and must never be loaded from persisted config files.
   const supabaseUrl = (process.env.SUPABASE_URL?.trim() || fileConfig.supabaseUrl?.trim() || '').trim();
-  const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || '').trim();
+  const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || fileConfig.supabaseAnonKey || '').trim();
   const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const pgConnectionString = (process.env.DATABASE_URL || '').trim();
 

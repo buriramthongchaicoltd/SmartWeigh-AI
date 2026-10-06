@@ -1,0 +1,6 @@
+{
+    "supabaseUrl":  "https://bmytwcnjebrqpormoalh.supabase.co",
+    "supabaseAnonKey":  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJteXR3Y25qZWJycXBvcm1vYWxoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5ODU1OTksImV4cCI6MjEwNjU2MTU5OX0.4hqvunADQ6oGDos22UPKewPjniIcq_mWLNVkTv2aoHA",
+    "isEnabled":  true,
+    "autoSyncIntervalMinutes":  15
+}
