@@ -1750,7 +1750,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
                   // Resolve linked documents for this row (Zones 1-4 & Tax Invoice)
                   const matchedPO = row.col4
-                    ? pos.find(p => isDocNumberMatch(p.poNo, row.col4) || (p.poId && isDocNumberMatch(p.poId, row.col4)))
+                    ? pos.find(p => isDocNumberMatch(p.poNumber || p.poNo || p.poId, row.col4))
                     : undefined;
 
                   const linkedDestTicket = allDestTickets.find(
@@ -1830,7 +1830,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       zoneBadge: 'โซน 1 • คอลัมน์ 4 (ใบสั่งซื้อ PO)',
                       docTypeLabel: 'ใบสั่งซื้อ (Purchase Order)',
                       docNo: row.col4,
-                      imageUrl: matchedPO?.image,
+                      imageUrl: matchedPO?.image || (matchedPO?.driveFileId
+                        ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(matchedPO.driveFileId)}`
+                        : undefined),
                       matchStatus: row.poMatchStatus,
                       referenceNote:
                         row.referenceSource === 'handwritten'
@@ -1842,7 +1844,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                         { label: 'เลขที่ใบสั่งซื้อ (PO)', value: row.col4, highlight: true },
                         { label: 'โครงการ', value: matchedPO?.project || row.col2 || '-' },
                         { label: 'ร้านค้า / ผู้ขาย', value: matchedPO?.supplierName || row.col8 || '-' },
-                        { label: 'รายการสินค้า', value: matchedPO?.items?.map(i => i.description).join(', ') || row.col11 || '-' },
+                        { label: 'รายการสินค้า', value: matchedPO?.items?.map(i => i.itemDescription || i.description).filter(Boolean).join(', ') || row.col11 || '-' },
                         {
                           label: 'ปริมาณสั่งซื้อรวม',
                           value: matchedPO ? `${fmtNum(matchedPO.totalOrderedQty)} (ส่งแล้ว ${fmtNum(matchedPO.totalDeliveredQty)})` : `${fmtNum(row.col22)} ${row.col23 || ''}`
@@ -1851,7 +1853,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       compareDetails: [
                         {
                           label: 'เลข PO อ้างอิง',
-                          originVal: matchedPO?.poNo || row.col4,
+                          originVal: matchedPO?.poNumber || matchedPO?.poNo || row.col4,
                           destVal: `DO อ้างถึง: ${row.col4}`,
                           isMatch: true
                         },

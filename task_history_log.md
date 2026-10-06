@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-06] Fix PO Hover Image Preview
+
+### การเปลี่ยนแปลง
+- แก้การค้นหา PO ที่ถูกอ้างอิงจากใบ DO ให้เทียบกับ `poNumber` ซึ่งเป็นฟิลด์จริงของข้อมูลที่โหลดจาก Supabase; เดิมค้นด้วย `poNo`/`poId` เป็นหลักจึงไม่พบ PO และรูปใน hover preview ว่าง
+- ใช้ `driveFileId` สร้าง URL รูปสำรองเมื่อ PO มีไฟล์ใน Drive แต่ไม่มี `image` URL
+- ปรับรายการสินค้าใน tooltip ให้อ่าน `itemDescription` ตาม type จริงของ PO และคง fallback `description` สำหรับข้อมูลเดิม
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแสดงคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- ยังไม่ได้ยืนยันกับ PO ตัวจริงบน production ว่า `image_url` หรือ `drive_file_id` ของรายการนั้นยังใช้งานได้
+
 ## [2026-10-06] Surface Database and Drive Failures
 
 ### การเปลี่ยนแปลง
