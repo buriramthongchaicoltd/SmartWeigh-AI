@@ -4548,8 +4548,11 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'private, max-age=300');
     return res.send(imageBytes);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[Drive Image] Failed to load image', { fileId, message });
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const message = /ไม่รู้จัก action:\s*get_image/i.test(originalMessage)
+      ? 'Google Apps Script ที่ใช้งานยังไม่มี action อ่านภาพ กรุณาอัปเดต source และ deploy Web App เป็น version ใหม่'
+      : originalMessage;
+    console.error('[Drive Image] Failed to load image', { fileId, message: originalMessage });
     return res.status(502).json({ success: false, error: `โหลดภาพจาก Google Drive ไม่สำเร็จ: ${message}` });
   }
 });

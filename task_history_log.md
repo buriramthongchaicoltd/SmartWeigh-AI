@@ -20,9 +20,10 @@
 ### การเปลี่ยนแปลง
 - แก้ PO hover ให้แยกและใช้ Drive file ID จาก `driveFileId` หรือจาก URL Google Drive ที่เก็บใน `image_url` แล้วเรียก image proxy แทนการใช้ private Drive URL เป็น `<img src>` โดยตรง
 - คง fallback ไปยัง URL/ภาพเดิมไว้ หาก proxy โหลดไม่สำเร็จ
+- ปรับ tooltip ให้ fetch ภาพผ่าน proxy เอง เพื่ออ่านและแสดง error จริงจาก API; แจ้งกรณี Apps Script Web App ยังไม่ได้ deploy action อ่านภาพรุ่นใหม่โดยตรง
 
 ### การตรวจสอบ
-- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแสดงคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- รอผล `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
 - ตรวจหน้า production พบว่ามี client/route image proxy รุ่นก่อนแล้ว แต่ bundle ที่ให้บริการยังไม่มีการแกะ file ID จาก `image_url`; ยังไม่ได้อ่านค่า `purchase_orders.drive_file_id` / `image_url` ของ PO จริง
 
 ## [2026-10-06] Load PO Hover Images Through Drive Proxy

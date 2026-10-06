@@ -150,6 +150,49 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     compareDetails?: { label: string; originVal: string; destVal: string; isMatch?: boolean }[];
     rect: { top: number; left: number; bottom: number; right: number };
   } | null>(null);
+  const [proxyImageUrl, setProxyImageUrl] = useState<string | null>(null);
+  const [proxyImageError, setProxyImageError] = useState('');
+
+  React.useEffect(() => {
+    const sourceUrl = hoveredDocPreview?.imageUrl;
+    if (!sourceUrl?.startsWith('/api/drive/image/')) {
+      setProxyImageUrl(null);
+      setProxyImageError('');
+      return;
+    }
+
+    const controller = new AbortController();
+    let objectUrl: string | undefined;
+    setProxyImageUrl(null);
+    setProxyImageError('');
+
+    fetch(sourceUrl, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) {
+          const result = await response.json().catch(() => null);
+          throw new Error(result?.error || `โหลดภาพไม่สำเร็จ (HTTP ${response.status})`);
+        }
+        const image = await response.blob();
+        if (!image.type.startsWith('image/')) {
+          throw new Error(`ข้อมูลที่ได้รับไม่ใช่รูปภาพ (${image.type || 'ไม่ทราบชนิดไฟล์'})`);
+        }
+        return image;
+      })
+      .then(image => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(image);
+        setProxyImageUrl(objectUrl);
+      })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        setProxyImageError(error instanceof Error ? error.message : 'โหลดภาพจาก Google Drive ไม่สำเร็จ');
+      });
+
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [hoveredDocPreview?.imageUrl]);
 
   const openDocHoverPreview = (
     e: React.MouseEvent<HTMLElement>,
@@ -3161,9 +3204,20 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
             {/* Bill Image Preview */}
             <div className="bg-slate-950 relative flex items-center justify-center h-52 border-b border-slate-200 overflow-hidden">
-              {hoveredDocPreview.imageUrl ? (
+              {proxyImageError ? (
+                <div className="text-center px-4 py-6 text-amber-300 space-y-1">
+                  <FileImage className="w-8 h-8 mx-auto opacity-70" />
+                  <div className="font-semibold">โหลดภาพ PO ไม่สำเร็จ</div>
+                  <div className="text-[10px] text-slate-200 break-words">{proxyImageError}</div>
+                </div>
+              ) : hoveredDocPreview.imageUrl?.startsWith('/api/drive/image/') && !proxyImageUrl ? (
+                <div className="text-center px-4 py-6 text-slate-300 space-y-1" role="status">
+                  <FileImage className="w-8 h-8 mx-auto opacity-70 animate-pulse" />
+                  <div className="font-semibold">กำลังโหลดภาพจาก Google Drive...</div>
+                </div>
+              ) : hoveredDocPreview.imageUrl ? (
                 <img
-                  src={hoveredDocPreview.imageUrl}
+                  src={proxyImageUrl || hoveredDocPreview.imageUrl}
                   alt={hoveredDocPreview.docNo}
                   className="max-h-full max-w-full object-contain"
                   onError={() => {
@@ -3181,8 +3235,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               ) : hoveredDocPreview.imageLoadFailed ? (
                 <div className="text-center px-4 py-6 text-amber-300 space-y-1">
                   <FileImage className="w-8 h-8 mx-auto opacity-70" />
-                  <div className="font-semibold">โหลดภาพจาก Google Drive ไม่สำเร็จ</div>
-                  <div className="text-[10px] text-slate-300">ตรวจสอบรหัสไฟล์/สิทธิ์ Drive และหากใช้ Apps Script ให้ deploy รุ่นล่าสุด</div>
+                  <div className="font-semibold">โหลดภาพเอกสารไม่สำเร็จ</div>
+                  <div className="text-[10px] text-slate-300">ตรวจสอบ URL รูปภาพหรือสิทธิ์เข้าถึงไฟล์</div>
                 </div>
               ) : (
                 <div className="text-center px-4 py-6 text-slate-400 space-y-1">
