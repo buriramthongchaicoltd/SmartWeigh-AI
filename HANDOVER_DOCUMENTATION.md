@@ -35,10 +35,10 @@
 - มีการพบ error ชั่วคราวขณะเรียก audit (timeout/response ที่ parse เป็น JSON ไม่ได้) และภายหลังผู้ใช้ส่งผล audit ที่สำเร็จ; สาเหตุของคำขอที่ล้มเหลวเดิมยังไม่ได้ยืนยันจาก Render logs
 
 ### สถานะความปลอดภัยหลังแก้ไขใน repository
-- ลบ `.supabase_config.json` ที่ติดตามใน Git และเอา credential fallback ออกจาก source; Supabase service-role key และ `DATABASE_URL` รับจาก runtime environment เท่านั้น และ API ไม่ยอมรับ key จาก browser/config file. **credential เดิมยังคงอยู่ใน Git history จึงต้องเพิกถอน/หมุนบน Supabase และตรวจการใช้งานย้อนหลัง**
+- ลบ `.supabase_config.json` ที่ติดตามใน Git และเอา credential fallback ออกจาก source; service-role key และ `DATABASE_URL` รับจาก runtime environment เท่านั้น. เพื่อรองรับ Render เดิม backend ยอม fallback ไป `SUPABASE_ANON_KEY` เมื่อไม่มี service-role key; fallback นี้ต้องอาศัย RLS policies เดิมและจะใช้ไม่ได้หลังรัน DDL ที่ revoke สิทธิ์ `anon`/`authenticated`. ควรตั้ง service-role key ที่หมุนใหม่ใน Render เพื่อใช้ DDL แบบปิด direct access. **credential เดิมยังคงอยู่ใน Git history จึงต้องเพิกถอน/หมุนบน Supabase และตรวจการใช้งานย้อนหลัง**
 - DDL ใน `src/utils/supabaseClient.ts` เปิด RLS, ลบ policy เดิมบนตารางแอป, เพิกถอนสิทธิ์ `anon`/`authenticated` และให้ `service_role` เท่านั้น. ผู้ดูแลต้องนำ DDL รุ่นนี้ไปรันใน Supabase จริง; การแก้ source ไม่เปลี่ยน production database อัตโนมัติ
 - API บังคับ role สำหรับการลบข้อมูลและการจัดการไฟล์; role `user` จำกัดตารางที่เขียนได้และ backend ป้องกันการเปลี่ยน RR/จำนวน/ราคา/การชำระเงินโดยตรง. ตรวจ session และ role ที่ server ทุกครั้ง ไม่ถือ UI เป็น security boundary
-- Master Admin ไม่มีรหัสเริ่มต้นคงที่อีกต่อไป: เมื่อยังไม่มีบัญชี ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; รหัสเริ่มต้นเดิมถูกปฏิเสธ และ secret นี้ใช้ช่วยหมุนรหัส Master เดิมได้
+- เมื่อยังไม่มี Master Admin ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; บัญชีเดิมที่ยังใช้ `@Admin` ล็อกอินได้เพื่อรองรับระบบเดิม ส่วน `123456` ถูกปฏิเสธ; runtime secret ใช้หมุนรหัส Master เดิมได้
 - Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Render ต้องมี `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ค่าเดียวกันอย่างน้อย 32 ตัวอักษร และต้อง deploy source รุ่นล่าสุด
 - **งานภายนอกที่ยังต้องทำโดยผู้ดูแล:** หมุน Supabase key, ตั้ง Render environment secrets, ใช้ DDL ปิด policy ในฐานข้อมูลจริง, deploy GAS รุ่นล่าสุด/ตั้ง Script Property และตรวจสอบ Git history กับสถานะ production. ยังไม่ได้เชื่อมต่อหรือแก้บริการ production จาก workspace นี้
 - Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
@@ -89,7 +89,7 @@
 ### กฎข้อที่ 5: ทุกบัญชีรวมถึง Admin ต้องยืนยัน Username/Password
 - ห้ามให้ `Admin` หรือบัญชีอื่นเข้าใช้งานจากการเลือกชื่อ/สลับบัญชีโดยไม่กรอกรหัสผ่าน; หน้าเว็บไม่ถือเป็นตัวตรวจสอบตัวตน
 - Server ตรวจ `app_users.password`, ออก session cookie และปฏิเสธ API ที่ไม่มี session; รหัสผ่านใหม่บันทึกเป็น scrypt hash และไม่ส่งคืนใน response
-- หากยังไม่มี Master Admin ใน `app_users`, server จะสร้างบัญชีได้ต่อเมื่อกำหนด `SYSTEM_MASTER_ADMIN_PASSWORD` ที่ยาวอย่างน้อย 16 ตัวอักษรใน runtime; รหัสเริ่มต้นเดิมจะถูกปฏิเสธ
+- หากยังไม่มี Master Admin ใน `app_users`, server จะสร้างบัญชีได้ต่อเมื่อกำหนด `SYSTEM_MASTER_ADMIN_PASSWORD` ที่ยาวอย่างน้อย 16 ตัวอักษรใน runtime; หากมีบัญชีเดิม รหัส `@Admin` ยังใช้ได้ แต่ `123456` ถูกปฏิเสธ
 
 ### กฎข้อที่ 6: ห้ามใช้ `window.alert` หรือ `window.confirm`
 - เนื่องจากระบบอาจรันภายใต้สภาพแวดล้อม iFrame/Webview ปุ่มลบหรือจัดการหลายรายการ (Batch Actions) ทั้งหมดต้องใช้ **Inline Confirmation UI** (ปุ่ม `ยืนยัน / ยกเลิก` บนหน้าจอ) แทน `window.confirm()` เสมอ

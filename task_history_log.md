@@ -34,6 +34,19 @@
 - `git diff --check` ผ่าน
 - ยังต้องทดสอบกับภาพตัวอย่างจริงที่มีแบบฟอร์มหลากหลายก่อนปรับเกณฑ์/พฤติกรรมเพิ่มเติม
 
+## [2026-10-06] Restore Existing Render Login Compatibility
+
+### การเปลี่ยนแปลง
+- คืน fallback Supabase client ไปใช้ `SUPABASE_ANON_KEY` เมื่อไม่มี service-role key เพื่อรองรับ environment เดิม; fallback นี้ใช้ได้เฉพาะเมื่อฐานข้อมูลยังมี policies ที่อนุญาต anon และไม่รองรับหลังใช้ DDL ที่ปิด direct access
+- อนุญาตให้บัญชี Master เดิมใช้รหัสที่เคยตั้งเป็น `@Admin`; ยังคงปฏิเสธรหัส legacy `123456`
+- เพิ่ม `SUPABASE_ANON_KEY` กลับใน `render.yaml` เพื่อให้แสดง dependency เดิมของ service
+
+### การตรวจสอบ
+- `npm.cmd run lint` ผ่าน
+- `npm.cmd run build` ผ่าน (ยังมีคำเตือน bundle JavaScript ขนาดเกิน 500 kB)
+- `git diff --check` ผ่าน
+- Login กับ Supabase จริงหลัง deploy ต้องยืนยันใน Render; ยังไม่ได้เข้าถึง production
+
 ## [2026-10-05] Shorten LINE Bill Receipt Reply
 
 ### การเปลี่ยนแปลง

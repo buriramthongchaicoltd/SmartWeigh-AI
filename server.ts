@@ -202,7 +202,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       row.password = upgradedPassword;
       checked = { valid: true, needsUpgrade: false };
     }
-    if (isSystemMaster && checked.valid && (password === '@Admin' || password === '123456')) {
+    if (isSystemMaster && checked.valid && password === '123456') {
       return res.status(401).json({ success: false, error: 'รหัสผ่านเริ่มต้นไม่ปลอดภัย กรุณาตั้งค่า SYSTEM_MASTER_ADMIN_PASSWORD และใช้รหัสใหม่' });
     }
     if (!checked.valid) return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
@@ -2943,7 +2943,7 @@ function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
     supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
   };
   if (!cfg.supabaseUrl || !cfg.supabaseUrl.startsWith('http')) return null;
-  const key = cfg.supabaseServiceRoleKey;
+  const key = cfg.supabaseServiceRoleKey || cfg.supabaseAnonKey;
   if (!key) return null;
   return createClient(cfg.supabaseUrl, key, {
     auth: { persistSession: false }
