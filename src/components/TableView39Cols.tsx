@@ -1752,6 +1752,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const matchedPO = row.col4
                     ? pos.find(p => isDocNumberMatch(p.poNumber || p.poNo || p.poId, row.col4))
                     : undefined;
+                  const poNeedsReview = Boolean(row.col4 && row.poMatchStatus !== 'verified');
 
                   const linkedDestTicket = allDestTickets.find(
                     t =>
@@ -1833,7 +1834,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       imageUrl: matchedPO?.image || (matchedPO?.driveFileId
                         ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(matchedPO.driveFileId)}`
                         : undefined),
-                      matchStatus: row.poMatchStatus,
+                      matchStatus: poNeedsReview ? 'auto_flagged' : row.poMatchStatus,
                       referenceNote:
                         row.referenceSource === 'handwritten'
                           ? '✍️ อ้างอิงจากลายมือบนเอกสาร DO'
@@ -2177,17 +2178,17 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   <FileImage className="w-3 h-3 text-blue-600 shrink-0" />
                                   <span>{row.col4}</span>
                                 </span>
-                                {row.poMatchStatus === 'auto_flagged' && (
+                                {poNeedsReview && (
                                   <span className="inline-flex items-center gap-0.5 font-sans">
-                                    <span className="text-[9px] bg-amber-100 text-amber-900 border border-amber-300 px-1 py-0.2 rounded font-bold" title="ชน PO อัตโนมัติ (รอตรวจสอบ)">
-                                      🚩
+                                    <span className="text-[9px] bg-amber-100 text-amber-900 border border-amber-400 px-1 py-0.2 rounded font-bold" title="ตรวจสอบว่าเลข PO ที่เชื่อมกับ DO ถูกต้องก่อนดำเนินการต่อ">
+                                      🚩 รอตรวจสอบ
                                     </span>
                                     {onVerifyAutoFlags && (
                                       <button
                                         type="button"
                                         onClick={() => onVerifyAutoFlags(row.id, 'po')}
                                         className="text-[9px] bg-emerald-600 hover:bg-emerald-700 text-white px-1 py-0.2 rounded font-bold cursor-pointer"
-                                        title="ยืนยันการชน PO อัตโนมัติ"
+                                          title="ยืนยันว่าเลข PO ที่เชื่อมกับ DO ถูกต้อง"
                                       >
                                         ✓
                                       </button>

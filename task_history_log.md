@@ -4,6 +4,19 @@
 
 ---
 
+## [2026-10-06] Persist and Clearly Show PO Match Review
+
+### การเปลี่ยนแปลง
+- แก้ต้นเหตุที่สถานะชนอัตโนมัติหายหลังบันทึก/โหลด: เพิ่ม mapping สถานะ PO/ตั๋วปลายทาง, รายการ auto action และผู้ยืนยัน ระหว่าง OrderRecord กับ Supabase
+- เพิ่มคอลัมน์แบบ additive ใน schema DDL และ migration ทำเครื่องหมาย PO เก่าที่มีเลขอ้างอิงแต่ไม่มีสถานะเป็น `auto_flagged` ให้ตรวจสอบ ไม่ถือว่าอนุมัติแล้วโดยปริยาย
+- แสดงป้าย `🚩 รอตรวจสอบ` ติดกับเลข PO และให้ popup แสดงสถานะรอตรวจ แม้ record เก่าจะยังไม่มีสถานะ
+- ปรับการยืนยันเฉพาะ PO/ตั๋วปลายทางให้ตรวจสถานะของ action อื่นที่ยังค้าง โดยไม่ลบประวัติ action
+- อัปเดต Database Blueprint
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build`, `git diff --check` และทดสอบ round-trip สถานะ PO ผ่าน mapping Supabase แล้ว
+- ฐานข้อมูล production ต้องรัน DDL migration หนึ่งครั้ง; ยังไม่ได้รันกับ production
+
 ## [2026-10-06] Fix PO Hover Image Preview
 
 ### การเปลี่ยนแปลง

@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS public.orders (
 
   linked_via_doc_no TEXT,
   matched_dest_ticket_id TEXT,
+  po_match_status TEXT,
+  dest_match_status TEXT,
+  auto_action_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+  auto_flags_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_flags_verified_by TEXT,
+  auto_flags_verified_at TIMESTAMPTZ,
+  reference_source TEXT,
 
   line_inbox_id TEXT,
   line_sender_name TEXT,
@@ -99,6 +106,21 @@ CREATE TABLE IF NOT EXISTS public.orders (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Additive migration for existing installations; legacy PO links require review.
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS po_match_status TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS dest_match_status TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_action_flags JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified_by TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified_at TIMESTAMPTZ;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS reference_source TEXT;
+
+UPDATE public.orders
+SET po_match_status = 'auto_flagged',
+    auto_action_flags = COALESCE(auto_action_flags, '[]'::jsonb) ||
+      jsonb_build_array('🔗 ชนใบสั่งซื้อเดิม — กรุณาตรวจสอบการชนบิล')
+WHERE col4 IS NOT NULL AND BTRIM(col4) <> '' AND po_match_status IS NULL;
 
 -- 2. ตารางใบสั่งซื้อ (Purchase Orders - PO)
 CREATE TABLE IF NOT EXISTS public.purchase_orders (
@@ -301,6 +323,13 @@ export function mapOrderToSupabase(ord: OrderRecord): any {
     drive_folder_id: ord.driveFolderId || null,
     linked_via_doc_no: ord.linkedViaDocNo || null,
     matched_dest_ticket_id: ord.matchedDestTicketId || null,
+    po_match_status: ord.poMatchStatus || null,
+    dest_match_status: ord.destMatchStatus || null,
+    auto_action_flags: ord.autoActionFlags || [],
+    auto_flags_verified: Boolean(ord.autoFlagsVerified),
+    auto_flags_verified_by: ord.autoFlagsVerifiedBy || null,
+    auto_flags_verified_at: ord.autoFlagsVerifiedAt || null,
+    reference_source: ord.referenceSource || null,
     line_inbox_id: ord.lineInboxId || null,
     line_sender_name: ord.lineSenderName || null,
     line_group_name: ord.lineGroupName || null,
@@ -373,6 +402,13 @@ export function mapSupabaseToOrder(row: any): OrderRecord {
     driveFolderId: row.drive_folder_id || undefined,
     linkedViaDocNo: row.linked_via_doc_no || undefined,
     matchedDestTicketId: row.matched_dest_ticket_id || undefined,
+    poMatchStatus: row.po_match_status || undefined,
+    destMatchStatus: row.dest_match_status || undefined,
+    autoActionFlags: Array.isArray(row.auto_action_flags) ? row.auto_action_flags : [],
+    autoFlagsVerified: Boolean(row.auto_flags_verified),
+    autoFlagsVerifiedBy: row.auto_flags_verified_by || undefined,
+    autoFlagsVerifiedAt: row.auto_flags_verified_at || undefined,
+    referenceSource: row.reference_source || undefined,
     lineInboxId: row.line_inbox_id || undefined,
     lineSenderName: row.line_sender_name || undefined,
     lineGroupName: row.line_group_name || undefined,

@@ -410,7 +410,7 @@ export function computeSystemNotifications(
  */
 export function hasUnverifiedAutoActions(order: OrderRecord): boolean {
   if (!order) return false;
-  if (order.poMatchStatus === 'auto_flagged') return true;
+  if (order.col4 && order.poMatchStatus !== 'verified') return true;
   if (order.destMatchStatus === 'auto_flagged') return true;
   if (order.autoActionFlags && order.autoActionFlags.length > 0 && !order.autoFlagsVerified) return true;
   return false;
@@ -422,8 +422,8 @@ export function hasUnverifiedAutoActions(order: OrderRecord): boolean {
 export function getOrderAutoFlagSummary(order: OrderRecord): string[] {
   if (!order) return [];
   const items = new Set<string>();
-  if (order.poMatchStatus === 'auto_flagged' && order.col4) {
-    items.add(`🔗 ชนใบสั่งซื้อ ${order.col4} อัตโนมัติ (ตามเลขอ้างอิง)`);
+  if (order.col4 && order.poMatchStatus !== 'verified') {
+    items.add(`🔗 ชนใบสั่งซื้อ ${order.col4} — รอตรวจสอบและยืนยัน`);
   }
   if (order.destMatchStatus === 'auto_flagged') {
     items.add(`⚖️ ชนตั๋วชั่งปลายทาง ${order.col17 || order.linkedViaDocNo || ''} อัตโนมัติ (ตามเลขอ้างอิง DO)`);

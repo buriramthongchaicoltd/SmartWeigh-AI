@@ -2368,10 +2368,16 @@ export default function App() {
         if (ord.id === orderId) {
           const nextPoStatus = (scope === 'all' || scope === 'po') && ord.col4 ? 'verified' : ord.poMatchStatus;
           const nextDestStatus = (scope === 'all' || scope === 'dest') && (ord.col17 || Number(ord.col20) > 0 || ord.linkedViaDocNo) ? 'verified' : ord.destMatchStatus;
+          const hasOtherUnverifiedActions =
+            scope !== 'all' &&
+            (ord.autoActionFlags || []).some(flag => {
+              if (scope === 'po') return !flag.includes('ชนใบสั่งซื้อ') && !flag.includes('ชน PO');
+              return !flag.includes('ตั๋วชั่งปลายทาง') && !flag.includes('ตั๋วปลายทาง') && !flag.includes('โซน 4');
+            });
           const allCleared =
             nextPoStatus !== 'auto_flagged' &&
             nextDestStatus !== 'auto_flagged' &&
-            scope === 'all';
+            !hasOtherUnverifiedActions;
 
           return {
             ...ord,
