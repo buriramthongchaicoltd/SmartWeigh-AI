@@ -27,7 +27,7 @@ interface POEditModalProps {
   existingOrders?: OrderRecord[];
   initialStoreName?: string;
   onClose: () => void;
-  onSave: (po: PurchaseOrder) => void;
+  onSave: (po: PurchaseOrder) => boolean | void | Promise<boolean | void>;
 }
 
 export const POEditModal: React.FC<POEditModalProps> = ({
@@ -43,6 +43,8 @@ export const POEditModal: React.FC<POEditModalProps> = ({
 }) => {
   const [confirmDuplicatePOOverride, setConfirmDuplicatePOOverride] = useState(false);
   const [projectMissingError, setProjectMissingError] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [formData, setFormData] = useState<Partial<PurchaseOrder>>({
     poNumber: '',
     orderDate: new Date().toISOString().split('T')[0],
@@ -288,11 +290,28 @@ export const POEditModal: React.FC<POEditModalProps> = ({
       image: formData.image || existing.image || null,
       updatedAt: new Date().toISOString()
     };
-    onSave(mergedPO);
-    onClose();
+    void submitSave(mergedPO);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const submitSave = async (purchaseOrder: PurchaseOrder) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setSaveError('');
+    try {
+      const result = await onSave(purchaseOrder);
+      if (result === false) {
+        setSaveError('ยังบันทึกไม่ได้ กรุณาตรวจสอบข้อความแจ้งเตือนแล้วลองอีกครั้ง');
+        return;
+      }
+      onClose();
+    } catch (err: any) {
+      setSaveError(err?.message || 'บันทึกใบสั่งซื้อไม่สำเร็จ กรุณาลองอีกครั้ง');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     // Strict Hard Block: Never allow saving a duplicate PO as a new record
@@ -335,6 +354,8 @@ export const POEditModal: React.FC<POEditModalProps> = ({
       createdAt: po?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       lineInboxId: formData.lineInboxId || po?.lineInboxId,
+      driveFileId: formData.driveFileId || po?.driveFileId,
+      driveFileLocation: formData.driveFileLocation || po?.driveFileLocation,
       lineMessageId: formData.lineMessageId || po?.lineMessageId,
       lineUserId: formData.lineUserId || po?.lineUserId,
       lineSenderName: formData.lineSenderName || po?.lineSenderName,
@@ -343,8 +364,7 @@ export const POEditModal: React.FC<POEditModalProps> = ({
       lineReceivedAt: formData.lineReceivedAt || po?.lineReceivedAt
     };
 
-    onSave(finalPO);
-    onClose();
+    await submitSave(finalPO);
   };
 
   return (
@@ -374,7 +394,9 @@ export const POEditModal: React.FC<POEditModalProps> = ({
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
+            disabled={isSaving}
             className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -898,9 +920,15 @@ export const POEditModal: React.FC<POEditModalProps> = ({
               * ข้อมูลใบสั่งซื้อจะถูกนำไปเชื่อมโยงกับตั๋วชั่งและใบส่งของอัตโนมัติตามเลขที่ PO
             </div>
             <div className="flex items-center gap-2">
+              {saveError && (
+                <span role="alert" className="max-w-sm text-xs font-semibold text-red-700">
+                  {saveError}
+                </span>
+              )}
               <button
                 type="button"
                 onClick={onClose}
+                disabled={isSaving}
                 className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-semibold transition cursor-pointer"
               >
                 ยกเลิก
@@ -917,10 +945,11 @@ export const POEditModal: React.FC<POEditModalProps> = ({
               ) : (
                 <button
                   type="submit"
+                  disabled={isSaving}
                   className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs transition cursor-pointer"
                 >
                   <Save className="w-4 h-4" />
-                  <span>{po ? 'บันทึกการแก้ไข PO' : 'ยืนยันเปิดใบสั่งซื้อ'}</span>
+                  <span>{isSaving ? 'กำลังย้ายรูปและบันทึก...' : po ? 'บันทึกการแก้ไข PO' : 'ยืนยันเปิดใบสั่งซื้อ'}</span>
                 </button>
               )}
             </div>

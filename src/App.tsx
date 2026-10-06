@@ -50,7 +50,7 @@ import {
   normalizeSystemSettings,
   computeSystemNotifications
 } from './utils/systemConfig';
-import { CheckCircle2, RefreshCw, AlertTriangle, Database } from 'lucide-react';
+import { CheckCircle2, RefreshCw, AlertTriangle, Database, X } from 'lucide-react';
 
 const STORAGE_ORDERS_KEY = 'autostore_real_orders_v2';
 const STORAGE_STORES_KEY = 'autostore_real_stores_v2';
@@ -237,6 +237,20 @@ export default function App() {
   const [authenticatedUser, setAuthenticatedUser] = useState<AppUser | null>(null);
   const [isAuthChecked, setIsAuthChecked] = useState<boolean>(false);
   const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
+  const authSessionWarningRef = useRef(false);
+
+  const showToast = React.useCallback((message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    if (toastTimeoutRef.current !== null) clearTimeout(toastTimeoutRef.current);
+    setToast({ message, type });
+    toastTimeoutRef.current = type === 'error'
+      ? null
+      : window.setTimeout(() => {
+          setToast(null);
+          toastTimeoutRef.current = null;
+        }, 5000);
+  }, []);
 
   // Database Connection & Synchronization Status (100% Real Database Mode)
   const [isDbLoaded, setIsDbLoaded] = useState<boolean>(false);
@@ -249,29 +263,37 @@ export default function App() {
     setIsSyncingDb(true);
     try {
       const res = await fetch('/api/database/sync-all', { method: 'POST' });
-      if (!res.ok) {
-        setIsDbConnected(false);
-        setIsDbLoaded(true);
-        return;
-      }
       const json = await res.json();
-      if (json.success && json.data) {
+      if (!res.ok || !json?.success || !json?.data) {
+        throw new Error(json?.error || `โหลดข้อมูลฐานข้อมูลไม่สำเร็จ (HTTP ${res.status})`);
+      }
+      if (json.data) {
         setIsDbConnected(true);
         setDbSyncTimestamp(new Date().toLocaleTimeString('th-TH'));
 
         const d = json.data;
+        const queryErrors: Record<string, string> =
+          json.queryErrors && typeof json.queryErrors === 'object' ? json.queryErrors : {};
+        const queryErrorDetails = Object.entries(queryErrors)
+          .map(([table, message]) => `${table}: ${message}`)
+          .join('\n');
+        if (queryErrorDetails) {
+          showToast(`โหลดข้อมูลฐานข้อมูลได้ไม่ครบ ตารางที่ผิดพลาดจะไม่ถูกเขียนทับ:\n${queryErrorDetails}`, 'error');
+        }
+
         // Always load all records directly from Supabase Cloud PostgreSQL
-        if (Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
-        if (Array.isArray(d.pos)) setPos(d.pos);
-        if (Array.isArray(d.stores)) setStores(d.stores);
-        if (Array.isArray(d.projects)) setProjects(d.projects);
-        if (Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
-        if (Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
-        if (Array.isArray(d.users)) setUsers(d.users);
-        if (d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
+        if (!queryErrors.orders && Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
+        if (!queryErrors.purchase_orders && Array.isArray(d.pos)) setPos(d.pos);
+        if (!queryErrors.stores && Array.isArray(d.stores)) setStores(d.stores);
+        if (!queryErrors.projects && Array.isArray(d.projects)) setProjects(d.projects);
+        if (!queryErrors.billing_notes && Array.isArray(d.billingNotes)) setBillingNotes(d.billingNotes);
+        if (!queryErrors.line_inbox && Array.isArray(d.lineInbox)) setLineInbox(d.lineInbox);
+        if (!queryErrors.app_users && Array.isArray(d.users)) setUsers(d.users);
+        if (!queryErrors.system_config && d.systemSettings) setSystemSettings(normalizeSystemSettings(d.systemSettings));
 
         const hasDbOrdersOrStores = (d.orders?.length || 0) > 0 || (d.stores?.length || 0) > 0 || (d.pos?.length || 0) > 0;
-        if (!hasDbOrdersOrStores) {
+        const hasCoreTableErrors = Boolean(queryErrors.orders || queryErrors.stores || queryErrors.purchase_orders);
+        if (!hasDbOrdersOrStores && !hasCoreTableErrors) {
           // If DB is newly connected and completely empty, check if user has old localStorage data to migrate
           try {
             const rawOrders = localStorage.getItem(STORAGE_ORDERS_KEY);
@@ -284,7 +306,7 @@ export default function App() {
             const localProjects = rawProjects ? JSON.parse(rawProjects) : [];
 
             if (localOrders.length > 0 || localStores.length > 0 || localPos.length > 0) {
-              await fetch('/api/database/migrate-local-to-cloud', {
+              const migrationResponse = await fetch('/api/database/migrate-local-to-cloud', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -295,6 +317,10 @@ export default function App() {
                   billingNotes: []
                 })
               });
+              const migrationResult = await migrationResponse.json();
+              if (!migrationResponse.ok || !migrationResult?.success) {
+                throw new Error(migrationResult?.error || `ย้ายข้อมูลเดิมขึ้นฐานข้อมูลไม่สำเร็จ (HTTP ${migrationResponse.status})`);
+              }
               setOrders(reconcileAndHealOrders(localOrders));
               setStores(localStores);
               setPos(localPos);
@@ -305,9 +331,11 @@ export default function App() {
               localStorage.removeItem(STORAGE_PROJECTS_KEY);
             }
           } catch (e) {
-            console.warn('Auto-migration check error:', e);
+            console.error('[DB Migration] Failed to migrate local data:', e);
+            const reason = e instanceof Error ? `: ${e.message}` : '';
+            showToast(`ย้ายข้อมูลเดิมขึ้นฐานข้อมูลไม่สำเร็จ ข้อมูลเดิมยังเก็บไว้ในอุปกรณ์${reason}`, 'error');
           }
-        } else {
+        } else if (Object.keys(queryErrors).length === 0) {
           // Clear legacy local storage once DB is successfully loaded with data
           try {
             localStorage.removeItem(STORAGE_ORDERS_KEY);
@@ -318,17 +346,17 @@ export default function App() {
             localStorage.removeItem(STORAGE_BILLING_NOTES_KEY);
           } catch {}
         }
-      } else {
-        setIsDbConnected(false);
       }
     } catch (err) {
-      console.warn('Failed to sync from database:', err);
+      console.error('[DB Startup] Failed to load database:', err);
       setIsDbConnected(false);
+      const reason = err instanceof Error ? `: ${err.message}` : '';
+      showToast(`เชื่อมต่อหรือโหลดข้อมูลฐานข้อมูลไม่สำเร็จ${reason}`, 'error');
     } finally {
       setIsDbLoaded(true);
       setIsSyncingDb(false);
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -340,10 +368,14 @@ export default function App() {
         }
       })
       .catch(error => {
-        if (!cancelled) console.warn('[Startup] Automatic service check failed:', error);
+        if (!cancelled) {
+          console.error('[Startup] Automatic service check failed:', error);
+          const reason = error instanceof Error ? `: ${error.message}` : '';
+          showToast(`ตรวจสอบบริการตอนเริ่มระบบไม่สำเร็จ${reason}`, 'error');
+        }
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     let cancelled = false;
@@ -361,14 +393,16 @@ export default function App() {
           await fetchDatabaseData();
         }
       } catch (error) {
-        console.warn('[Auth] Could not restore login session:', error);
+        console.error('[Auth] Could not restore login session:', error);
+        const reason = error instanceof Error ? `: ${error.message}` : '';
+        showToast(`ตรวจสอบสถานะเข้าสู่ระบบไม่สำเร็จ${reason}`, 'error');
       } finally {
         if (!cancelled) setIsAuthChecked(true);
       }
     };
     restoreSession();
     return () => { cancelled = true; };
-  }, [fetchDatabaseData]);
+  }, [fetchDatabaseData, showToast]);
 
   useEffect(() => {
     if (!authenticatedUser) return;
@@ -376,12 +410,19 @@ export default function App() {
       try {
         const response = await fetch('/api/auth/me');
         if (response.status === 401) await handleLogout();
+        else if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        else authSessionWarningRef.current = false;
       } catch (error) {
-        console.warn('[Auth] Session check failed:', error);
+        console.error('[Auth] Session check failed:', error);
+        if (!authSessionWarningRef.current) {
+          authSessionWarningRef.current = true;
+          const reason = error instanceof Error ? `: ${error.message}` : '';
+          showToast(`ตรวจสอบการเชื่อมต่อบัญชีไม่สำเร็จ${reason}`, 'error');
+        }
       }
     }, 60_000);
     return () => clearInterval(timer);
-  }, [authenticatedUser]);
+  }, [authenticatedUser, showToast]);
 
   // Active User & Current Role Permissions
   const currentUser = useMemo(() => {
@@ -439,12 +480,10 @@ export default function App() {
   const [editingStore, setEditingStore] = useState<StoreMerchant | null>(null);
 
   // Toast Notification
-  const [toast, setToast] = useState<{ message: string; type?: 'success' | 'info' } | null>(null);
+  const failedDbSyncTablesRef = useRef(new Set<string>());
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
-  const lastDbSyncWarningRef = useRef(0);
-
   const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
     if (saveDbTimerRef.current[table]) {
       clearTimeout(saveDbTimerRef.current[table]);
@@ -461,38 +500,44 @@ export default function App() {
           if (!response.ok || !result?.success) {
             throw new Error(result?.error || `HTTP ${response.status}`);
           }
+          failedDbSyncTablesRef.current.delete(table);
         } catch (err) {
           if (attempt < 2) {
             window.setTimeout(() => void saveBatch(attempt + 1), 1000 * (attempt + 1));
             return;
           }
           console.error(`[DB Sync] Failed to sync ${table} to Supabase after retries:`, err);
-          if (Date.now() - lastDbSyncWarningRef.current >= 60_000) {
-            lastDbSyncWarningRef.current = Date.now();
-            setToast({
-              message: `บันทึกข้อมูล ${table} ลงฐานข้อมูลไม่สำเร็จ กรุณารอให้ระบบเชื่อมต่อแล้วลองอีกครั้ง`,
-              type: 'info'
-            });
-            window.setTimeout(() => setToast(null), 3200);
+          if (!failedDbSyncTablesRef.current.has(table)) {
+            failedDbSyncTablesRef.current.add(table);
+            const reason = err instanceof Error ? `: ${err.message}` : '';
+            showToast(`บันทึกข้อมูล ${table} ลงฐานข้อมูลไม่สำเร็จ ข้อมูลบนหน้าจออาจยังไม่ถูกบันทึก${reason}`, 'error');
           }
         }
       };
 
       void saveBatch(0);
     }, 1200);
-  }, []);
+  }, [showToast]);
 
-  const deleteRecordFromDb = React.useCallback(async (table: string, id: string) => {
+  const deleteRecordFromDb = React.useCallback(async (table: string, id: string): Promise<boolean> => {
     try {
-      await fetch('/api/database/delete-record', {
+      const response = await fetch('/api/database/delete-record', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ table, id })
       });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `HTTP ${response.status}`);
+      }
+      return true;
     } catch (err) {
-      console.warn(`[DB Delete] Failed to delete ${id} from ${table}:`, err);
+      console.error(`[DB Delete] Failed to delete ${id} from ${table}:`, err);
+      const reason = err instanceof Error ? `: ${err.message}` : '';
+      showToast(`ลบข้อมูลจากฐานข้อมูลไม่สำเร็จ${reason} รายการยังคงอยู่ในระบบ`, 'error');
+      return false;
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     if (!isDbLoaded) return;
@@ -549,8 +594,7 @@ export default function App() {
     const warnOnce = (message: string) => {
       if (Date.now() - lastInboxSyncWarningRef.current < 60_000) return;
       lastInboxSyncWarningRef.current = Date.now();
-      setToast({ message, type: 'info' });
-      window.setTimeout(() => setToast(null), 3200);
+      showToast(message, 'error');
     };
 
     try {
@@ -575,7 +619,7 @@ export default function App() {
       console.warn('[LINE Inbox] Failed to refresh from server:', err);
       warnOnce('เชื่อมต่อกล่องพัก LINE ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตหรือฐานข้อมูล');
     }
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     if (!authenticatedUser) return;
@@ -583,13 +627,6 @@ export default function App() {
     const timer = setInterval(syncWebhookQueueToLocal, 8000);
     return () => clearInterval(timer);
   }, [authenticatedUser, syncWebhookQueueToLocal]);
-
-  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => {
-      setToast(null);
-    }, 3200);
-  };
 
   // Google Drive Verified-Only Move Trigger
   // "ย้ายไฟล์บน Google Drive จะย้ายก็ต่อเมื่อมีการยืนยันแล้วเท่านั้น ถ้าระบบชนบิลโดยยังไม่มีการยืนยันห้ามย้าย"
@@ -606,12 +643,15 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params)
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log('[Google Drive Move Success]:', data.message);
+      const data = await resp.json();
+      if (!resp.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${resp.status}`);
       }
+      console.log('[Google Drive Move Success]:', data.message);
     } catch (err) {
-      console.warn('[Google Drive Move Warning]:', err);
+      console.error('[Google Drive Move Error]:', err);
+      const reason = err instanceof Error ? `: ${err.message}` : '';
+      showToast(`อัปเดตตำแหน่งไฟล์ที่ยืนยันบน Google Drive ไม่สำเร็จ${reason}`, 'error');
     }
   };
 
@@ -624,13 +664,19 @@ export default function App() {
     destTicketFileIdToRescue?: string;
   }) => {
     try {
-      await fetch('/api/drive/cleanup-file', {
+      const response = await fetch('/api/drive/cleanup-file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params)
       });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `HTTP ${response.status}`);
+      }
     } catch (err) {
-      console.warn('[Google Drive Cleanup Warning]:', err);
+      console.error('[Google Drive Cleanup Error]:', err);
+      const reason = err instanceof Error ? `: ${err.message}` : '';
+      showToast(`จัดการไฟล์บน Google Drive ไม่สำเร็จ${reason}`, 'error');
     }
   };
 
@@ -646,7 +692,9 @@ export default function App() {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
     } catch (error) {
-      console.warn('[Auth] Logout request failed:', error);
+      console.error('[Auth] Logout request failed:', error);
+      const reason = error instanceof Error ? `: ${error.message}` : '';
+      showToast(`แจ้งออกจากระบบไปยังเซิร์ฟเวอร์ไม่สำเร็จ${reason}`, 'error');
     } finally {
       setAuthenticatedUser(null);
       setCurrentUserId('');
@@ -997,13 +1045,13 @@ export default function App() {
     showToast(`ปลดล็อกชุดวางบิล ${billingNoteId} เพื่อแก้ไขเลข RR หรือรายการแล้ว`);
   };
 
-  const handleDeleteBillingNote = (billingNoteId: string) => {
+  const handleDeleteBillingNote = async (billingNoteId: string) => {
     const targetNote = billingNotes.find(b => b.id === billingNoteId);
     if (!targetNote) return;
+    if (!(await deleteRecordFromDb('billing_notes', billingNoteId))) return;
     const orderIdsSet = new Set(targetNote.orderIds);
 
     setBillingNotes(prev => prev.filter(b => b.id !== billingNoteId));
-    deleteRecordFromDb('billing_notes', billingNoteId);
     setOrders(prevOrders => {
       const nextOrders = prevOrders.map(ord => {
         if (!orderIdsSet.has(ord.id)) return ord;
@@ -1097,7 +1145,7 @@ export default function App() {
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
-  const handleSaveOrder = (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): boolean => {
+  const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
     const isExistingRecord = orders.some(o => o.id === order.id);
     if (!isExistingRecord) {
       const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
@@ -1106,6 +1154,52 @@ export default function App() {
       if (blockingDups.length > 0 && !allowDuplicate) {
         showToast(`พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาตรวจสอบและยืนยันก่อนบันทึก`, 'info');
         return false;
+      }
+    }
+
+    let verifiedLineItem: LineBillInboxItem | undefined;
+    let verifiedLineTargetZone: OrderRecord['driveFileLocation'];
+    let verifiedLineFileId: string | undefined;
+    if (order.lineInboxId) {
+      verifiedLineItem = lineInbox.find(item => item.id === order.lineInboxId);
+      if (!verifiedLineItem?.driveFileId) {
+        showToast('ยังบันทึกใบตรวจรับไม่ได้: ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน', 'info');
+        return false;
+      }
+      verifiedLineFileId = verifiedLineItem.driveFileId;
+
+      const targetZone: NonNullable<OrderRecord['driveFileLocation']> =
+        order.docType === 'dest_weighbridge' ? 'zone_03' :
+        order.docType === 'tax_invoice' ? 'zone_04' :
+        'zone_02';
+      verifiedLineTargetZone = targetZone;
+      if (verifiedLineItem.driveFileLocation !== targetZone) {
+        try {
+          const driveResponse = await fetch('/api/drive/rename-and-move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileId: verifiedLineItem.driveFileId,
+              docType: order.docType || 'delivery_order',
+              docDate: (order.docType === 'dest_weighbridge' && order.col16)
+                ? order.col16
+                : order.col7 || new Date().toISOString().slice(0, 10),
+              docNumber: order.col6 || order.col4 || order.col17 || order.col1 || ''
+            })
+          });
+          const driveResult = await driveResponse.json();
+          if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== targetZone) {
+            throw new Error(driveResult?.error || `Google Drive ไม่ยืนยันการย้ายรูปไป ${targetZone}`);
+          }
+          verifiedLineItem = {
+            ...verifiedLineItem,
+            driveFileLocation: targetZone
+          };
+        } catch (err: any) {
+          console.error('[LINE Inbox] Could not move image before saving order:', err);
+          showToast(`ยังไม่ได้บันทึกใบตรวจรับ เพราะย้ายรูปใน Google Drive ไม่สำเร็จ: ${err?.message || 'ตรวจสอบการเชื่อมต่อ Drive'}`, 'error');
+          return false;
+        }
       }
     }
 
@@ -1126,9 +1220,15 @@ export default function App() {
       const previousOrder = isExistingRecord ? orders.find(existing => existing.id === order.id) : undefined;
       let orderToSave: OrderRecord = normalizeOrderWeights({
         ...order,
-        driveFileId: (previousOrder?.image !== order.image && order.driveFileId === previousOrder?.driveFileId)
-          ? undefined
-          : order.driveFileId,
+        image: verifiedLineItem
+          ? verifiedLineItem.driveWebViewLink ||
+            `https://drive.google.com/uc?export=view&id=${encodeURIComponent(verifiedLineFileId || '')}`
+          : order.image,
+        driveFileId: verifiedLineFileId ||
+          ((previousOrder?.image !== order.image && order.driveFileId === previousOrder?.driveFileId)
+            ? undefined
+            : order.driveFileId),
+        driveFileLocation: verifiedLineTargetZone || order.driveFileLocation,
         createdBy: order.createdBy || currentUser.fullName,
         updatedBy: currentUser.fullName
       });
@@ -1522,37 +1622,11 @@ export default function App() {
         });
 
         // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
-        const inboxItem = prev.find(i => i.id === order.lineInboxId);
-        if (inboxItem?.driveFileId) {
-          // ใช้ col6 สำหรับ DO/WB/INV, col4 สำหรับ PO; ถ้าว่างใช้ col17 (ตั๋วปลายทาง)
-          const docNumber = order.col6 || order.col4 || order.col17 || order.col1 || '';
-          // ใช้ col7 (วันที่รับสินค้า) เป็นหลัก, col16 (วันที่ปลายทาง) สำหรับ dest_weighbridge
-          const docDate = (order.docType === 'dest_weighbridge' && order.col16)
-            ? order.col16
-            : order.col7 || new Date().toISOString().slice(0, 10);
-
-          fetch('/api/drive/rename-and-move', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fileId: inboxItem.driveFileId,
-              docType: order.docType || 'delivery_order',
-              docDate,
-              docNumber
-            })
-          })
-            .then(r => r.json())
-            .then(result => {
-              if (result.success) {
-                console.log(`[Drive] Renamed & moved: ${result.newFileName} → ${result.targetZone}`);
-              } else {
-                console.warn('[Drive] rename-and-move failed:', result.error);
-              }
-            })
-            .catch(err => console.warn('[Drive] rename-and-move error:', err));
-        }
-
-        return updatedInbox;
+        return updatedInbox.map(item =>
+          item.id === order.lineInboxId && verifiedLineItem
+            ? { ...item, driveFileLocation: verifiedLineItem.driveFileLocation }
+            : item
+        );
       });
     }
 
@@ -1726,12 +1800,12 @@ export default function App() {
   };
 
   // Delete order (with cascade cleanup of linked Dest Weighbridge, Tax Invoice, or DO Zone 4)
-  const handleDeleteOrder = (id: string, skipConfirm = false) => {
+  const handleDeleteOrder = async (id: string, skipConfirm = false) => {
     if (!currentPermissions.canDeleteOrder) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการบิล`, 'info');
       return;
     }
-    deleteRecordFromDb('orders', id);
+    if (!(await deleteRecordFromDb('orders', id))) return;
     setOrders(prev => {
       const target = prev.find(o => o.id === id);
       let remaining = prev.filter(o => o.id !== id);
@@ -1882,13 +1956,109 @@ export default function App() {
   };
 
   // ================= PO MANAGEMENT HANDLERS =================
-  const handleSavePO = (savedPO: PurchaseOrder) => {
+  const handleSavePO = async (inputPO: PurchaseOrder): Promise<boolean> => {
+    let savedPO = inputPO;
     const isExistingPO = pos.some(p => p.id === savedPO.id);
     if (!isExistingPO) {
       const blockingPODups = checkDuplicatePO(savedPO, pos, savedPO.image);
       if (blockingPODups.length > 0) {
         showToast(`🚫 บล็อกการนำเข้า PO ซ้ำ: เลขที่ ${blockingPODups[0].matchedPO.poNumber} มีอยู่ในระบบแล้ว`);
-        return;
+        return false;
+      }
+    }
+
+    let verifiedInboxItem: LineBillInboxItem | undefined;
+    if (savedPO.lineInboxId) {
+      const inboxItem = lineInbox.find(item => item.id === savedPO.lineInboxId);
+      if (!inboxItem?.driveFileId) {
+        showToast('ยังบันทึก PO ไม่ได้: ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน', 'info');
+        return false;
+      }
+
+      try {
+        if (inboxItem.driveFileLocation !== 'zone_01') {
+          const driveResponse = await fetch('/api/drive/rename-and-move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileId: inboxItem.driveFileId,
+              docType: 'purchase_order',
+              docDate: savedPO.orderDate || new Date().toISOString().slice(0, 10),
+              docNumber: savedPO.poNumber
+            })
+          });
+          const driveResult = await driveResponse.json();
+          if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== 'zone_01') {
+            throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปไปโฟลเดอร์ PO');
+          }
+        }
+
+        const verifiedAt = new Date().toISOString();
+        savedPO = {
+          ...savedPO,
+          project: savedPO.projectId,
+          driveFileId: inboxItem.driveFileId,
+          driveFileLocation: 'zone_01',
+          image: inboxItem.driveWebViewLink ||
+            `https://drive.google.com/uc?export=view&id=${encodeURIComponent(inboxItem.driveFileId)}`
+        };
+        verifiedInboxItem = {
+          ...inboxItem,
+          driveFileLocation: 'zone_01',
+          status: 'verified',
+          verifiedOrderId: savedPO.poNumber,
+          verifiedBy: currentUser.fullName,
+          verifiedAt,
+          extractedData: {
+            ...inboxItem.extractedData,
+            col2: savedPO.projectId,
+            col4: savedPO.poNumber,
+            col8: savedPO.storeName
+          }
+        };
+
+        const persistRecord = async (table: string, record: unknown) => {
+          const response = await fetch('/api/database/save-record', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ table, record })
+          });
+          const result = await response.json();
+          if (!response.ok || !result?.success) {
+            throw new Error(result?.error || `บันทึก ${table} ไม่สำเร็จ`);
+          }
+        };
+
+        await persistRecord('purchase_orders', savedPO);
+        try {
+          await persistRecord('line_inbox', verifiedInboxItem);
+        } catch (inboxSaveError) {
+          const previousPO = pos.find(item => item.id === savedPO.id);
+          try {
+            if (previousPO) {
+              await persistRecord('purchase_orders', previousPO);
+            } else {
+              const rollbackResponse = await fetch('/api/database/delete-record', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ table: 'purchase_orders', id: savedPO.id })
+              });
+              const rollbackResult = await rollbackResponse.json();
+              if (!rollbackResponse.ok || !rollbackResult?.success) {
+                throw new Error(rollbackResult?.error || 'ลบ PO ที่บันทึกค้างไม่สำเร็จ');
+              }
+            }
+          } catch (rollbackError: any) {
+            throw new Error(
+              `บันทึกสถานะกล่องพัก LINE ไม่สำเร็จ และย้อนการบันทึก PO ไม่สำเร็จ: ${rollbackError?.message || 'กรุณาตรวจสอบข้อมูลในระบบ'}`
+            );
+          }
+          throw inboxSaveError;
+        }
+      } catch (err: any) {
+        console.error('[LINE Inbox] PO verification failed before completion:', err);
+        showToast(`บันทึก PO ไม่สำเร็จ: ${err?.message || 'ย้ายรูปหรือบันทึกฐานข้อมูลไม่สำเร็จ'}`, 'error');
+        return false;
       }
     }
 
@@ -1950,23 +2120,11 @@ export default function App() {
     }
 
     // If this PO was verified from the LINE OA Bot Inbox, mark the inbox item as verified
-    if (savedPO.lineInboxId) {
+    if (savedPO.lineInboxId && verifiedInboxItem) {
       setLineInbox(prev =>
         prev.map(item =>
           item.id === savedPO.lineInboxId
-            ? {
-                ...item,
-                status: 'verified',
-                verifiedOrderId: savedPO.poNumber,
-                verifiedBy: currentUser.fullName,
-                verifiedAt: new Date().toISOString(),
-                extractedData: {
-                  ...item.extractedData,
-                  col2: savedPO.projectId,
-                  col4: savedPO.poNumber,
-                  col8: savedPO.storeName
-                }
-              }
+            ? verifiedInboxItem!
             : item
         )
       );
@@ -2013,15 +2171,16 @@ export default function App() {
     } else {
       showToast(`บันทึกใบสั่งซื้อ ${savedPO.poNumber} เรียบร้อยแล้ว!`);
     }
+    return true;
   };
 
-  const handleDeletePO = (id: string) => {
+  const handleDeletePO = async (id: string) => {
     if (!currentPermissions.canDeleteOrder) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบใบสั่งซื้อ`, 'info');
       return;
     }
+    if (!(await deleteRecordFromDb('purchase_orders', id))) return;
     const targetPO = pos.find(p => p.id === id);
-    deleteRecordFromDb('purchase_orders', id);
     setPos(prev => prev.filter(p => p.id !== id));
     if (targetPO?.poNumber) {
       setOrders(prev =>
@@ -2288,13 +2447,13 @@ export default function App() {
     showToast(`บันทึกข้อมูลร้านค้า "${savedStore.name}" เรียบร้อยแล้ว!`);
   };
 
-  const handleDeleteStore = (storeToDelete: StoreMerchant) => {
+  const handleDeleteStore = async (storeToDelete: StoreMerchant) => {
     if (!currentPermissions.canDeleteOrder) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบร้านค้า`, 'info');
       return;
     }
+    if (!(await deleteRecordFromDb('stores', storeToDelete.id))) return;
     const targetKey = storeToDelete.name.trim().toLowerCase();
-    deleteRecordFromDb('stores', storeToDelete.id);
     setStores(prev => prev.filter(s => s.id !== storeToDelete.id && s.name.trim().toLowerCase() !== targetKey));
     setOrders(prev => prev.map(o => o.storeId === storeToDelete.id ? { ...o, storeId: '' } : o));
     setPos(prev => prev.map(p => p.storeId === storeToDelete.id ? { ...p, storeId: '' } : p));
@@ -2455,13 +2614,13 @@ export default function App() {
     showToast(`บันทึกข้อมูลโครงการ "${savedProj.name}" เรียบร้อยแล้ว!`);
   };
 
-  const handleDeleteProject = (id: string, projectName?: string) => {
+  const handleDeleteProject = async (id: string, projectName?: string) => {
     if (!currentPermissions.canDeleteOrder) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบโครงการ`, 'info');
       return;
     }
+    if (!(await deleteRecordFromDb('projects', id))) return;
     const targetKey = (projectName || '').trim().toLowerCase();
-    deleteRecordFromDb('projects', id);
     setProjects(prev => prev.filter(p => p.id !== id && (!targetKey || p.name.trim().toLowerCase() !== targetKey)));
     showToast(`ลบโครงการ "${projectName || ''}" ออกจากทะเบียนเรียบร้อยแล้ว`);
   };
@@ -2575,7 +2734,10 @@ export default function App() {
     }
 
     if (item.detectedDocType === 'purchase_order') {
-      const draftPO = convertOrderDraftToPODraft(dataWithLineMeta, resolvedImage);
+      const draftPO = {
+        ...convertOrderDraftToPODraft(dataWithLineMeta, resolvedImage),
+        driveFileId: item.driveFileId
+      };
       setEditingPO(draftPO);
       setIsPOEditOpen(true);
       return;
@@ -3042,9 +3204,31 @@ export default function App() {
 
       {/* Toast Notification */}
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-xl flex items-center space-x-2 text-xs font-semibold animate-bounce border border-slate-700 print:hidden">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{toast.message}</span>
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+          className={`fixed bottom-5 right-5 z-50 max-w-[min(32rem,calc(100vw-2.5rem))] text-white px-4 py-3 rounded-xl shadow-xl flex items-start gap-3 text-sm font-semibold border print:hidden ${
+            toast.type === 'error'
+              ? 'bg-red-950 border-red-500'
+              : 'bg-slate-900 border-slate-700'
+          }`}
+        >
+          {toast.type === 'error'
+            ? <AlertTriangle className="w-5 h-5 text-red-300 shrink-0 mt-0.5" />
+            : <CheckCircle2 className={`w-5 h-5 shrink-0 mt-0.5 ${toast.type === 'info' ? 'text-sky-300' : 'text-emerald-400'}`} />}
+          <span className="flex-1 whitespace-pre-wrap">{toast.message}</span>
+          <button
+            type="button"
+            aria-label="ปิดการแจ้งเตือน"
+            onClick={() => {
+              if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+              toastTimeoutRef.current = null;
+              setToast(null);
+            }}
+            className="rounded p-1 -mr-2 -mt-1 text-white/80 hover:bg-white/10 hover:text-white focus:outline-none focus:ring-2 focus:ring-white"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
     </div>

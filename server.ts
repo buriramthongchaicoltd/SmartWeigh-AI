@@ -3655,6 +3655,10 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
       console.error('[Sync-All] app_users error:', usersRes.error.message);
       queryErrors.app_users = usersRes.error.message;
     }
+    if (configRes.error) {
+      console.error('[Sync-All] system_config error:', configRes.error.message);
+      queryErrors.system_config = configRes.error.message;
+    }
 
     const mappedOrders = (ordersRes.data || []).map(mapSupabaseToOrder);
     const mappedPOs = (posRes.data || []).map(mapSupabaseToPO);
@@ -5083,7 +5087,33 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       zone_03: zones.ZONE_03,
       zone_04: zones.ZONE_04
     };
-    const toFolderId = zoneMapping[targetZone] || zones.ZONE_02;
+    const toFolderId = zoneMapping[targetZone];
+    if (!toFolderId) {
+      throw new Error(`ไม่พบโฟลเดอร์ Google Drive สำหรับ ${targetZone}`);
+    }
+
+    const inboxFolderId = zones.ZONE_00;
+    const fileUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`;
+    const currentResponse = await fetch(`${fileUrl}?fields=id,name,parents`, {
+      headers: { Authorization: 'Bearer ' + token }
+    });
+    if (!currentResponse.ok) {
+      throw new Error(`ตรวจสอบตำแหน่งไฟล์ใน Google Drive ไม่สำเร็จ: ${await currentResponse.text()}`);
+    }
+    const currentFile: { id: string; name: string; parents?: string[] } = await currentResponse.json();
+    const currentParents = currentFile.parents || [];
+    if (currentParents.includes(toFolderId)) {
+      return res.json({
+        success: true,
+        fileId,
+        newFileName: currentFile.name,
+        targetZone,
+        message: `ไฟล์อยู่ใน ${targetZone} แล้ว`
+      });
+    }
+    if (!currentParents.includes(inboxFolderId)) {
+      throw new Error(`ไม่พบไฟล์ใน LINE Inbox หรือโฟลเดอร์ ${targetZone}; หยุดก่อนบันทึกข้อมูล`);
+    }
 
     // 1. Rename via PATCH
     const renameResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents`, {
@@ -5101,8 +5131,10 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     const renamedData: any = await renameResp.json();
 
     // 2. Move: remove from zone_00, add to target zone
-    const fromFolderId = zones.ZONE_00;
-    await moveDriveFile(token, fileId, fromFolderId, toFolderId);
+    const movedFile = await moveDriveFile(token, fileId, inboxFolderId, toFolderId);
+    if (!(movedFile.parents || []).includes(toFolderId)) {
+      throw new Error(`Google Drive ยังไม่ยืนยันว่าไฟล์อยู่ใน ${targetZone}`);
+    }
 
     return res.json({
       success: true,
