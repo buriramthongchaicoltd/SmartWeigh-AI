@@ -3135,6 +3135,7 @@ export default function App() {
         existingOrders={orders}
         lineInboxItems={lineInbox}
         trPrefix={systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`}
+        canEditTrNumber={currentUser.role === 'admin'}
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}

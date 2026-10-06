@@ -40,6 +40,7 @@ interface VerifyModalProps {
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
   trPrefix: string;
+  canEditTrNumber?: boolean;
   onClose: () => void;
   onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean | Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
@@ -61,6 +62,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   existingOrders = [],
   lineInboxItems = [],
   trPrefix,
+  canEditTrNumber = false,
   onClose,
   onSaveOrder,
   onSwitchToPO,
@@ -562,7 +564,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       documentTitle: form.documentTitle || overrideExistingOrder?.documentTitle,
       docTypeEvidence: form.docTypeEvidence || overrideExistingOrder?.docTypeEvidence,
       docTypeConfidence: form.docTypeConfidence ?? overrideExistingOrder?.docTypeConfidence,
-      col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || ''),
+      col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || '').trim(),
       col2: (form.col2 || '').trim(),
       col3: form.col3 || (selectedDocType === 'concrete' ? 'คอนกรีต' : 'ทั่วไป'),
       col4: form.col4 || '',
@@ -664,6 +666,13 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     if (!form.col1?.trim()) {
       setSaveError('ยังไม่มีเลข TR จากฐานข้อมูลจริง กรุณาลองอ่านเลขใหม่ก่อนบันทึก');
       setTrLookupFailed(true);
+      return;
+    }
+
+    if (isExistingOrder && existingOrders.some(order =>
+      order.id !== form.id && order.col1.trim() === form.col1?.trim()
+    )) {
+      setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
       return;
     }
 
@@ -775,6 +784,27 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
           {/* Right Column: Dynamic Form tailored by Bill Type (7 Cols) */}
           <div className="md:col-span-7 bg-white p-4 overflow-y-auto space-y-3.5 flex flex-col h-full text-xs">
+            {isExistingOrder && canEditTrNumber && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 space-y-1.5">
+                <label htmlFor="editable-tr-number" className="block text-xs font-bold text-amber-950">
+                  เลข TR ภายในระบบ (แก้ไขโดย Admin)
+                </label>
+                <input
+                  id="editable-tr-number"
+                  type="text"
+                  value={form.col1 || ''}
+                  onChange={event => {
+                    setForm(current => ({ ...current, col1: event.target.value }));
+                    setSaveError('');
+                  }}
+                  disabled={isSaving}
+                  className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 font-mono text-sm font-semibold text-slate-900 focus:border-amber-500 focus:outline-none disabled:bg-slate-100"
+                />
+                <p className="text-[11px] text-amber-900">
+                  เปลี่ยนเลขแล้วกด “ยืนยันบันทึกข้อมูลเอกสาร” เพื่อบันทึกลงฐานข้อมูล
+                </p>
+              </div>
+            )}
             
             {/* Top Toolbar: Active Document Mode & Optional Switcher */}
             <div className="bg-slate-100 p-2 rounded-xl border border-slate-200 space-y-2">
