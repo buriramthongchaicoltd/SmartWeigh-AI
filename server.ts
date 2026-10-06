@@ -2111,7 +2111,7 @@ async function analyzeLineBillWithGemini(
     buyerName: rawBuyerName,
     partyRoleEvidence: raw.partyRoleEvidence,
     partyRoleConfidence: raw.partyRoleConfidence,
-    col1: `TR-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`,
+    col1: '',
     col2: '', // STRICT RULE: Never auto-fill col2 from LINE Group Name! Verifier must select/input Project Name before saving.
     col3: rawAiSnapshot.rawCategory,
     col4: detectedDocType === 'purchase_order' ? formattedDocNo : rawAiSnapshot.rawRefPoNo,
@@ -3765,6 +3765,55 @@ app.post('/api/auth/users', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Auth] User save failed:', err?.message || err);
     return res.status(500).json({ success: false, error: 'บันทึกบัญชีผู้ใช้ไม่สำเร็จ' });
+  }
+});
+
+// Read the next TR from persisted orders, never from browser counters or local state.
+app.get('/api/orders/next-tr-number', async (req: Request, res: Response) => {
+  const prefix = typeof req.query.prefix === 'string' ? req.query.prefix.trim() : '';
+  if (!prefix || prefix.length > 40 || /[\u0000-\u001f]/.test(prefix)) {
+    return res.status(400).json({ success: false, error: 'รูปแบบ prefix ของเลข TR ไม่ถูกต้อง' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงอ่านลำดับเลข TR จริงไม่ได้' });
+    }
+
+    const pageSize = 1000;
+    let offset = 0;
+    let maxSequence = 0;
+    while (true) {
+      const { data, error } = await client
+        .from('orders')
+        .select('id,col1')
+        .order('id', { ascending: true })
+        .range(offset, offset + pageSize - 1);
+      if (error) throw error;
+
+      for (const row of data || []) {
+        if (typeof row.col1 !== 'string' || !row.col1.startsWith(prefix)) continue;
+        const suffix = row.col1.slice(prefix.length);
+        if (!/^\d+$/.test(suffix)) continue;
+        const sequence = Number(suffix);
+        if (Number.isSafeInteger(sequence)) maxSequence = Math.max(maxSequence, sequence);
+      }
+
+      if (!data || data.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    return res.json({
+      success: true,
+      trNumber: `${prefix}${String(maxSequence + 1).padStart(3, '0')}`
+    });
+  } catch (error: any) {
+    console.error('[TR Sequence] Failed to read orders from database:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `อ่านลำดับเลข TR จากฐานข้อมูลไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
   }
 });
 

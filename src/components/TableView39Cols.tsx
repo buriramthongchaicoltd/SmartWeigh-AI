@@ -22,6 +22,18 @@ import { OrderRecord, PurchaseOrder, StoreMerchant } from '../types';
 import { isDocNumberMatch, extractDocReferences } from '../utils/poReconciliation';
 import { hasUnverifiedAutoActions, getOrderAutoFlagSummary } from '../utils/systemConfig';
 
+const extractGoogleDriveFileId = (imageUrl?: string | null): string | undefined => {
+  if (!imageUrl) return undefined;
+  try {
+    const url = new URL(imageUrl);
+    if (!['drive.google.com', 'docs.google.com'].includes(url.hostname)) return undefined;
+    const fileId = url.pathname.match(/\/file\/d\/([^/]+)/)?.[1] || url.searchParams.get('id');
+    return fileId && /^[a-zA-Z0-9_-]{5,200}$/.test(fileId) ? fileId : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 interface TableView39ColsProps {
   viewMode?: 'orders' | 'dest_wb' | 'tax_inv';
   onSwitchTab?: (tab: 'orders' | 'dest_wb' | 'tax_inv' | 'billing') => void;
@@ -1827,16 +1839,17 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   // Helper payloads for hover preview on PO, DO/Origin, and Destination Ticket
                   const triggerPOHover = (e: React.MouseEvent<HTMLElement>) => {
                     if (!row.col4) return;
+                    const poDriveFileId = matchedPO?.driveFileId || extractGoogleDriveFileId(matchedPO?.image);
                     openDocHoverPreview(e, {
                       rowId: row.id,
                       trNo: row.col1,
                       zoneBadge: 'โซน 1 • คอลัมน์ 4 (ใบสั่งซื้อ PO)',
                       docTypeLabel: 'ใบสั่งซื้อ (Purchase Order)',
                       docNo: row.col4,
-                      imageUrl: matchedPO?.driveFileId
-                        ? `/api/drive/image/${encodeURIComponent(matchedPO.driveFileId)}`
+                      imageUrl: poDriveFileId
+                        ? `/api/drive/image/${encodeURIComponent(poDriveFileId)}`
                         : matchedPO?.image,
-                      fallbackImageUrl: matchedPO?.driveFileId ? matchedPO.image : undefined,
+                      fallbackImageUrl: poDriveFileId ? matchedPO?.image : undefined,
                       matchStatus: poNeedsReview ? 'auto_flagged' : row.poMatchStatus,
                       referenceNote:
                         row.referenceSource === 'handwritten'
@@ -3169,7 +3182,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                 <div className="text-center px-4 py-6 text-amber-300 space-y-1">
                   <FileImage className="w-8 h-8 mx-auto opacity-70" />
                   <div className="font-semibold">โหลดภาพจาก Google Drive ไม่สำเร็จ</div>
-                  <div className="text-[10px] text-slate-300">ตรวจสอบสิทธิ์ไฟล์หรือการตั้งค่า Drive แล้วลองใหม่</div>
+                  <div className="text-[10px] text-slate-300">ตรวจสอบรหัสไฟล์/สิทธิ์ Drive และหากใช้ Apps Script ให้ deploy รุ่นล่าสุด</div>
                 </div>
               ) : (
                 <div className="text-center px-4 py-6 text-slate-400 space-y-1">

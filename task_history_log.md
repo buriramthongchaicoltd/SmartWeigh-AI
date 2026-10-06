@@ -4,6 +4,27 @@
 
 ---
 
+## [2026-10-06] Generate TR Numbers From Database Records
+
+### การเปลี่ยนแปลง
+- เพิ่ม API อ่าน `orders.col1` จาก Supabase จริงทุกหน้า โดยกรองตาม prefix ที่ตั้งค่าและต่อจากเลขลำดับสูงสุดที่ยังอยู่ในฐานข้อมูล; หากไม่พบเลขของ prefix จะเริ่ม `001`
+- ให้หน้าตรวจรับรอเลขจาก API ก่อนบันทึก และมีปุ่มลองอ่านซ้ำเมื่อฐานข้อมูลติดต่อไม่ได้; ตัด fallback สุ่มและการคำนวณจากจำนวนแถวออกจากเส้นทางสร้าง TR ใหม่
+- ปรับผล AI scan ให้ไม่สร้างเลข TR เอง และบันทึกกติกาไว้ใน Handover
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแสดงคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- ยังไม่ได้อ่านรายการ `orders.col1` production จาก workspace นี้; เลขจะถูกคำนวณเมื่อระบบเรียก API โดยตรง
+
+## [2026-10-06] Resolve PO Hover Images From Stored Drive Links
+
+### การเปลี่ยนแปลง
+- แก้ PO hover ให้แยกและใช้ Drive file ID จาก `driveFileId` หรือจาก URL Google Drive ที่เก็บใน `image_url` แล้วเรียก image proxy แทนการใช้ private Drive URL เป็น `<img src>` โดยตรง
+- คง fallback ไปยัง URL/ภาพเดิมไว้ หาก proxy โหลดไม่สำเร็จ
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแสดงคำเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามเดิม
+- ตรวจหน้า production พบว่ามี client/route image proxy รุ่นก่อนแล้ว แต่ bundle ที่ให้บริการยังไม่มีการแกะ file ID จาก `image_url`; ยังไม่ได้อ่านค่า `purchase_orders.drive_file_id` / `image_url` ของ PO จริง
+
 ## [2026-10-06] Load PO Hover Images Through Drive Proxy
 
 ### การเปลี่ยนแปลง

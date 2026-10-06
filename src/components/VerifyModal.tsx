@@ -39,6 +39,7 @@ interface VerifyModalProps {
   pos?: PurchaseOrder[];
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
+  trPrefix: string;
   onClose: () => void;
   onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean | Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
@@ -59,6 +60,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   pos = [],
   existingOrders = [],
   lineInboxItems = [],
+  trPrefix,
   onClose,
   onSaveOrder,
   onSwitchToPO,
@@ -81,12 +83,20 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [isRescanningAI, setIsRescanningAI] = useState(false);
   const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [hasAttachedImage, setHasAttachedImage] = useState(false);
+  const [isLoadingTrNumber, setIsLoadingTrNumber] = useState(false);
+  const [trLookupFailed, setTrLookupFailed] = useState(false);
+  const [trRetryCount, setTrRetryCount] = useState(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const trLookupGeneration = useRef(0);
+  const isExistingOrder = Boolean(orderData?.id && existingOrders.some(order => order.id === orderData.id));
 
   useEffect(() => {
     if (orderData) {
       setSaveToStoreDirectory(false);
       const normalized = { ...orderData };
+      if (!normalized.id || !existingOrders.some(order => order.id === normalized.id)) {
+        normalized.col1 = '';
+      }
       const c13 = Number(normalized.col13) || 0;
       const c14 = Number(normalized.col14) || 0;
       if (c13 > 0 && c14 > 0 && c13 >= c14 && !normalized.col15) {
@@ -167,6 +177,46 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
     setShowAllCols(false);
   }, [orderData, isOpen, billImage]);
+
+  useEffect(() => {
+    if (!isOpen || !orderData || isExistingOrder) {
+      setIsLoadingTrNumber(false);
+      return;
+    }
+
+    const generation = ++trLookupGeneration.current;
+    const controller = new AbortController();
+    setIsLoadingTrNumber(true);
+    setTrLookupFailed(false);
+    setSaveError('');
+    setForm(current => ({ ...current, col1: '' }));
+
+    fetch(`/api/orders/next-tr-number?prefix=${encodeURIComponent(trPrefix)}`, {
+      signal: controller.signal
+    })
+      .then(async response => {
+        const result = await response.json();
+        if (!response.ok || !result.success || typeof result.trNumber !== 'string') {
+          throw new Error(result.error || `อ่านเลข TR ไม่สำเร็จ (HTTP ${response.status})`);
+        }
+        if (generation === trLookupGeneration.current) {
+          setForm(current => ({ ...current, col1: result.trNumber }));
+        }
+      })
+      .catch(error => {
+        if (controller.signal.aborted || generation !== trLookupGeneration.current) return;
+        setTrLookupFailed(true);
+        setSaveError(error instanceof Error ? error.message : 'อ่านเลข TR จากฐานข้อมูลไม่สำเร็จ');
+      })
+      .finally(() => {
+        if (generation === trLookupGeneration.current) setIsLoadingTrNumber(false);
+      });
+
+    return () => {
+      controller.abort();
+      if (generation === trLookupGeneration.current) trLookupGeneration.current += 1;
+    };
+  }, [isOpen, orderData, isExistingOrder, trPrefix, billImage, trRetryCount]);
 
   // Sync billImage into currentImage when it arrives async (e.g. fetched from LINE API after modal opens)
   useEffect(() => {
@@ -512,7 +562,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       documentTitle: form.documentTitle || overrideExistingOrder?.documentTitle,
       docTypeEvidence: form.docTypeEvidence || overrideExistingOrder?.docTypeEvidence,
       docTypeConfidence: form.docTypeConfidence ?? overrideExistingOrder?.docTypeConfidence,
-      col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || 'TR-' + new Date().getFullYear() + '-' + Math.floor(100 + Math.random() * 900)),
+      col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || ''),
       col2: (form.col2 || '').trim(),
       col3: form.col3 || (selectedDocType === 'concrete' ? 'คอนกรีต' : 'ทั่วไป'),
       col4: form.col4 || '',
@@ -610,6 +660,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSaving) return;
+    if (isLoadingTrNumber) return;
+    if (!form.col1?.trim()) {
+      setSaveError('ยังไม่มีเลข TR จากฐานข้อมูลจริง กรุณาลองอ่านเลขใหม่ก่อนบันทึก');
+      setTrLookupFailed(true);
+      return;
+    }
 
     // Strict Mandatory Check: "ชื่อโครงการ (ช่อง 2)" must be present before confirming save
     if (!form.col2 || !form.col2.trim()) {
@@ -3145,9 +3201,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
                 <div className="flex items-center gap-2 flex-wrap">
                   {saveError && (
-                    <span role="alert" className="max-w-md text-xs font-semibold text-red-700">
-                      {saveError}
-                    </span>
+                    <div role="alert" className="max-w-md text-xs font-semibold text-red-700">
+                      <span>{saveError}</span>
+                      {trLookupFailed && (
+                        <button
+                          type="button"
+                          onClick={() => setTrRetryCount(count => count + 1)}
+                          className="ml-2 underline"
+                        >
+                          ลองอ่านเลข TR อีกครั้ง
+                        </button>
+                      )}
+                    </div>
                   )}
                   {!form.col2?.trim() && (
                     <span className="text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
@@ -3157,11 +3222,17 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    disabled={isSaving}
+                    disabled={isSaving || isLoadingTrNumber || !form.col1}
                     className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
                   >
                     <Save className="w-4 h-4" />
-                    <span>{isSaving ? 'กำลังย้ายรูปและบันทึก...' : 'ยืนยันบันทึกข้อมูลเอกสาร'}</span>
+                    <span>
+                      {isSaving
+                        ? 'กำลังย้ายรูปและบันทึก...'
+                        : isLoadingTrNumber
+                          ? 'กำลังอ่านเลข TR จากฐานข้อมูล...'
+                          : 'ยืนยันบันทึกข้อมูลเอกสาร'}
+                    </span>
                   </button>
                 </div>
               </div>

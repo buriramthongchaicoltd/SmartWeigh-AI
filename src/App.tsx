@@ -1652,7 +1652,6 @@ export default function App() {
       return;
     }
     const today = new Date().toISOString().split('T')[0];
-    const trPrefix = systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`;
     const targetDocType =
       activeTab === 'dest_wb' ? 'dest_weighbridge' :
       activeTab === 'tax_inv' ? 'tax_invoice' :
@@ -1660,7 +1659,7 @@ export default function App() {
 
     const newDraft: Partial<OrderRecord> = {
       docType: targetDocType,
-      col1: `${trPrefix}${Math.floor(100 + Math.random() * 900)}`,
+      col1: '',
       col2: currentUser.assignedProjects?.[0] || '',
       col3: '',
       col4: '',
@@ -1714,9 +1713,8 @@ export default function App() {
       return;
     }
     const today = new Date().toISOString().split('T')[0];
-    const trPrefix = systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`;
     const newDraft: Partial<OrderRecord> = {
-      col1: `${trPrefix}${Math.floor(100 + Math.random() * 900)}`,
+      col1: '',
       col2: currentUser.assignedProjects?.[0] || '',
       col3: store.category || '',
       col4: '',
@@ -2250,10 +2248,9 @@ export default function App() {
   // Quick action: Create an inbound ticket/bill linked directly to this PO
   const handleAddTicketForPO = (po: PurchaseOrder) => {
     const today = new Date().toISOString().split('T')[0];
-    const trPrefix = systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`;
     const firstItem = po.items?.[0];
     const newDraft: Partial<OrderRecord> = {
-      col1: `${trPrefix}${Math.floor(100 + Math.random() * 900)}`,
+      col1: '',
       col2: po.projectId || '',
       col3: po.category || '',
       col4: po.poNumber, // Link to this PO
@@ -2677,11 +2674,10 @@ export default function App() {
 
   const handleCreateOrderForProject = (projectName: string, location?: string, manager?: string) => {
     const today = new Date().toISOString().split('T')[0];
-    const trPrefix = systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`;
     const draftOrder: Partial<OrderRecord> = {
       id: 'ord-' + Date.now(),
       docType: 'delivery_order',
-      col1: `${trPrefix}${String(orders.length + 1).padStart(3, '0')}`,
+      col1: '',
       col2: projectName,
       col3: 'งานวัสดุก่อสร้าง',
       col7: today,
@@ -3138,6 +3134,7 @@ export default function App() {
         pos={pos}
         existingOrders={orders}
         lineInboxItems={lineInbox}
+        trPrefix={systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`}
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}
