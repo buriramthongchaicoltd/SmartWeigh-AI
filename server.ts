@@ -2939,7 +2939,6 @@ function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
   const cfg = {
     ...getStoredDbConfig(),
     ...(customCfg || {}),
-    supabaseAnonKey: (process.env.SUPABASE_ANON_KEY || '').trim(),
     supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
   };
   if (!cfg.supabaseUrl || !cfg.supabaseUrl.startsWith('http')) return null;

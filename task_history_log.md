@@ -57,6 +57,15 @@
 - `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check` ผ่าน
 - ตรวจ production login หลัง deploy; anon access ต้องยังได้รับอนุญาตจาก RLS policies ที่ใช้อยู่
 
+## [2026-10-06] Use Supabase Anon Key from Legacy Config
+
+### การเปลี่ยนแปลง
+- หยุดเขียนทับ anon key ที่ `getStoredDbConfig()` โหลดจาก `.supabase_config.json` ด้วยค่าว่างจาก environment ใน `getSupabaseClient()`
+
+### การตรวจสอบ
+- `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check` ผ่าน
+- ทดสอบ login API หลัง Render deploy ด้วยบัญชีทดสอบที่ไม่มีอยู่; คาดหวัง 401 เมื่อ DB พร้อม และไม่ใช่ 503
+
 ## [2026-10-05] Shorten LINE Bill Receipt Reply
 
 ### การเปลี่ยนแปลง
