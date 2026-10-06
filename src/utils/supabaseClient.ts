@@ -13,11 +13,11 @@ import {
 } from '../types';
 
 /**
- * 7-Table PostgreSQL DDL Schema from DATABASE_STORAGE_BLUEPRINT.md
+ * 8-Table PostgreSQL DDL Schema from DATABASE_STORAGE_BLUEPRINT.md
  * Ready for 1-click execution or copy-pasting into Supabase SQL Editor.
  */
 export const SUPABASE_SQL_DDL_SCHEMA = `-- ============================================================================
--- AUTOSTORE & 39-COLUMN ERP — SUPABASE POSTGRESQL SCHEMA (7 TABLES)
+-- AUTOSTORE & 39-COLUMN ERP — SUPABASE POSTGRESQL SCHEMA (8 TABLES)
 -- Reference: /DATABASE_STORAGE_BLUEPRINT.md
 -- ============================================================================
 

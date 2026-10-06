@@ -2824,7 +2824,6 @@ const CONFIG_FILE_PATH = path.resolve(__dirname, '.supabase_config.json');
 
 interface ServerDbConfig {
   supabaseUrl: string;
-  supabaseAnonKey: string;
   supabaseServiceRoleKey?: string;
   pgConnectionString?: string;
   isEnabled: boolean;
@@ -2847,11 +2846,10 @@ function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
 
     // Credentials are runtime-only secrets and must never be loaded from persisted config files.
   const supabaseUrl = (process.env.SUPABASE_URL?.trim() || fileConfig.supabaseUrl?.trim() || '').trim();
-  const supabaseAnonKey = (process.env.SUPABASE_ANON_KEY || fileConfig.supabaseAnonKey || '').trim();
   const supabaseServiceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const pgConnectionString = (process.env.DATABASE_URL || '').trim();
 
-  const configSource = process.env.SUPABASE_URL || process.env.SUPABASE_SERVICE_ROLE_KEY
+  const configSource = process.env.SUPABASE_URL?.trim() || process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || process.env.DATABASE_URL?.trim()
     ? 'env_var'
     : fileConfig.supabaseUrl?.trim()
     ? 'ui_config'
@@ -2859,7 +2857,6 @@ function getStoredDbConfig(): ServerDbConfig & { _source?: string } {
 
   return {
     supabaseUrl,
-    supabaseAnonKey,
     supabaseServiceRoleKey,
     pgConnectionString,
     isEnabled: fileConfig.isEnabled !== undefined ? fileConfig.isEnabled : true,
@@ -2883,7 +2880,6 @@ function saveStoredDbConfig(cfg: Partial<ServerDbConfig>) {
   };
   try {
     const {
-      supabaseAnonKey: _anonKey,
       supabaseServiceRoleKey: _serviceRoleKey,
       pgConnectionString: _connectionString,
       ...persisted
@@ -2967,7 +2963,7 @@ function getSupabaseClient(customCfg?: Partial<ServerDbConfig>) {
     supabaseServiceRoleKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
   };
   if (!cfg.supabaseUrl || !cfg.supabaseUrl.startsWith('http')) return null;
-  const key = cfg.supabaseServiceRoleKey || cfg.supabaseAnonKey;
+  const key = cfg.supabaseServiceRoleKey;
   if (!key) return null;
   return createClient(cfg.supabaseUrl, key, {
     auth: { persistSession: false }
@@ -2993,32 +2989,25 @@ app.get('/api/database/config', async (req: Request, res: Response) => {
         cfg.pgConnectionString
     );
 
-    // Mask sensitive values: show first 12 chars + ••• for display
-    const maskSecret = (val?: string) => val ? val.substring(0, 12) + '•••••••••••••••••••••••••••' : '';
-    const maskedPgConn = cfg.pgConnectionString
-      ? cfg.pgConnectionString.replace(/:([^:@]+)@/, ':••••••@')
-      : '';
-
     return res.json({
       success: true,
       config: {
         isConfigured,
         isEnabled: cfg.isEnabled,
-        // แสดง source เพื่อให้ UI บอกผู้ใช้ได้ว่า config มาจากไหน
-        configSource: cfg.supabaseServiceRoleKey || process.env.DATABASE_URL ? 'env_var' : (cfg as any)._source || 'none',
+        configSource: cfg._source || 'none',
+        supabaseUrlSource: process.env.SUPABASE_URL?.trim()
+          ? 'env_var'
+          : cfg.supabaseUrl
+          ? 'ui_config'
+          : 'none',
         mode: cfg.pgConnectionString
           ? 'postgres_direct'
           : cfg.supabaseUrl
           ? 'supabase_rest'
           : 'offline',
         supabaseUrl: cfg.supabaseUrl,
-        // Return masked values so UI can show "configured" state
-        supabaseAnonKey: maskSecret(cfg.supabaseAnonKey),
-        supabaseServiceRoleKey: maskSecret(cfg.supabaseServiceRoleKey),
-        hasAnonKey: Boolean(cfg.supabaseAnonKey),
         hasServiceKey: Boolean(cfg.supabaseServiceRoleKey),
         hasPgConnection: Boolean(cfg.pgConnectionString),
-        pgConnectionString: maskedPgConn,
         autoSyncIntervalMinutes: cfg.autoSyncIntervalMinutes,
         lastTestedAt: cfg.lastTestedAt || null
       }
@@ -3045,7 +3034,9 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
     });
 
     setImmediate(() => {
-      restoreConfigsFromSupabase().catch(() => {});
+      restoreConfigsFromSupabase().catch(err => {
+        console.error('[DB Config] Failed to restore cloud configs after save:', err);
+      });
     });
 
     return res.json({
@@ -3058,7 +3049,6 @@ app.post('/api/database/config', async (req: Request, res: Response) => {
         ),
         isEnabled: saved.isEnabled,
         supabaseUrl: saved.supabaseUrl,
-        hasAnonKey: Boolean(saved.supabaseAnonKey),
         hasServiceKey: Boolean(saved.supabaseServiceRoleKey),
         hasPgConnection: Boolean(saved.pgConnectionString)
       }
@@ -3084,6 +3074,7 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
     stores: false,
     projects: false,
     app_users: false,
+    system_config: false,
     billing_notes: false
   };
 
@@ -3124,6 +3115,7 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
           latencyMs,
           serverVersion: pingRes.rows[0]?.ver || 'PostgreSQL',
           tables: tablesStatus,
+          isSchemaReady: Object.values(tablesStatus).every(Boolean),
           message: 'เชื่อมต่อ PostgreSQL Database สำเร็จเรียบร้อยแล้ว'
         });
       } catch (qErr: any) {
@@ -3149,7 +3141,7 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
     return res.status(400).json({
       success: false,
       isConnected: false,
-      error: 'กรุณากรอก Supabase Project URL และ Anon Key หรือ Service Role Key ก่อนทดสอบ'
+      error: 'เซิร์ฟเวอร์ยังไม่มี Supabase Project URL หรือ SUPABASE_SERVICE_ROLE_KEY ใน Environment'
     });
   }
 
@@ -3159,24 +3151,31 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
 
     const checkTable = async (tableName: string) => {
       try {
-        const { count, error } = await client.from(tableName).select('id', { count: 'exact', head: true });
+        const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
+        const { count, error } = await client.from(tableName).select(primaryKey, { count: 'exact', head: true });
         if (!error) {
           tablesCounts[tableName] = count ?? 0;
           return true;
         }
         if (
           error.code === '42P01' ||
+          error.code === 'PGRST205' ||
           error.message?.includes('does not exist') ||
-          error.message?.includes('not found')
+          error.message?.includes('not found') ||
+          error.message?.includes('Could not find')
         ) {
           tablesErrors[tableName] = 'ไม่พบตารางในฐานข้อมูล';
           return false;
         }
-        // If error is permission/RLS or column issue, table exists but access is constrained
-        console.warn(`[DB Test] Table ${tableName} query notice:`, error.message);
+        if (error.code === '42501') {
+          console.warn(`[DB Test] Table ${tableName} access restricted:`, error.message);
+          tablesErrors[tableName] = 'พบตาราง แต่ไม่มีสิทธิ์อ่านข้อมูล';
+          return true;
+        }
+
+        console.warn(`[DB Test] Table ${tableName} check failed:`, error.message);
         tablesErrors[tableName] = error.message || 'ติดสิทธิ์ RLS หรือ Permission';
-        tablesCounts[tableName] = 0;
-        return true;
+        return false;
       } catch (err: any) {
         tablesErrors[tableName] = err?.message || 'Check failed';
         return false;
@@ -3237,7 +3236,7 @@ app.post('/api/database/init-schema', async (req: Request, res: Response) => {
             success: true,
             executedDirectly: true,
             ddl: SUPABASE_SQL_DDL_SCHEMA,
-            message: 'สร้างตาราง PostgreSQL ทั้ง 7 ตารางบน Supabase Cloud สำเร็จเรียบร้อยแล้ว!'
+            message: 'สร้างตาราง PostgreSQL ทั้ง 8 ตารางบน Supabase Cloud สำเร็จเรียบร้อยแล้ว!'
           });
         } catch (execErr: any) {
           client.release();

@@ -4,6 +4,19 @@
 
 ---
 
+## [2026-10-06] Correct Settings Connection and Schema Readiness
+
+### การเปลี่ยนแปลง
+- ปรับ backend Supabase client ให้ใช้ service-role key จาก Environment เท่านั้น ไม่ fallback ไป anon key ซึ่งถูก revoke สิทธิ์ตาม DDL; connection test จึงสะท้อน credential ที่ backend ต้องใช้จริง
+- แสดงแหล่งที่มาของ Project URL แยกจากสถานะ service-role key และหยุดส่งค่า key/connection string ที่ mask บางส่วนกลับไปหน้าเว็บ
+- เพิ่มการตรวจ `system_config` ให้ครบ 8 ตาราง โดยใช้ `config_key` แทน `id`; ความผิดพลาดอื่นนอกจาก permission error จะไม่ถูกรายงานเป็นตารางที่พร้อมใช้งาน
+- ปรับข้อความหน้า Settings สำหรับ Supabase/Google Drive และแจ้งข้อผิดพลาดการสร้าง schema แทนการกลืน error
+- ปรับ handover, blueprint และหัวข้อ DDL ให้ตรงกับพฤติกรรมและจำนวนตารางปัจจุบัน
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแจ้งเตือน bundle JavaScript ใหญ่กว่า 500 kB ตามขนาดแอปปัจจุบัน
+- ยังไม่ได้ deploy หรือทดสอบ Environment, DDL และ Google Apps Script บน production
+
 ## [2026-10-06] Hide Confirmed Bills from the LINE Inbox Queue
 
 ### การเปลี่ยนแปลง

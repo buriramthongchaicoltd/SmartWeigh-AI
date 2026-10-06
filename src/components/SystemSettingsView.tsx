@@ -109,9 +109,6 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   // Supabase Cloud & PostgreSQL Database State
   const [dbConfig, setDbConfig] = useState({
     supabaseUrl: '',
-    supabaseAnonKey: '',
-    supabaseServiceRoleKey: '',
-    pgConnectionString: '',
     isEnabled: true
   });
   const [dbStatus, setDbStatus] = useState<{
@@ -119,10 +116,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     isEnabled: boolean;
     mode: 'supabase_rest' | 'postgres_direct' | 'offline';
     supabaseUrl: string;
-    hasAnonKey: boolean;
+    supabaseUrlSource?: 'env_var' | 'ui_config' | 'none';
     hasServiceKey: boolean;
     hasPgConnection: boolean;
-    pgConnectionString?: string;
     isConnected?: boolean;
     latencyMs?: number;
     lastTestedAt?: string | null;
@@ -132,7 +128,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     tableErrors?: Record<string, string>;
     isSchemaReady?: boolean;
     serverVersion?: string;
-    configSource?: 'env_var' | 'ui_config' | 'none'; // แหล่งที่มาของ config
+    configSource?: 'env_var' | 'ui_config' | 'none';
   } | null>(null);
   const [isLoadingDbConfig, setIsLoadingDbConfig] = useState(false);
   const [isTestingDb, setIsTestingDb] = useState(false);
@@ -306,6 +302,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     try {
       const res = await fetch('/api/drive/config');
       const data = await res.json();
+      if (!res.ok || !data.success || !data.config) {
+        throw new Error(data.error || 'โหลดสถานะ Google Drive ไม่สำเร็จ');
+      }
       if (data.success && data.config) {
         setDriveStatus(prev => {
           const isConn = typeof data.config.isConnected === 'boolean'
@@ -340,6 +339,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       }
     } catch (err) {
       console.error('Failed to load drive config:', err);
+      showToast(`โหลดสถานะ Google Drive ไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsLoadingDriveConfig(false);
     }
@@ -362,8 +362,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       } else {
         showToast(data.error || 'บันทึกการตั้งค่า Google Drive ไม่สำเร็จ', 'info');
       }
-    } catch {
-      showToast('เกิดข้อผิดพลาดในการบันทึกการตั้งค่า Google Drive', 'info');
+    } catch (err) {
+      showToast(`บันทึกการตั้งค่า Google Drive ไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsSavingDrive(false);
     }
@@ -381,7 +381,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       setDriveStatus(prev => ({
         ...prev,
         ...data,
-        isConfigured: true,
+        isConfigured: data.success ? true : (prev?.isConfigured ?? false),
         isConnected: Boolean(data.success),
         message: data.message || data.error
       }));
@@ -403,6 +403,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
     try {
       const res = await fetch('/api/database/config');
       const data = await res.json();
+      if (!res.ok || !data.success || !data.config) {
+        throw new Error(data.error || 'โหลดสถานะฐานข้อมูลไม่สำเร็จ');
+      }
       if (data.success && data.config) {
         // Merge with existing dbStatus so isConnected/latencyMs from prior test-run are preserved
         setDbStatus(prev => ({
@@ -411,7 +414,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           isEnabled: data.config.isEnabled,
           mode: data.config.mode,
           supabaseUrl: data.config.supabaseUrl,
-          hasAnonKey: data.config.hasAnonKey,
+          supabaseUrlSource: data.config.supabaseUrlSource || 'none',
           hasServiceKey: data.config.hasServiceKey,
           hasPgConnection: data.config.hasPgConnection,
           lastTestedAt: data.config.lastTestedAt,
@@ -422,15 +425,12 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
         setDbConfig(prev => ({
           ...prev,
           supabaseUrl: data.config.supabaseUrl || '',
-          // Keep user-typed keys; don't overwrite with empty strings
-          supabaseAnonKey: prev.supabaseAnonKey || '',
-          supabaseServiceRoleKey: prev.supabaseServiceRoleKey || '',
-          pgConnectionString: prev.pgConnectionString || '',
           isEnabled: data.config.isEnabled !== undefined ? data.config.isEnabled : true
         }));
       }
     } catch (err) {
       console.error('Failed to load database config:', err);
+      showToast(`โหลดสถานะฐานข้อมูลไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsLoadingDbConfig(false);
     }
@@ -619,8 +619,8 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       } else {
         showToast(data.error || 'บันทึกการตั้งค่าไม่สำเร็จ', 'info');
       }
-    } catch (err: any) {
-      showToast('เกิดข้อผิดพลาดในการบันทึกการตั้งค่า', 'info');
+    } catch (err) {
+      showToast(`บันทึกการตั้งค่าฐานข้อมูลไม่สำเร็จ: ${err instanceof Error ? err.message : 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsSavingDb(false);
     }
@@ -638,10 +638,10 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       setDbStatus(prev => ({
         ...prev,
         ...data,
-        isConfigured: true,
+        isConfigured: Boolean(data.success && data.isConnected),
         isEnabled: dbConfig.isEnabled,
         supabaseUrl: dbConfig.supabaseUrl,
-        mode: data.mode || (dbConfig.pgConnectionString ? 'postgres_direct' : 'supabase_rest')
+        mode: data.mode || 'supabase_rest'
       }));
       if (data.success && data.isConnected) {
         showToast(`เชื่อมต่อสำเร็จ (${data.latencyMs} ms) — ${data.message}`);
@@ -652,7 +652,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
           handleSyncFromCloud();
         }
       } else {
-        showToast(data.error || 'เชื่อมต่อฐานข้อมูลไม่สำเร็จ กรุณาตรวจสอบ URL และ Key', 'info');
+        showToast(data.error || 'เชื่อมต่อไม่สำเร็จ ตรวจสอบ SUPABASE_URL และ SUPABASE_SERVICE_ROLE_KEY ใน Render Environment', 'info');
       }
     } catch (err: any) {
       showToast(`ทดสอบการเชื่อมต่อขัดข้อง: ${err?.message}`, 'info');
@@ -670,14 +670,17 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       });
       const data = await res.json();
       if (data.success && data.executedDirectly) {
-        showToast('รันสคริปต์สร้างตารางทั้ง 7 ตารางบน PostgreSQL สำเร็จเรียบร้อยแล้ว!');
+        showToast('รันสคริปต์สร้างตารางทั้ง 8 ตารางบน PostgreSQL สำเร็จเรียบร้อยแล้ว!');
         handleTestDbConnection();
-      } else {
+      } else if (data.success) {
         setShowSqlDdlModal(true);
         showToast('กรุณาคัดลอกสคริปต์ SQL ไปรันใน Supabase SQL Editor');
+      } else {
+        showToast(data.error || 'สร้างตารางอัตโนมัติไม่สำเร็จ', 'info');
       }
     } catch (err: any) {
       setShowSqlDdlModal(true);
+      showToast(`สร้างตารางอัตโนมัติไม่สำเร็จ: ${err?.message || 'ไม่สามารถติดต่อเซิร์ฟเวอร์ได้'}`, 'info');
     } finally {
       setIsInitializingSchema(false);
     }
@@ -746,7 +749,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const handleCopySqlDdl = () => {
     navigator.clipboard.writeText(SUPABASE_SQL_DDL_SCHEMA);
     setCopiedSql(true);
-    showToast('คัดลอกคำสั่ง SQL DDL 7 ตารางเรียบร้อยแล้ว');
+    showToast('คัดลอกคำสั่ง SQL DDL 8 ตารางเรียบร้อยแล้ว');
     setTimeout(() => setCopiedSql(false), 3000);
   };
 
@@ -1102,7 +1105,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               )}
             </div>
             <div className="text-[10px] text-slate-400 mt-1 truncate">
-              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 7 ตาราง'}
+              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 8 ตาราง'}
             </div>
           </div>
 
@@ -1956,45 +1959,46 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </div>
 
               {/* Banner: แจ้ง config source — แนะนำให้ใช้ env vars แทน ui config */}
-              {dbStatus && dbStatus.configSource !== 'env_var' && (
+              {dbStatus && (
+                (!dbStatus.hasPgConnection && !dbStatus.hasServiceKey) ||
+                (!dbStatus.hasPgConnection && !dbStatus.supabaseUrl)
+              ) && (
                 <div className={`rounded-xl border p-3.5 flex items-start gap-3 text-sm ${
-                  dbStatus.configSource === 'ui_config'
+                  dbStatus.configSource === 'ui_config' || dbStatus.supabaseUrlSource === 'ui_config'
                     ? 'bg-amber-50 border-amber-200'
                     : 'bg-red-50 border-red-200'
                 }`}>
                   <span className="text-xl mt-0.5 shrink-0">
-                    {dbStatus.configSource === 'ui_config' ? '⚠️' : '❌'}
+                    {dbStatus.configSource === 'ui_config' || dbStatus.supabaseUrlSource === 'ui_config' ? '⚠️' : '❌'}
                   </span>
                   <div>
-                    {dbStatus.configSource === 'ui_config' ? (
+                    {!dbStatus.hasServiceKey && (
                       <>
-                        <p className="font-bold text-amber-800">Config มาจาก UI — จะหายทุกครั้งที่ Redeploy!</p>
-                        <p className="text-amber-700 mt-1">ตั้งค่าความลับบน Render Dashboard เท่านั้น; API ใช้ service-role key จาก environment ฝั่งเซิร์ฟเวอร์ และไม่มี public database policy:</p>
-                        <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-amber-800 bg-amber-100 rounded-lg p-2">
-                          <li>SUPABASE_URL = {dbStatus.supabaseUrl || 'https://xxx.supabase.co'}</li>
-                          <li>SUPABASE_SERVICE_ROLE_KEY = runtime secret (ห้ามใส่ใน browser/Git)</li>
-                        </ul>
-                        <p className="text-amber-600 text-xs mt-1.5">วิธี: Render Dashboard → เลือก Service → <strong>Environment</strong> → Add Environment Variable → ตั้งครั้งเดียว ใช้ได้ตลอด ไม่หาย</p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="font-bold text-red-800">ยังไม่ได้ตั้งค่า Supabase</p>
-                        <p className="text-red-700 mt-1">กรุณาตั้งค่า Environment Variables บน Render Dashboard:</p>
-                        <ul className="mt-1.5 space-y-0.5 text-xs font-mono text-red-800 bg-red-100 rounded-lg p-2">
-                          <li>SUPABASE_URL</li>
-                          <li>SUPABASE_SERVICE_ROLE_KEY</li>
-                        </ul>
+                        <p className="font-bold text-red-800">ยังไม่มี service-role key สำหรับให้เซิร์ฟเวอร์เข้าถึงฐานข้อมูล</p>
+                        <p className="text-red-700 mt-1">ตั้งค่า SUPABASE_SERVICE_ROLE_KEY โดยใช้ service_role / secret key จาก Supabase Dashboard → Project Settings → API Keys แล้วเพิ่มใน Render Dashboard → เลือก Service → <strong>Environment</strong>.</p>
                       </>
                     )}
+                    {!dbStatus.supabaseUrl && !dbStatus.hasPgConnection && (
+                      <p className="text-red-700 mt-1">ยังไม่มี Project URL; เพิ่ม SUPABASE_URL จาก Supabase Project Settings → API ใน Render Environment.</p>
+                    )}
+                    {dbStatus.supabaseUrl && dbStatus.supabaseUrlSource !== 'env_var' && !dbStatus.hasServiceKey && (
+                      <p className="text-red-700 mt-1">Project URL มาจากค่าที่บันทึกผ่านแอป ซึ่งอาจหายเมื่อ Redeploy; แนะนำให้เพิ่ม SUPABASE_URL ใน Render Environment.</p>
+                    )}
+                    <p className="text-[11px] text-red-700 mt-1">อย่าวาง service-role key ในหน้านี้, browser หรือ Git.</p>
                   </div>
                 </div>
               )}
-              {dbStatus?.configSource === 'env_var' && (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 flex items-center gap-2.5 text-sm">
-                  <span className="text-emerald-600 text-lg">✅</span>
-                  <p className="text-emerald-800 font-medium">Config โหลดจาก Environment Variables — ไม่หายเมื่อ Redeploy</p>
+              {dbStatus?.hasServiceKey && dbStatus?.supabaseUrlSource === 'ui_config' && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                  service-role key โหลดจากเซิร์ฟเวอร์แล้ว แต่ Project URL ยังมาจากค่าที่บันทึกผ่านแอป ซึ่งอาจหายเมื่อ Redeploy; แนะนำให้ตั้ง <code className="font-mono font-bold">SUPABASE_URL</code> ใน Render Environment ด้วย
                 </div>
               )}
+              {dbStatus?.hasPgConnection || (dbStatus?.hasServiceKey && dbStatus?.supabaseUrlSource === 'env_var') ? (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 flex items-center gap-2.5 text-sm">
+                  <span className="text-emerald-600 text-lg">✅</span>
+                  <p className="text-emerald-800 font-medium">ค่าลับสำหรับเชื่อมต่อฐานข้อมูลโหลดจาก Environment ฝั่งเซิร์ฟเวอร์</p>
+                </div>
+              ) : null}
 
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -2012,7 +2016,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
                 >
                   {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-sky-400" />}
-                  <span>{copiedSql ? 'คัดลอก SQL แล้ว!' : 'คัดลอก SQL DDL 7 ตาราง'}</span>
+                  <span>{copiedSql ? 'คัดลอก SQL แล้ว!' : 'คัดลอก SQL DDL 8 ตาราง'}</span>
                 </button>
                 <a
                   href="https://supabase.com/dashboard"
@@ -2138,7 +2142,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4 text-emerald-600" />
                     <h4 className="text-sm font-bold text-slate-900">
-                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 7 ตาราง
+                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 8 ตาราง
                     </h4>
                   </div>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">
@@ -2153,8 +2157,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     { key: 'line_inbox', name: '3. line_inbox', desc: 'กล่องพักรูปบิล LINE OA' },
                     { key: 'stores', name: '4. stores', desc: 'ทะเบียนร้านค้า/คู่ค้า' },
                     { key: 'projects', name: '5. projects', desc: 'ทะเบียนโครงการก่อสร้าง' },
-                    { key: 'app_users', name: '6. app_users & config', desc: 'สิทธิ์ผู้ใช้งานและค่าระบบ' },
-                    { key: 'billing_notes', name: '7. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' }
+                    { key: 'app_users', name: '6. app_users', desc: 'บัญชีผู้ใช้และสิทธิ์การใช้งาน' },
+                    { key: 'system_config', name: '7. system_config', desc: 'ค่าตั้งค่าระบบที่บันทึกบน Cloud' },
+                    { key: 'billing_notes', name: '8. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' }
                   ].map(t => {
                     const isFound = dbStatus?.tables ? dbStatus.tables[t.key] : false;
                     const rowCount = dbStatus?.tableCounts ? dbStatus.tableCounts[t.key] : undefined;
@@ -2646,7 +2651,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     className="w-full px-3 py-2 rounded-xl border border-emerald-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-600 bg-white"
                   />
                   <p className="text-[11px] text-emerald-800">
-                    ตั้งค่า secret แบบสุ่มอย่างน้อย 32 ตัวอักษรเป็น Render Environment Variable <code>GOOGLE_APPS_SCRIPT_SHARED_SECRET</code> และตั้งค่าเดียวกันใน Apps Script → Project Settings → Script Properties ชื่อ <code>SMARTWEIGH_SHARED_SECRET</code> ก่อน deploy รุ่นล่าสุด (อย่าวาง secret ในหน้านี้)
+                    สร้าง secret แบบสุ่มยาวอย่างน้อย 32 ตัวอักษร แล้วใส่ค่าเดียวกันทั้ง 2 จุด: Render → Service → Environment → <code>GOOGLE_APPS_SCRIPT_SHARED_SECRET</code> และ Apps Script → Project Settings → Script Properties → <code>SMARTWEIGH_SHARED_SECRET</code>. จากนั้น deploy Apps Script รุ่นล่าสุดและ redeploy service (อย่าวาง secret ในหน้านี้)
                   </p>
                   <div className="flex items-center justify-between pt-1">
                     <button
@@ -2756,7 +2761,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-sky-400" />
-                <h4 className="text-sm font-bold">ชุดคำสั่ง SQL DDL สำหรับสร้าง 7 ตารางบน Supabase</h4>
+                <h4 className="text-sm font-bold">ชุดคำสั่ง SQL DDL สำหรับสร้าง 8 ตารางบน Supabase</h4>
               </div>
               <button
                 type="button"
