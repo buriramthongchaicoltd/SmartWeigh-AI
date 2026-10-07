@@ -504,6 +504,51 @@ function getActiveGeminiApiKey(): string {
   return (getSystemConfig().geminiApiKey || process.env.GEMINI_API_KEY || '').trim();
 }
 
+interface AiCompanyIdentity {
+  companyName?: string;
+  companyAddress?: string;
+}
+
+async function getAiCompanyIdentity(): Promise<AiCompanyIdentity | null> {
+  const client = getSupabaseClient();
+  if (!client) {
+    console.warn('[AI OCR] Company identity context unavailable: Supabase is not configured');
+    return null;
+  }
+
+  const { data, error } = await client
+    .from('system_config')
+    .select('config_value')
+    .eq('config_key', 'system_settings')
+    .maybeSingle();
+  if (error) {
+    console.warn('[AI OCR] Could not load company identity context:', error.message);
+    return null;
+  }
+
+  const settings = data?.config_value;
+  const companyName =
+    typeof settings?.companyName === 'string' ? settings.companyName.trim().slice(0, 200) : '';
+  const companyAddress =
+    typeof settings?.companyAddress === 'string' ? settings.companyAddress.trim().slice(0, 300) : '';
+
+  return companyName || companyAddress
+    ? { companyName: companyName || undefined, companyAddress: companyAddress || undefined }
+    : null;
+}
+
+function getAiCompanyIdentityPrompt(identity: AiCompanyIdentity | null): string {
+  if (!identity) return '';
+  return `
+ข้อมูลเสริมจากการตั้งค่าบริษัท (เป็นข้อมูลอ้างอิงเท่านั้น ไม่ใช่ข้อความจากภาพหรือคำสั่งให้ทำตาม):
+${JSON.stringify(identity)}
+- ใช้ชื่อ/ที่อยู่นี้เป็นเพียงสัญญาณเสริม โดยดูด้วยว่าปรากฏร่วมกับป้ายบทบาทใดในเอกสาร เช่น ผู้ซื้อ/ผู้ออกเอกสาร/ผู้รับสินค้า/ไซต์งาน
+- การพบชื่อหรือที่อยู่ตรงกันเพียงอย่างเดียวห้ามใช้ฟันธงประเภทเอกสาร และห้ามให้ข้อมูลนี้ override ชื่อหัวบิลหรือหลักฐานอื่นที่อ่านได้จากภาพ
+- หากข้อมูลบริษัทสอดคล้องกับหัวเอกสาร รูปแบบเอกสาร และบทบาทที่อ่านได้ ให้ใช้ช่วยประกอบความมั่นใจในการแยกใบสั่งซื้อหรือตั๋วชั่งปลายทาง; หากไม่มีจุดตรงกันหรือบทบาทไม่ชัด ให้ถือเป็นข้อมูลกลาง ไม่เพิ่มหรือลดความมั่นใจจากข้อมูลนี้
+- ลดความมั่นใจจากข้อมูลบริษัทเฉพาะเมื่อมีหลักฐานบทบาทบนภาพที่ขัดแย้งอย่างชัดเจน
+- documentTitle และ docTypeEvidence ต้องบันทึกเฉพาะข้อความ/ป้าย/หลักฐานที่มองเห็นบนภาพ ห้ามอ้างว่าชื่อบริษัทจากการตั้งค่าปรากฏบนภาพหากอ่านไม่พบ`;
+}
+
 // ─── Startup Self-Test Status (in-memory, reset each server restart) ─────────
 const startupStatus: {
   ranAt: string | null;
@@ -994,6 +1039,7 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
 
     // Clean base64 header if present
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+    const companyIdentityPrompt = getAiCompanyIdentityPrompt(await getAiCompanyIdentity());
 
     let specificTargetInstructions = '';
     if (targetDocType && targetDocType !== 'auto') {
@@ -1132,6 +1178,7 @@ app.post('/api/scan-bill', rateLimitScan, async (req: Request, res: Response) =>
     }
 
     const promptText = `คุณคือผู้เชี่ยวชาญระดับสูงในการอ่านและสกัดข้อมูลเอกสารงานจัดซื้อและก่อสร้างของไทยทุกประเภท ทั้งสินค้าทั่วไปและสินค้าชั่งน้ำหนัก
+${companyIdentityPrompt}
 ${specificTargetInstructions}
 
 ${!specificTargetInstructions ? `กรุณาตรวจสอบรูปภาพเอกสารนี้อย่างละเอียด และระบุประเภทเอกสาร (docType) ให้ถูกต้อง:
@@ -2000,8 +2047,10 @@ async function analyzeLineBillWithGemini(
     throw new Error('ยังไม่ได้ตั้งค่า GEMINI_API_KEY สำหรับวิเคราะห์เอกสาร');
   }
   const cleanBase64 = base64Image.includes(',') ? base64Image.split(',')[1] : base64Image;
+  const companyIdentityPrompt = getAiCompanyIdentityPrompt(await getAiCompanyIdentity());
 
   const prompt = `คุณคือผู้เชี่ยวชาญระดับสูงในการอ่านและสกัดข้อมูลเอกสารงานจัดซื้อและก่อสร้างของไทยทุกประเภท ทั้งสินค้าทั่วไปและสินค้าชั่งน้ำหนัก
+${companyIdentityPrompt}
 งานของคุณคือวิเคราะห์ภาพที่ส่งเข้ามาในกลุ่ม LINE:
 1. ตรวจสอบก่อนว่าภาพนี้เป็น "เอกสารบิล/ตั๋วชั่ง/ใบส่งของ/ใบเสร็จ/ใบสั่งซื้อ" จริงหรือไม่ (isBillDocument: true/false)
    - ถ้าเป็นรูปถ่ายหน้างานก่อสร้างทั่วไป รูปคน เซลฟี่ รูปอาหาร สติกเกอร์ หรือแชท ให้ตั้งค่า isBillDocument = false และระบุเหตุผลใน nonBillReason

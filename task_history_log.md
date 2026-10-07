@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Use Company Settings as Supporting OCR Classification Evidence
+
+### การเปลี่ยนแปลง
+- เพิ่มการอ่านชื่อและที่อยู่บริษัทจาก `system_config.system_settings` ฝั่ง server แล้วแนบเป็นสัญญาณประกอบให้ OCR ทั้ง `/api/scan-bill` และการวิเคราะห์ภาพจาก LINE
+- กำชับให้ตรวจบทบาทที่พิมพ์ในภาพและห้ามใช้ชื่อ/ที่อยู่ตรงกันอย่างเดียวฟันธงหรือ override หัวบิล/หลักฐานภาพ; `documentTitle` และ `docTypeEvidence` ยังคงอ้างเฉพาะสิ่งที่เห็นในภาพ
+- กรณีอ่านค่าตั้งค่าไม่ได้ ระบบแจ้งเหตุใน server log และ OCR ทำงานต่อโดยไม่แนบหลักฐานเสริม
+- อัปเดต Handover และ Database Storage Blueprint; ไม่มีการเปลี่ยน schema
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Show Linked Weighbridge Images on Hover in the Main Table
 
 ### การเปลี่ยนแปลง
