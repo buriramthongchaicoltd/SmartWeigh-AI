@@ -5881,11 +5881,12 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
 // ใช้ตอน verify บิลจาก LINE inbox เพื่อตั้งชื่อตามประเภท/วันที่/เลขที่เอกสาร แล้วย้ายไป Zone ที่ถูกต้อง
 app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
   try {
-    const token = await getDriveAccessToken();
     const cfg = getStoredDriveConfig();
-    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+    const isGasMode = cfg.connectionMode === 'gas';
+    const token = isGasMode ? null : await getDriveAccessToken();
+    const shouldUseGasFallback = !token && Boolean(cfg.gasWebAppUrl);
 
-    if (!token && !isGasMode) {
+    if (!token && !isGasMode && !shouldUseGasFallback) {
       return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
     }
 
@@ -5932,7 +5933,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     const newFileName = `${prefix}_${safeDate}_${safeDocNo}.jpg`;
 
     // A) GAS Mode
-    if (isGasMode && cfg.gasWebAppUrl) {
+    if ((isGasMode || shouldUseGasFallback) && cfg.gasWebAppUrl) {
       const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
         action: 'rename_and_move',
         rootFolderId: cfg.rootFolderId,
