@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Group Origin Tickets with Their DO by Shared TR
+
+### การเปลี่ยนแปลง
+- แก้กรณีตั๋วชั่งต้นทางและ DO ใช้ TR เดียวกันแต่ไม่มี `matchedOriginDoId` ทำให้ยังแสดงเป็นสองแถวในตารางหลัก
+- จัดตั๋วชั่งไว้ใต้ DO เมื่อมีความสัมพันธ์ตรง หรือเมื่อเลข TR ตรงกันและพบ DO ที่ตรงเพียงรายการเดียว; หากมีหลาย DO ใน TR เดียวกันไม่จับกลุ่มอัตโนมัติ
+- คงข้อมูลเอกสารและรูปเป็น records แยกในฐานข้อมูล; เปลี่ยนเฉพาะการแสดงผลในตารางหลักให้เป็นหนึ่งแถวต่อชุด DO
+- อัปเดต Handover และ Database Storage Blueprint
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Allow Shared TR Within a Linked Document Bundle
 
 ### การเปลี่ยนแปลง

@@ -261,16 +261,14 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   }, [orders]);
 
   const pairedOriginWeighbridgesByDoId = useMemo(() => {
-    const eligibleDeliveryOrderIds = new Set(
-      orders
-        .filter(order =>
-          order.docType !== 'weighbridge' &&
-          order.docType !== 'dest_weighbridge' &&
-          order.docType !== 'tax_invoice'
-        )
-        .map(order => order.id)
+    const eligibleDeliveryOrders = orders.filter(order =>
+      order.docType !== 'weighbridge' &&
+      order.docType !== 'dest_weighbridge' &&
+      order.docType !== 'tax_invoice'
     );
+    const eligibleDeliveryOrderIds = new Set(eligibleDeliveryOrders.map(order => order.id));
     const ticketsByDoId = new Map<string, OrderRecord[]>();
+    const groupedTicketIds = new Set<string>();
 
     orders.forEach(order => {
       if (
@@ -283,6 +281,30 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       const tickets = ticketsByDoId.get(order.matchedOriginDoId) || [];
       tickets.push(order);
       ticketsByDoId.set(order.matchedOriginDoId, tickets);
+      groupedTicketIds.add(order.id);
+    });
+
+    const deliveryOrdersByTr = new Map<string, OrderRecord[]>();
+    eligibleDeliveryOrders.forEach(order => {
+      const trNumber = order.col1.trim();
+      if (!trNumber) return;
+      const sameTrOrders = deliveryOrdersByTr.get(trNumber) || [];
+      sameTrOrders.push(order);
+      deliveryOrdersByTr.set(trNumber, sameTrOrders);
+    });
+
+    orders.forEach(order => {
+      if (order.docType !== 'weighbridge' || groupedTicketIds.has(order.id)) return;
+      const trNumber = order.col1.trim();
+      if (!trNumber) return;
+      const matchingDeliveryOrders = deliveryOrdersByTr.get(trNumber) || [];
+      if (matchingDeliveryOrders.length !== 1) return;
+
+      const deliveryOrderId = matchingDeliveryOrders[0].id;
+      const tickets = ticketsByDoId.get(deliveryOrderId) || [];
+      tickets.push(order);
+      ticketsByDoId.set(deliveryOrderId, tickets);
+      groupedTicketIds.add(order.id);
     });
 
     return ticketsByDoId;
