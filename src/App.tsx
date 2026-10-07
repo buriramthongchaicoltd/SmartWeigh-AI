@@ -10,6 +10,7 @@ import { LoginModal } from './components/LoginModal';
 import { FirstPasswordChangeModal } from './components/FirstPasswordChangeModal';
 import {
   OrderRecord,
+  DocumentType,
   StoreMerchant,
   PurchaseOrder,
   ProjectRecord,
@@ -682,6 +683,86 @@ export default function App() {
     }
   }, [showToast]);
 
+  const deleteLineInboxItem = React.useCallback(async (id: string): Promise<void> => {
+    if (!currentPermissions.canDeleteOrder) {
+      throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
+    }
+    lineInboxDeleteCountRef.current += 1;
+    lineInboxSyncRevisionRef.current += 1;
+    try {
+      if (saveDbTimerRef.current.line_inbox) {
+        clearTimeout(saveDbTimerRef.current.line_inbox);
+        saveDbTimerRef.current.line_inbox = undefined;
+      }
+      dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
+      await Promise.all(
+        [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
+      );
+
+      const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inboxId: id })
+      });
+      const driveResult = await driveResponse.json();
+      if (!driveResponse.ok || !driveResult.success) {
+        throw new Error(driveResult.error || 'ลบไฟล์จาก Google Drive ไม่สำเร็จ; ยังไม่ได้ลบรายการ');
+      }
+
+      const dbResponse = await fetch('/api/database/delete-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table: 'line_inbox', id })
+      });
+      const dbResult = await dbResponse.json();
+      if (!dbResponse.ok || !dbResult.success) {
+        throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
+      }
+      setLineInbox(prev => prev.filter(item => item.id !== id));
+      showToast(driveResult.deleted
+        ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
+        : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
+    } finally {
+      lineInboxDeleteCountRef.current -= 1;
+      lineInboxSyncRevisionRef.current += 1;
+    }
+  }, [currentPermissions, showToast]);
+
+  const checkLineInboxDuplicate = React.useCallback(async (
+    docType: DocumentType,
+    billNo: string,
+    storeName: string,
+    inboxId: string
+  ): Promise<{ code: string; billNo: string; storeName: string; reason: string } | null> => {
+    const response = await fetch('/api/line/check-duplicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ docType, billNo, storeName, excludeInboxId: inboxId })
+    });
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || 'ตรวจสอบรายการซ้ำใน Supabase ไม่สำเร็จ');
+    }
+    return result.matches?.[0] || null;
+  }, []);
+
+  const resolveDuplicateInboxBeforeSave = React.useCallback(async (
+    inboxId: string,
+    docType: DocumentType,
+    billNo: string,
+    storeName: string
+  ): Promise<boolean> => {
+    const duplicate = await checkLineInboxDuplicate(docType, billNo, storeName, inboxId);
+    if (!duplicate) return false;
+    const confirmedDuplicate = window.confirm(
+      `พบรายการที่ตรงกันทั้งประเภทเอกสาร เลขที่ และชื่อร้าน:\n${duplicate.reason}\n\n` +
+      'ตกลง = ยืนยันว่าเป็นบิลซ้ำและลบรายการนี้พร้อมรูป\nยกเลิก = ไม่ยืนยันว่าซ้ำ และดำเนินการบันทึกตรวจรับต่อ'
+    );
+    if (!confirmedDuplicate) return false;
+    await deleteLineInboxItem(inboxId);
+    return true;
+  }, [checkLineInboxDuplicate, deleteLineInboxItem]);
+
   useEffect(() => {
     if (!isDbLoaded) return;
     debouncedSyncToDb('orders', orders);
@@ -1295,6 +1376,32 @@ export default function App() {
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
   const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
     const isExistingRecord = orders.some(o => o.id === order.id);
+    if (order.lineInboxId && !isExistingRecord) {
+      const inboxItem = lineInbox.find(item => item.id === order.lineInboxId);
+      if (!inboxItem) {
+        showToast('ไม่พบรายการต้นทางในกล่องพัก LINE กรุณาโหลดรายการใหม่ก่อนบันทึก', 'error');
+        return false;
+      }
+      const billNo = order.docType === 'dest_weighbridge'
+        ? order.col17
+        : order.docType === 'purchase_order'
+          ? order.col4
+          : order.col6;
+      if (!billNo?.trim() || !order.col8?.trim()) {
+        showToast('กรุณาระบุประเภทเอกสาร เลขที่เอกสาร และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ', 'info');
+        return false;
+      }
+      try {
+        if (await resolveDuplicateInboxBeforeSave(order.lineInboxId, order.docType || 'delivery_order', billNo, order.col8)) {
+          showToast('ยืนยันบิลซ้ำแล้ว ลบรายการในกล่องพักพร้อมรูปเรียบร้อย');
+          return true;
+        }
+      } catch (error: any) {
+        showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        return false;
+      }
+    }
+
     if (!isExistingRecord) {
       const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
         d => d.level === 'exact' || d.level === 'suspected'
@@ -1748,6 +1855,7 @@ export default function App() {
           return {
             ...item,
             status: 'verified' as const,
+            duplicateInfo: undefined,
             verifiedOrderId: order.col1,
             verifiedBy: currentUser.fullName,
             verifiedAt: reviewedAt,
@@ -2107,7 +2215,32 @@ export default function App() {
   const handleSavePO = async (inputPO: PurchaseOrder): Promise<boolean> => {
     let savedPO = inputPO;
     const isExistingPO = pos.some(p => p.id === savedPO.id);
-    if (!isExistingPO) {
+    if (savedPO.lineInboxId && !isExistingPO) {
+      const inboxItem = lineInbox.find(item => item.id === savedPO.lineInboxId);
+      if (!inboxItem) {
+        showToast('ไม่พบรายการต้นทางในกล่องพัก LINE กรุณาโหลดรายการใหม่ก่อนบันทึก PO', 'error');
+        return false;
+      }
+      if (!savedPO.poNumber?.trim() || !savedPO.storeName?.trim()) {
+        showToast('กรุณาระบุเลขที่ PO และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ', 'info');
+        return false;
+      }
+      try {
+        if (await resolveDuplicateInboxBeforeSave(
+          savedPO.lineInboxId,
+          'purchase_order',
+          savedPO.poNumber,
+          savedPO.storeName
+        )) {
+          showToast('ยืนยันบิลซ้ำแล้ว ลบรายการในกล่องพักพร้อมรูปเรียบร้อย');
+          return true;
+        }
+      } catch (error: any) {
+        showToast(`ตรวจบิลซ้ำก่อนบันทึก PO ไม่สำเร็จ: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        return false;
+      }
+    }
+    if (!isExistingPO && !savedPO.lineInboxId) {
       const blockingPODups = checkDuplicatePO(savedPO, pos, savedPO.image);
       if (blockingPODups.length > 0) {
         showToast(`🚫 บล็อกการนำเข้า PO ซ้ำ: เลขที่ ${blockingPODups[0].matchedPO.poNumber} มีอยู่ในระบบแล้ว`);
@@ -2154,6 +2287,7 @@ export default function App() {
           ...inboxItem,
           driveFileLocation: 'zone_01',
           status: 'verified',
+          duplicateInfo: undefined,
           verifiedOrderId: savedPO.poNumber,
           verifiedBy: currentUser.fullName,
           verifiedAt,
@@ -3109,48 +3243,7 @@ export default function App() {
                 });
               }}
               onDeleteInboxItem={async (id) => {
-                if (!currentPermissions.canDeleteOrder) {
-                  throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
-                }
-                lineInboxDeleteCountRef.current += 1;
-                lineInboxSyncRevisionRef.current += 1;
-                try {
-                  if (saveDbTimerRef.current.line_inbox) {
-                    clearTimeout(saveDbTimerRef.current.line_inbox);
-                    saveDbTimerRef.current.line_inbox = undefined;
-                  }
-                  dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
-                  await Promise.all(
-                    [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
-                  );
-
-                  const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ inboxId: id })
-                  });
-                  const driveResult = await driveResponse.json();
-                  if (!driveResponse.ok || !driveResult.success) {
-                    throw new Error(driveResult.error || 'ลบไฟล์จาก Google Drive ไม่สำเร็จ; ยังไม่ได้ลบรายการ');
-                  }
-
-                  const dbResponse = await fetch('/api/database/delete-record', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ table: 'line_inbox', id })
-                  });
-                  const dbResult = await dbResponse.json();
-                  if (!dbResponse.ok || !dbResult.success) {
-                    throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
-                  }
-                  setLineInbox(prev => prev.filter(i => i.id !== id));
-                  showToast(driveResult.deleted
-                    ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
-                    : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
-                } finally {
-                  lineInboxDeleteCountRef.current -= 1;
-                  lineInboxSyncRevisionRef.current += 1;
-                }
+                await deleteLineInboxItem(id);
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}

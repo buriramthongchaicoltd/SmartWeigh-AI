@@ -693,6 +693,102 @@ function getLineInboxPrimaryDocumentNumber(
   return (value || '').toString().trim();
 }
 
+type LineInboxDuplicateMatch = {
+  source: 'line_inbox' | 'orders' | 'purchase_orders';
+  code: string;
+  billNo: string;
+  storeName: string;
+  reason: string;
+};
+
+async function findLineInboxDuplicate(
+  client: ReturnType<typeof getSupabaseClient>,
+  docType: DocumentType,
+  billNo: string,
+  storeName: string,
+  excludeInboxId?: string
+): Promise<LineInboxDuplicateMatch | null> {
+  if (!client || !billNo.trim() || !storeName.trim()) return null;
+
+  const normalizedBillNo = normalizeDocNoServer(billNo);
+  const normalizedStore = normalizeOcrPartyName(storeName);
+  if (!normalizedBillNo || !normalizedStore) return null;
+  const billNoPattern = billNo.trim().replace(/[\\%_]/g, '\\$&');
+
+  const { data: inboxRows, error: inboxError } = await client
+    .from('line_inbox')
+    .select('id,doc_number,store_name,detected_doc_type,status,is_bill_document')
+    .ilike('doc_number', billNoPattern)
+    .eq('detected_doc_type', docType)
+    .neq('id', excludeInboxId || '')
+    .limit(50);
+  if (inboxError) throw new Error(`ตรวจรายการซ้ำในกล่องพัก LINE ไม่สำเร็จ: ${inboxError.message}`);
+
+  const matchingInbox = (inboxRows || []).find(row =>
+    row.status !== 'ignored_non_bill' &&
+    row.is_bill_document !== false &&
+    normalizeDocNoServer(row.doc_number) === normalizedBillNo &&
+    normalizeOcrPartyName(row.store_name) === normalizedStore
+  );
+  if (matchingInbox) {
+    return {
+      source: 'line_inbox',
+      code: matchingInbox.id,
+      billNo: matchingInbox.doc_number || billNo,
+      storeName: matchingInbox.store_name || storeName,
+      reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} ตรงกับบิลในกล่องพัก LINE (${matchingInbox.id})`
+    };
+  }
+
+  if (docType === 'purchase_order') {
+    const { data: poRows, error: poError } = await client
+      .from('purchase_orders')
+      .select('id,po_number,store_name')
+      .ilike('po_number', billNoPattern)
+      .limit(50);
+    if (poError) throw new Error(`ตรวจรายการ PO ซ้ำไม่สำเร็จ: ${poError.message}`);
+    const matchingPO = (poRows || []).find(row =>
+      normalizeDocNoServer(row.po_number) === normalizedBillNo &&
+      normalizeOcrPartyName(row.store_name) === normalizedStore
+    );
+    if (matchingPO) {
+      return {
+        source: 'purchase_orders',
+        code: matchingPO.po_number || matchingPO.id,
+        billNo: matchingPO.po_number || billNo,
+        storeName: matchingPO.store_name || storeName,
+        reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} มีอยู่ในทะเบียน PO (${matchingPO.po_number || matchingPO.id})`
+      };
+    }
+    return null;
+  }
+
+  const primaryNumberColumn = docType === 'dest_weighbridge' ? 'col17' : 'col6';
+  const { data: orderRows, error: orderError } = await client
+    .from('orders')
+    .select('id,doc_type,col1,col6,col17,col8,line_inbox_id')
+    .eq('doc_type', docType)
+    .ilike(primaryNumberColumn, billNoPattern)
+    .limit(50);
+  if (orderError) throw new Error(`ตรวจรายการเอกสารที่บันทึกแล้วไม่สำเร็จ: ${orderError.message}`);
+  const matchingOrder = (orderRows || []).find(row =>
+    row.line_inbox_id !== excludeInboxId &&
+    normalizeDocNoServer(primaryNumberColumn === 'col17' ? row.col17 : row.col6) === normalizedBillNo &&
+    normalizeOcrPartyName(row.col8) === normalizedStore
+  );
+  if (matchingOrder) {
+    const matchedBillNo = primaryNumberColumn === 'col17' ? matchingOrder.col17 : matchingOrder.col6;
+    return {
+      source: 'orders',
+      code: matchingOrder.col1 || matchingOrder.id,
+      billNo: matchedBillNo || billNo,
+      storeName: matchingOrder.col8 || storeName,
+      reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} มีบันทึกในระบบแล้ว (${matchingOrder.col1 || matchingOrder.id})`
+    };
+  }
+  return null;
+}
+
 function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValue: unknown = 0) {
   const gross = Number(grossValue) || 0;
   const tare = Number(tareValue) || 0;
@@ -2559,56 +2655,38 @@ app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
   return res.json({ success: true, remaining: lineWebhookInboxQueue.length });
 });
 
-// 2.5 Legacy duplicate lookup endpoint; current review flow leaves duplicate decisions to the user.
+// Duplicate lookup for LINE Inbox uses document type, document number, and store name together.
 app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
   try {
-    const { billNo, storeName, excludeInboxId } = req.body || {};
-    if (!billNo) {
-      return res.json({ isDuplicate: false, matches: [] });
+    const { docType, billNo, storeName, excludeInboxId } = req.body || {};
+    if (
+      !OCR_DOCUMENT_TYPES.includes(docType) ||
+      typeof billNo !== 'string' || !billNo.trim() ||
+      typeof storeName !== 'string' || !storeName.trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'ต้องระบุประเภทเอกสาร เลขที่เอกสาร และชื่อร้านให้ครบก่อนตรวจรายการซ้ำ'
+      });
     }
     const client = getSupabaseClient();
-    const matches: Array<{ source: string; code: string; billNo: string; vendor: string; reason: string }> = [];
-
-    if (client) {
-      // ตรวจสอบใน orders (col6 = DO No., col17 = ตั๋วชั่ง No.)
-      const [ordersRes, inboxRes] = await Promise.all([
-        client.from('orders').select('col1,col6,col8,col17').or(`col6.eq.${billNo},col17.eq.${billNo}`).limit(5),
-        client.from('line_inbox').select('id,doc_number,store_name,status').eq('doc_number', billNo).neq('id', excludeInboxId || '').in('status', ['verified']).limit(5)
-      ]);
-
-      if (ordersRes.data) {
-        for (const row of ordersRes.data) {
-          const matchedNo = isServerDocMatch(row.col6, billNo) || isServerDocMatch(row.col17, billNo);
-          const vendorMatch = !storeName || !row.col8 || row.col8.trim().toLowerCase() === storeName.trim().toLowerCase();
-          if (matchedNo && vendorMatch) {
-            matches.push({
-              source: 'orders',
-              code: row.col1 || '',
-              billNo: row.col6 || row.col17 || billNo,
-              vendor: row.col8 || storeName || '',
-              reason: `เลขที่บิล ${billNo} มีบันทึกใบ DO แล้ว (${row.col1 || 'ในระบบ'})`
-            });
-          }
-        }
-      }
-
-      if (inboxRes.data) {
-        for (const row of inboxRes.data) {
-          matches.push({
-            source: 'line_inbox',
-            code: row.id || '',
-            billNo: row.doc_number || billNo,
-            vendor: row.store_name || storeName || '',
-            reason: `เลขที่บิล ${billNo} ถูกตรวจรับไปแล้วใน LINE Inbox (id=${row.id})`
-          });
-        }
-      }
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase จึงตรวจบิลซ้ำไม่ได้' });
     }
-
-    return res.json({ isDuplicate: matches.length > 0, matches });
+    const match = await findLineInboxDuplicate(
+      client,
+      docType,
+      billNo,
+      storeName,
+      typeof excludeInboxId === 'string' ? excludeInboxId : undefined
+    );
+    return res.json({ success: true, isDuplicate: Boolean(match), matches: match ? [match] : [] });
   } catch (err: any) {
     console.error('[line/check-duplicate] error:', err?.message);
-    return res.json({ isDuplicate: false, matches: [], error: err?.message });
+    return res.status(500).json({
+      success: false,
+      error: `ตรวจบิลซ้ำไม่สำเร็จ: ${err?.message || 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
   }
 });
 
@@ -2833,9 +2911,25 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         const billNo = getLineInboxPrimaryDocumentNumber(analysis.detectedDocType, analysis.extractedData);
         const storeName = analysis.extractedData.col8 || '';
 
-        // กฎใหม่: เก็บบิลไว้เสมอ ไม่ว่าจะอ่านเลขที่ได้หรือไม่
-        // ถ้าอ่านไม่ได้ → status = 'scan_failed' (เก็บรูปไว้, คีย์มือหรือสแกนซ้ำภายหลังได้)
-        // การเช็คบิลซ้ำจะทำตอนบันทึกตรวจรับ (Verify) เท่านั้น
+        inboxItem.duplicateInfo = undefined;
+        if (billNo && storeName) {
+          try {
+            const duplicateMatch = await findLineInboxDuplicate(client!, analysis.detectedDocType, billNo, storeName, inboxItem.id);
+            if (duplicateMatch) {
+              inboxItem.duplicateInfo = {
+                isDuplicate: true,
+                matchedCode: duplicateMatch.code,
+                matchedBillNo: duplicateMatch.billNo,
+                matchedVendor: duplicateMatch.storeName,
+                reason: duplicateMatch.reason
+              };
+            }
+          } catch (duplicateError: any) {
+            console.error(`[LINE Webhook] Duplicate check failed for inbox item ${inboxItem.id}:`, duplicateError?.message || duplicateError);
+          }
+        }
+
+        // Keep every bill in the inbox; duplicates are flagged for human review, never discarded here.
         inboxItem.status = billNo ? 'pending_review' : 'scan_failed';
 
         const replyText = buildLineQuoteReplyText({
@@ -2844,7 +2938,7 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           docType: analysis.detectedDocType,
           storeName,
           senderName,
-          isDuplicate: false,
+          isDuplicate: Boolean(inboxItem.duplicateInfo?.isDuplicate),
           scanFailed: !billNo
         });
 
@@ -2986,6 +3080,30 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
 
       const billNo = getLineInboxPrimaryDocumentNumber(analysis.detectedDocType, analysis.extractedData);
       const storeName = analysis.extractedData.col8 || '';
+      let duplicateInfo: any;
+      if (billNo && storeName) {
+        try {
+          const client = getSupabaseClient();
+          const duplicateMatch = await findLineInboxDuplicate(
+            client,
+            analysis.detectedDocType,
+            billNo,
+            storeName,
+            inboxId
+          );
+          if (duplicateMatch) {
+            duplicateInfo = {
+              isDuplicate: true,
+              matchedCode: duplicateMatch.code,
+              matchedBillNo: duplicateMatch.billNo,
+              matchedVendor: duplicateMatch.storeName,
+              reason: duplicateMatch.reason
+            };
+          }
+        } catch (duplicateError: any) {
+          console.error(`[LINE Simulator] Duplicate check failed for ${inboxId}:`, duplicateError?.message || duplicateError);
+        }
+      }
 
       const replyText = buildLineQuoteReplyText({
         isBillDocument: true,
@@ -2993,7 +3111,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         docType: analysis.detectedDocType,
         storeName,
         senderName,
-        isDuplicate: false,
+        isDuplicate: Boolean(duplicateInfo),
         scanFailed: !billNo
       });
 
@@ -3022,6 +3140,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
         storeSuggestion: analysis.storeSuggestion,
         aiConfidence: analysis.confidence,
         isBillDocument: true,
+        duplicateInfo,
         botReplyText: replyText,
         botReplySent: true,
       };
@@ -6205,6 +6324,21 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
         }
         if (aiScanFailed) continue;
 
+        let duplicateMatch: LineInboxDuplicateMatch | null = null;
+        if (isBillDocument && updatedDocNo && updatedStore) {
+          try {
+            duplicateMatch = await findLineInboxDuplicate(
+              client,
+              updatedDocType as DocumentType,
+              updatedDocNo,
+              updatedStore,
+              row.id
+            );
+          } catch (duplicateError: any) {
+            console.error(`[Drive Sync] Duplicate check failed for inbox item ${row.id}:`, duplicateError?.message || duplicateError);
+          }
+        }
+
         // Upload to Google Drive ZONE_00
         // Use the immutable inbox ID so retries reuse the same Drive file if OCR fails.
         const safeInboxId = sanitizeDriveName(row.id).slice(-80);
@@ -6272,6 +6406,8 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
             doc_number: updatedDocNo || null,
             detected_doc_type: updatedDocType,
             store_name: updatedStore || null,
+            duplicate_of_order_id: duplicateMatch?.code || null,
+            duplicate_reason: duplicateMatch?.reason || null,
             ...(aiConfidence !== undefined ? { ai_confidence: aiConfidence } : {}),
             is_bill_document: isBillDocument,
             image_hash: imageHash,

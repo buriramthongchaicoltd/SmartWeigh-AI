@@ -594,24 +594,66 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     return () => controller.abort();
   }, [preloadKey]);
 
+  const findDuplicateInfo = async (
+    item: LineBillInboxItem,
+    docType: DocumentType,
+    extractedData: Partial<OrderRecord>
+  ): Promise<LineBillInboxItem['duplicateInfo']> => {
+    const billNo = docType === 'dest_weighbridge'
+      ? extractedData.col17
+      : docType === 'purchase_order'
+        ? extractedData.col4
+        : extractedData.col6;
+    const storeName = extractedData.col8 || '';
+    if (!billNo?.trim() || !storeName.trim()) return undefined;
+
+    const response = await fetch('/api/line/check-duplicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ docType, billNo, storeName, excludeInboxId: item.id })
+    });
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || 'ตรวจรายการซ้ำไม่สำเร็จ');
+    }
+    const match = result.matches?.[0];
+    return match ? {
+      isDuplicate: true,
+      matchedCode: match.code,
+      matchedBillNo: match.billNo,
+      matchedVendor: match.storeName,
+      reason: match.reason
+    } : undefined;
+  };
+
   // Instant Document Type Switch
-  const handleInstantDocTypeChange = (item: LineBillInboxItem, newDocType: DocumentType) => {
+  const handleInstantDocTypeChange = async (item: LineBillInboxItem, newDocType: DocumentType) => {
     const currentIsSupplierDelivery = item.detectedDocType === 'delivery_order' || item.detectedDocType === 'weighbridge';
     if (currentIsSupplierDelivery && newDocType === 'delivery_order') {
       return;
     }
     const remappedData = remapLineBillToDocType(item.extractedData, newDocType);
+    const updatedExtractedData = {
+      ...remappedData,
+      col2: item.extractedData?.col2 || '',
+      lineInboxId: item.id,
+      lineSenderName: item.lineSenderName,
+      lineGroupName: item.lineGroupName,
+      lineReceivedAt: item.receivedAt
+    };
+    let duplicateInfo: LineBillInboxItem['duplicateInfo'];
+    try {
+      duplicateInfo = await findDuplicateInfo(item, newDocType, updatedExtractedData);
+    } catch (error: any) {
+      console.error(`[LINE Inbox] Duplicate check failed for ${item.id}:`, error);
+      showToast(`ตรวจรายการซ้ำไม่สำเร็จ: ${error?.message || 'กรุณาลองใหม่'}`, 'info');
+      return;
+    }
     const updatedItem: LineBillInboxItem = {
       ...item,
       detectedDocType: newDocType,
-      extractedData: {
-        ...remappedData,
-        col2: item.extractedData?.col2 || '',
-        lineInboxId: item.id,
-        lineSenderName: item.lineSenderName,
-        lineGroupName: item.lineGroupName,
-        lineReceivedAt: item.receivedAt
-      }
+      duplicateInfo,
+      extractedData: updatedExtractedData
     };
     onUpdateInboxItem(updatedItem);
     showToast(
@@ -633,12 +675,24 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         item.extractedData
       );
       if (res.success && res.orderData) {
-        const billNo =
-          res.orderData.col17 || res.orderData.col6 || res.orderData.col4 || '';
+        const billNo = item.detectedDocType === 'dest_weighbridge'
+          ? res.orderData.col17 || ''
+          : item.detectedDocType === 'purchase_order'
+            ? res.orderData.col4 || ''
+            : res.orderData.col6 || '';
         const storeName = res.orderData.col8 || 'ไม่ระบุร้านค้า';
+        let duplicateInfo: LineBillInboxItem['duplicateInfo'];
+        try {
+          duplicateInfo = await findDuplicateInfo(item, item.detectedDocType, res.orderData);
+        } catch (error: any) {
+          console.error(`[LINE Inbox] Duplicate check failed after rescan for ${item.id}:`, error);
+          showToast(`ตรวจรายการซ้ำไม่สำเร็จ: ${error?.message || 'กรุณาลองใหม่'}`, 'info');
+          return;
+        }
         const updatedItem: LineBillInboxItem = {
           ...item,
           status: 'pending_review',
+          duplicateInfo,
           extractedData: {
             ...res.orderData,
             col2: item.extractedData?.col2 || '',
@@ -1347,6 +1401,15 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                             <Clock className="w-3 h-3 shrink-0" />
                             <span>รอตรวจสอบ</span>
                           </span>
+                        )}
+                        {item.duplicateInfo?.isDuplicate && (
+                          <div
+                            className="mt-1 inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-800"
+                            title={item.duplicateInfo.reason || 'ประเภทเอกสาร เลขที่ และชื่อร้านตรงกับรายการอื่น'}
+                          >
+                            <ShieldAlert className="h-3 w-3 shrink-0" />
+                            <span>อาจซ้ำ</span>
+                          </div>
                         )}
                         {item.botReplyAttempted && !item.botReplySent && (
                           <div
