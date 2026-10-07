@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import { PurchaseOrder, OrderRecord, StoreMerchant, POStatus } from '../types';
 import { reconcileAllPOs } from '../utils/poReconciliation';
-import * as XLSX from 'xlsx';
 
 interface POManagementViewProps {
   pos: PurchaseOrder[];
@@ -119,41 +118,47 @@ export const POManagementView: React.FC<POManagementViewProps> = ({
     return '฿' + (val || 0).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  const exportPOsToExcel = () => {
+  const exportPOsToExcel = async () => {
     if (pos.length === 0) {
       setExportMessage('ไม่มีข้อมูลใบสั่งซื้อให้ส่งออก');
       return;
     }
-    setExportMessage(null);
+    setExportMessage('กำลังเตรียมไฟล์ Excel...');
 
-    const exportRows = reconciledPOs.map((r, idx) => ({
-      'ลำดับ': idx + 1,
-      'เลขที่ PO': r.po.poNumber,
-      'วันที่สั่งซื้อ': r.po.orderDate,
-      'กำหนดส่งมอบ': r.po.deliveryDueDate || '-',
-      'ผู้จำหน่าย / ร้านค้า': r.po.storeName,
-      'โครงการ': r.po.projectId,
-      'หมวดหมู่': r.po.category,
-      'ปริมาณรวมตาม PO': r.po.totalQty,
-      'ยอดเงินรวมตาม PO (บาท)': r.po.totalAmount,
-      'ปริมาณส่งมอบแล้ว': r.deliveredQty,
-      'ยอดเงินส่งมอบแล้ว (บาท)': r.deliveredAmount,
-      'ปริมาณคงเหลือ': r.remainingQty,
-      'ยอดคงเหลือ (บาท)': r.remainingAmount,
-      'ความคืบหน้า (%)': r.percentageDelivered + '%',
-      'สถานะ': r.status === 'completed' ? 'ส่งมอบครบแล้ว' :
-               r.status === 'partially_delivered' ? 'ส่งมอบบางส่วน' :
-               r.status === 'cancelled' ? 'ยกเลิก' : 'รอส่งมอบ',
-      'จำนวนตั๋วขนส่งที่ตัดยอด': r.linkedOrders.length,
-      'เงื่อนไขชำระเงิน': r.po.creditTerms || '-',
-      'ผู้สั่งซื้อ': r.po.orderedBy || '-',
-      'หมายเหตุ': r.po.notes || '-'
-    }));
+    try {
+      const exportRows = reconciledPOs.map((r, idx) => ({
+        'ลำดับ': idx + 1,
+        'เลขที่ PO': r.po.poNumber,
+        'วันที่สั่งซื้อ': r.po.orderDate,
+        'กำหนดส่งมอบ': r.po.deliveryDueDate || '-',
+        'ผู้จำหน่าย / ร้านค้า': r.po.storeName,
+        'โครงการ': r.po.projectId,
+        'หมวดหมู่': r.po.category,
+        'ปริมาณรวมตาม PO': r.po.totalQty,
+        'ยอดเงินรวมตาม PO (บาท)': r.po.totalAmount,
+        'ปริมาณส่งมอบแล้ว': r.deliveredQty,
+        'ยอดเงินส่งมอบแล้ว (บาท)': r.deliveredAmount,
+        'ปริมาณคงเหลือ': r.remainingQty,
+        'ยอดคงเหลือ (บาท)': r.remainingAmount,
+        'ความคืบหน้า (%)': r.percentageDelivered + '%',
+        'สถานะ': r.status === 'completed' ? 'ส่งมอบครบแล้ว' :
+                 r.status === 'partially_delivered' ? 'ส่งมอบบางส่วน' :
+                 r.status === 'cancelled' ? 'ยกเลิก' : 'รอส่งมอบ',
+        'จำนวนตั๋วขนส่งที่ตัดยอด': r.linkedOrders.length,
+        'เงื่อนไขชำระเงิน': r.po.creditTerms || '-',
+        'ผู้สั่งซื้อ': r.po.orderedBy || '-',
+        'หมายเหตุ': r.po.notes || '-'
+      }));
 
-    const ws = XLSX.utils.json_to_sheet(exportRows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Purchase_Orders');
-    XLSX.writeFile(wb, `รายงานใบสั่งซื้อ_PO_${new Date().toISOString().split('T')[0]}.xlsx`);
+      const XLSX = await import('xlsx');
+      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Purchase_Orders');
+      XLSX.writeFile(wb, `รายงานใบสั่งซื้อ_PO_${new Date().toISOString().split('T')[0]}.xlsx`);
+      setExportMessage(null);
+    } catch (error) {
+      setExportMessage(`ส่งออกรายงานไม่สำเร็จ: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   return (

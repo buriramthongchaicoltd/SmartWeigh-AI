@@ -4,6 +4,30 @@
 
 ---
 
+## [2026-10-07] Prioritize Initial View and Preload Remaining Modules
+
+### การเปลี่ยนแปลง
+- คงหน้า DO/ตาราง 39 คอลัมน์และแถบเมนูเป็น initial bundle; แยกหน้าเมนูรองและ modal เป็น dynamic chunks พร้อม loading/error states
+- หลังยืนยันตัวตน เริ่ม preload โมดูลอื่นอัตโนมัติหลัง 2 วินาที แบบทีละ module และพัก 1.2 วินาทีระหว่าง module เพื่อไม่แย่งโหลดหน้าแรก
+- เลื่อนการโหลดไลบรารีและยูทิลิตี Excel ไปยังการเปิดใช้/สั่งส่งออก แสดงสถานะระหว่างเตรียม และแจ้งข้อผิดพลาดเมื่อส่งออกไม่สำเร็จ
+- อัปเดต Handover เกี่ยวกับลำดับโหลดและ preload เบื้องหลัง
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- Build แยกหน้า/หน้าต่างเป็น chunks; initial JS ลดจาก 1,554.25 kB (gzip 362.14 kB) เหลือ 520.75 kB (gzip 134.69 kB) และ XLSX อยู่ใน chunk แยก 424.03 kB (gzip 141.30 kB)
+- ยังมีคำเตือน Vite เพราะ initial chunk เกินเกณฑ์ 500 kB อยู่ 20.75 kB; ไม่ใช่ build error
+
+## [2026-10-07] Show Actionable Counts in Sidebar
+
+### การเปลี่ยนแปลง
+- เอาจำนวนเอกสารสะสมออกจากเมนูหลัก และแสดงเฉพาะงานค้างที่มีสถานะชัดเจน: LINE รอตรวจ/สแกนซ้ำ, DO รอยืนยัน automated action, ตั๋วปลายทางรอจับคู่ และชุดวางบิลรอเลข RR
+- ไม่นับ LINE ที่อยู่ในคิวประมวลผล และไม่แสดง badge ใบกำกับภาษีที่ยังไม่ผูก DO เพราะอาจเป็นรายการซื้อสดที่ไม่ต้องจับคู่
+- ซ่อน badge เมื่อเป็นศูนย์, จำกัดตัวเลขบน badge ที่ `99+` และแสดงจำนวนเต็มผ่าน tooltip
+- อัปเดต Handover เกี่ยวกับเงื่อนไขของ badge
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังแสดงคำเตือนเดิมว่า JavaScript bundle ใหญ่กว่า 500 kB
+
 ## [2026-10-06] Fix PO Detail Image and Split View Layout
 
 ### การเปลี่ยนแปลง

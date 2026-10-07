@@ -7,21 +7,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Header, SidebarNav, MainTabType } from './components/Header';
 import { StatSummaryCards } from './components/StatSummaryCards';
 import { TableView39Cols } from './components/TableView39Cols';
-import { POManagementView } from './components/POManagementView';
-import { PODetailModal } from './components/PODetailModal';
-import { POEditModal } from './components/POEditModal';
-import { StoresManagementView, ProjectsManagementView } from './components/StoresManagementView';
-import { AnalyticsView } from './components/AnalyticsView';
-import { LineInboxView } from './components/LineInboxView';
-import { ReportsExportView } from './components/ReportsExportView';
-import { PurchasingBillingView } from './components/PurchasingBillingView';
-import { UsersRolesView } from './components/UsersRolesView';
-import { SystemSettingsView } from './components/SystemSettingsView';
 import { LoginModal } from './components/LoginModal';
-import { ScanModal } from './components/ScanModal';
-import { VerifyModal } from './components/VerifyModal';
-import { StoreDetailModal } from './components/StoreDetailModal';
-import { StoreEditModal } from './components/StoreEditModal';
 import {
   OrderRecord,
   StoreMerchant,
@@ -35,7 +21,6 @@ import {
   SystemBackupPayload,
   BillingNoteRecord
 } from './types';
-import { exportAllDataToExcel } from './utils/excelExport';
 import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
@@ -48,15 +33,90 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   DEFAULT_SYSTEM_SETTINGS,
   normalizeSystemSettings,
-  computeSystemNotifications
+  computeSystemNotifications,
+  hasUnverifiedAutoActions
 } from './utils/systemConfig';
 import { CheckCircle2, RefreshCw, AlertTriangle, Database, X } from 'lucide-react';
+
+const loadPOManagementView = () => import('./components/POManagementView');
+const loadPODetailModal = () => import('./components/PODetailModal');
+const loadPOEditModal = () => import('./components/POEditModal');
+const loadStoresManagement = () => import('./components/StoresManagementView');
+const loadAnalyticsView = () => import('./components/AnalyticsView');
+const loadLineInboxView = () => import('./components/LineInboxView');
+const loadReportsExportView = () => import('./components/ReportsExportView');
+const loadPurchasingBillingView = () => import('./components/PurchasingBillingView');
+const loadUsersRolesView = () => import('./components/UsersRolesView');
+const loadSystemSettingsView = () => import('./components/SystemSettingsView');
+const loadScanModal = () => import('./components/ScanModal');
+const loadVerifyModal = () => import('./components/VerifyModal');
+const loadStoreDetailModal = () => import('./components/StoreDetailModal');
+const loadStoreEditModal = () => import('./components/StoreEditModal');
+
+const POManagementView = React.lazy(() => loadPOManagementView().then(module => ({ default: module.POManagementView })));
+const PODetailModal = React.lazy(() => loadPODetailModal().then(module => ({ default: module.PODetailModal })));
+const POEditModal = React.lazy(() => loadPOEditModal().then(module => ({ default: module.POEditModal })));
+const StoresManagementView = React.lazy(() => loadStoresManagement().then(module => ({ default: module.StoresManagementView })));
+const ProjectsManagementView = React.lazy(() => loadStoresManagement().then(module => ({ default: module.ProjectsManagementView })));
+const AnalyticsView = React.lazy(() => loadAnalyticsView().then(module => ({ default: module.AnalyticsView })));
+const LineInboxView = React.lazy(() => loadLineInboxView().then(module => ({ default: module.LineInboxView })));
+const ReportsExportView = React.lazy(() => loadReportsExportView().then(module => ({ default: module.ReportsExportView })));
+const PurchasingBillingView = React.lazy(() => loadPurchasingBillingView().then(module => ({ default: module.PurchasingBillingView })));
+const UsersRolesView = React.lazy(() => loadUsersRolesView().then(module => ({ default: module.UsersRolesView })));
+const SystemSettingsView = React.lazy(() => loadSystemSettingsView().then(module => ({ default: module.SystemSettingsView })));
+const ScanModal = React.lazy(() => loadScanModal().then(module => ({ default: module.ScanModal })));
+const VerifyModal = React.lazy(() => loadVerifyModal().then(module => ({ default: module.VerifyModal })));
+const StoreDetailModal = React.lazy(() => loadStoreDetailModal().then(module => ({ default: module.StoreDetailModal })));
+const StoreEditModal = React.lazy(() => loadStoreEditModal().then(module => ({ default: module.StoreEditModal })));
 
 const STORAGE_ORDERS_KEY = 'autostore_real_orders_v2';
 const STORAGE_STORES_KEY = 'autostore_real_stores_v2';
 const STORAGE_POS_KEY = 'autostore_real_pos_v2';
 const STORAGE_PROJECTS_KEY = 'autostore_real_projects_v2';
 const STORAGE_LINE_INBOX_KEY = 'autostore_line_inbox_v1';
+
+class DeferredChunkErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('Failed to load a deferred application module.', error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-800">
+          <p>โหลดส่วนหนึ่งของระบบไม่สำเร็จ กรุณาตรวจสอบการเชื่อมต่อแล้วลองใหม่</p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-3 rounded-lg bg-red-700 px-3 py-2 font-semibold text-white hover:bg-red-800"
+          >
+            โหลดระบบใหม่
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const DeferredModalFallback = () => (
+  <div
+    role="status"
+    aria-live="polite"
+    className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/30 p-4 text-sm font-semibold text-slate-700"
+  >
+    <div className="rounded-xl bg-white px-5 py-4 shadow-xl">กำลังเตรียมหน้าต่าง...</div>
+  </div>
+);
 
 // Helper to recalculate store financials strictly from actual order records (Single Source of Truth)
 const syncStoreFinancials = (storesList: StoreMerchant[], ordersList: OrderRecord[]): StoreMerchant[] => {
@@ -2532,7 +2592,7 @@ export default function App() {
   };
 
   // Export full excel (Orders + POs + Stores)
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (!currentPermissions.canExportReport) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ส่งออกรายงาน`, 'info');
       return;
@@ -2541,8 +2601,13 @@ export default function App() {
       showToast('ยังไม่มีข้อมูลในระบบสำหรับส่งออก กรุณาสแกนบิลหรือเพิ่มรายการก่อน', 'info');
       return;
     }
-    exportAllDataToExcel(orders, stores, pos);
-    showToast('ส่งออกไฟล์ Excel เรียบร้อยแล้ว!');
+    try {
+      const { exportAllDataToExcel } = await import('./utils/excelExport');
+      exportAllDataToExcel(orders, stores, pos);
+      showToast('ส่งออกไฟล์ Excel เรียบร้อยแล้ว!');
+    } catch (error) {
+      showToast(`ส่งออกไฟล์ Excel ไม่สำเร็จ: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
   };
 
   // One-time seed of projects from existing orders/POs so existing project names are real records in `projects`
@@ -2782,8 +2847,59 @@ export default function App() {
     }
   }, [activeTab]);
 
-  // Project count strictly from registered projects in `projects`
-  const totalUniqueProjectsCount = projects.length;
+  const pendingLineInboxCount = lineInbox.filter(item =>
+    item.status === 'pending_review' ||
+    item.status === 'duplicate_warning' ||
+    item.status === 'scan_failed'
+  ).length;
+  const pendingOrderReviewCount = orders.filter(
+    order =>
+      order.docType !== 'dest_weighbridge' &&
+      order.docType !== 'tax_invoice' &&
+      hasUnverifiedAutoActions(order)
+  ).length;
+
+  useEffect(() => {
+    if (!isAuthChecked || !authenticatedUser) return;
+
+    const modulesToPreload = [
+      loadLineInboxView,
+      loadPOManagementView,
+      loadPurchasingBillingView,
+      loadAnalyticsView,
+      loadStoresManagement,
+      loadReportsExportView,
+      loadUsersRolesView,
+      loadSystemSettingsView,
+      loadScanModal,
+      loadVerifyModal,
+      loadPODetailModal,
+      loadPOEditModal,
+      loadStoreDetailModal,
+      loadStoreEditModal
+    ];
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let index = 0;
+
+    const preloadNextModule = () => {
+      if (canceled || index >= modulesToPreload.length) return;
+
+      void modulesToPreload[index++]()
+        .catch(error => {
+          console.warn('Background module preload failed; the module will be requested again when needed.', error);
+        })
+        .finally(() => {
+          if (!canceled) timer = setTimeout(preloadNextModule, 1200);
+        });
+    };
+
+    timer = setTimeout(preloadNextModule, 2000);
+    return () => {
+      canceled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [isAuthChecked, authenticatedUser]);
 
   if (!isAuthChecked) {
     return <div className="min-h-screen flex items-center justify-center text-sm text-slate-500">กำลังตรวจสอบการเข้าสู่ระบบ...</div>;
@@ -2805,18 +2921,10 @@ export default function App() {
       <SidebarNav
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        totalOrders={orders.filter(o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice').length}
-        totalPOs={pos.length}
-        totalDestWB={orders.filter(o => o.docType === 'dest_weighbridge').length}
         unmatchedDestWB={orders.filter(o => o.docType === 'dest_weighbridge' && !o.linkedViaDocNo).length}
-        totalTaxInv={orders.filter(o => o.docType === 'tax_invoice').length}
-        unmatchedTaxInv={orders.filter(o => o.docType === 'tax_invoice' && !o.linkedViaDocNo).length}
-        totalLineInbox={lineInbox.length}
-        pendingLineInbox={lineInbox.filter(i => i.status === 'pending_review' || i.status === 'queued').length}
-        totalBillingNotes={billingNotes.length}
+        pendingLineInbox={pendingLineInboxCount}
+        pendingOrderReview={pendingOrderReviewCount}
         pendingBillingRR={billingNotes.filter(b => b.status !== 'rr_stamped_billed').length}
-        totalStores={stores.length}
-        totalProjects={totalUniqueProjectsCount}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={() => setIsSidebarCollapsed(prev => !prev)}
         isMobileOpen={isMobileMenuOpen}
@@ -2847,16 +2955,6 @@ export default function App() {
             setTriggerCreateProjectCounter(c => c + 1);
           }}
           onExportExcel={handleExportExcel}
-          totalOrders={orders.filter(o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice').length}
-          totalPOs={pos.length}
-          totalDestWB={orders.filter(o => o.docType === 'dest_weighbridge').length}
-          unmatchedDestWB={orders.filter(o => o.docType === 'dest_weighbridge' && !o.linkedViaDocNo).length}
-          totalTaxInv={orders.filter(o => o.docType === 'tax_invoice').length}
-          unmatchedTaxInv={orders.filter(o => o.docType === 'tax_invoice' && !o.linkedViaDocNo).length}
-          totalLineInbox={lineInbox.length}
-          pendingLineInbox={lineInbox.filter(i => i.status === 'pending_review' || i.status === 'queued').length}
-          totalStores={stores.length}
-          totalProjects={totalUniqueProjectsCount}
           onToggleMobileMenu={() => setIsMobileMenuOpen(prev => !prev)}
           currentUser={currentUser}
           currentPermissions={currentPermissions}
@@ -2884,6 +2982,12 @@ export default function App() {
             />
           )}
 
+          <DeferredChunkErrorBoundary>
+          <React.Suspense fallback={
+            <div role="status" aria-live="polite" className="rounded-xl border border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+              กำลังโหลดหน้าจอ...
+            </div>
+          }>
           {/* Menu 0: กล่องพักบิลจาก LINE OA Bot */}
           {activeTab === 'line_inbox' && (
             <LineInboxView
@@ -3099,12 +3203,15 @@ export default function App() {
               showToast={showToast}
             />
           )}
+          </React.Suspense>
+          </DeferredChunkErrorBoundary>
         </main>
       </div>
 
+      <DeferredChunkErrorBoundary>
       {/* Unified AI Scan Modal for All Document Types (DO, PO, Dest Weighbridge, Tax Invoice) */}
-      <ScanModal
-        isOpen={isScanOpen}
+      {isScanOpen && <React.Suspense fallback={<DeferredModalFallback />}><ScanModal
+        isOpen
         defaultDocType={
           activeTab === 'dest_wb' ? 'dest_weighbridge' :
           activeTab === 'tax_inv' ? 'tax_invoice' :
@@ -3121,11 +3228,11 @@ export default function App() {
         onClose={() => setIsScanOpen(false)}
         onScanComplete={handleScanComplete}
         onPOScanComplete={handlePOScanComplete}
-      />
+      /></React.Suspense>}
 
       {/* Split Screen Verification Modal for Bills */}
-      <VerifyModal
-        isOpen={isVerifyOpen}
+      {isVerifyOpen && <React.Suspense fallback={<DeferredModalFallback />}><VerifyModal
+        isOpen
         orderData={verifyOrderData}
         billImage={verifyImage}
         storeSuggestion={verifyStoreSuggestion}
@@ -3140,11 +3247,11 @@ export default function App() {
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}
         onRecoverLineImage={handleRecoverOrderImageFromLine}
-      />
+      /></React.Suspense>}
 
       {/* Purchase Order Detail & Print Modal */}
-      <PODetailModal
-        isOpen={Boolean(selectedPOForDetail)}
+      {selectedPOForDetail && <React.Suspense fallback={<DeferredModalFallback />}><PODetailModal
+        isOpen
         po={selectedPOForDetail}
         orders={orders}
         systemSettings={systemSettings}
@@ -3158,11 +3265,11 @@ export default function App() {
         onAddTicketForPO={handleAddTicketForPO}
         onLinkOrderToPO={handleLinkOrderToPO}
         onUnlinkOrderFromPO={handleUnlinkOrderFromPO}
-      />
+      /></React.Suspense>}
 
       {/* Purchase Order Create / Edit Modal */}
-      <POEditModal
-        isOpen={isPOEditOpen}
+      {isPOEditOpen && <React.Suspense fallback={<DeferredModalFallback />}><POEditModal
+        isOpen
         po={editingPO}
         stores={stores}
         projects={projects}
@@ -3175,10 +3282,10 @@ export default function App() {
           setInitialStoreNameForPO(undefined);
         }}
         onSave={handleSavePO}
-      />
+      /></React.Suspense>}
 
       {/* Store Detail & Order History Modal */}
-      <StoreDetailModal
+      {selectedStoreForDetail && <React.Suspense fallback={<DeferredModalFallback />}><StoreDetailModal
         store={selectedStoreForDetail}
         orders={orders}
         onClose={() => setSelectedStoreForDetail(null)}
@@ -3191,20 +3298,21 @@ export default function App() {
           setIsStoreEditOpen(true);
         }}
         onDeleteStore={handleDeleteStore}
-      />
+      /></React.Suspense>}
 
       {/* Store Add / Edit Modal */}
-      <StoreEditModal
+      {isStoreEditOpen && <React.Suspense fallback={<DeferredModalFallback />}><StoreEditModal
         store={editingStore}
         existingStores={stores}
-        isOpen={isStoreEditOpen}
+        isOpen
         onClose={() => {
           setIsStoreEditOpen(false);
           setEditingStore(null);
         }}
         onSave={handleSaveStore}
         onDelete={handleDeleteStore}
-      />
+      /></React.Suspense>}
+      </DeferredChunkErrorBoundary>
 
       {/* Toast Notification */}
       {toast && (

@@ -8,7 +8,6 @@ import {
   AppUser
 } from '../types';
 import { reconcilePO } from '../utils/poReconciliation';
-import { exportAllDataToExcel } from '../utils/excelExport';
 import { STANDARD_CONSTRUCTION_CATEGORIES } from '../utils/dbLookup';
 import { DEFAULT_COMPANY_LOGO_URL } from '../utils/systemConfig';
 import {
@@ -32,7 +31,7 @@ interface ReportsExportViewProps {
   systemSettings: SystemSettings;
   currentUser: AppUser;
   canViewFinancials: boolean;
-  showToast: (msg: string, type?: 'success' | 'info') => void;
+  showToast: (msg: string, type?: 'success' | 'info' | 'error') => void;
 }
 
 type ReportTemplateType =
@@ -293,15 +292,25 @@ export const ReportsExportView: React.FC<ReportsExportViewProps> = ({
     window.print();
   };
 
-  const handleExportFilteredExcel = () => {
-    exportAllDataToExcel(filteredOrders, stores, filteredPOs);
-    showToast(`ส่งออกไฟล์ Excel ตามตัวกรอง (${filteredOrders.length} รายการ) เรียบร้อยแล้ว`);
+  const exportExcel = async (
+    exportOrders: OrderRecord[],
+    exportPOs: PurchaseOrder[],
+    successMessage: string
+  ) => {
+    try {
+      const { exportAllDataToExcel } = await import('../utils/excelExport');
+      exportAllDataToExcel(exportOrders, stores, exportPOs);
+      showToast(successMessage);
+    } catch (error) {
+      showToast(`ส่งออกไฟล์ Excel ไม่สำเร็จ: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
   };
 
-  const handleExportFullExcel = () => {
-    exportAllDataToExcel(orders, stores, pos);
-    showToast('ส่งออกไฟล์ Excel ทั้งระบบครบทุกชีตเรียบร้อยแล้ว');
-  };
+  const handleExportFilteredExcel = () =>
+    exportExcel(filteredOrders, filteredPOs, `ส่งออกไฟล์ Excel ตามตัวกรอง (${filteredOrders.length} รายการ) เรียบร้อยแล้ว`);
+
+  const handleExportFullExcel = () =>
+    exportExcel(orders, pos, 'ส่งออกไฟล์ Excel ทั้งระบบครบทุกชีตเรียบร้อยแล้ว');
 
   const activeTemplateMeta = REPORT_TEMPLATES.find(t => t.id === reportType) || REPORT_TEMPLATES[0];
 
