@@ -1951,6 +1951,8 @@ export default function App() {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการบิล`, 'info');
       return;
     }
+    const orderToDelete = orders.find(order => order.id === id);
+    if (!skipConfirm && !window.confirm(`ยืนยันลบรายการ ${orderToDelete?.col1 || id} หรือไม่?`)) return;
     if (!(await deleteRecordFromDb('orders', id))) return;
     setOrders(prev => {
       const target = prev.find(o => o.id === id);

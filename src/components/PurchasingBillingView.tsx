@@ -376,6 +376,7 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
   const handleRemoveSubItemFromOrder = (ord: OrderRecord, subIdx: number) => {
     const existing = getEffectiveSubItemsForOrder(ord);
     if (existing.length <= 1) return;
+    if (!window.confirm(`ยืนยันลบรายการย่อยนี้ออกจากใบ DO ${ord.col6 || ord.col1} หรือไม่?`)) return;
     const nextList = existing.filter((_, idx) => idx !== subIdx);
     setCustomOrderSubItems(prev => ({
       ...prev,
@@ -1832,6 +1833,7 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
                           <button
                             type="button"
                             onClick={() => {
+                              if (!window.confirm('ยืนยันลบไฟล์แนบนี้ออกจากชุดวางบิลหรือไม่?')) return;
                               setAttachmentImage(null);
                               setAttachmentFileName('');
                             }}

@@ -183,6 +183,7 @@ export const POEditModal: React.FC<POEditModalProps> = ({
 
   const removeItemRow = (index: number) => {
     if (items.length <= 1) return;
+    if (!window.confirm('ยืนยันลบรายการสินค้านี้ออกจากใบสั่งซื้อหรือไม่?')) return;
     setItems(prev => prev.filter((_, i) => i !== index));
   };
 

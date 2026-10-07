@@ -320,6 +320,8 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   };
 
   const handleDeleteInboxItem = async (item: LineBillInboxItem) => {
+    const itemLabel = item.extractedData.col17 || item.extractedData.col8 || item.lineSenderName || item.id;
+    if (!window.confirm(`ยืนยันลบบิล ${itemLabel} ออกจากกล่องพัก LINE และนำรูปไปถังขยะหรือไม่?`)) return;
     setDeletingInboxId(item.id);
     try {
       await onDeleteInboxItem(item.id);
