@@ -4,6 +4,11 @@ export function isMatchedOriginWeighbridge(order: OrderRecord): boolean {
   return order.docType === 'weighbridge' && Boolean(order.matchedOriginDoId);
 }
 
+export function isDeliveryOrderPairingCandidate(order: OrderRecord): boolean {
+  if (!order.col6?.trim()) return false;
+  return !['weighbridge', 'dest_weighbridge', 'tax_invoice', 'purchase_order'].includes(order.docType || '');
+}
+
 /**
  * Normalizes document reference numbers by stripping whitespace, dashes, slashes,
  * and converting to uppercase for deterministic matching without guessing.

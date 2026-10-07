@@ -23,7 +23,7 @@ import {
   BillingNoteRecord,
   ContractorChargeDocument
 } from './types';
-import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge } from './utils/poReconciliation';
+import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge, isDeliveryOrderPairingCandidate } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
 import {
@@ -1383,7 +1383,7 @@ export default function App() {
     if (!inboxItem || inboxItem.detectedDocType !== 'weighbridge') {
       throw new Error('ไม่พบรายการตั๋วชั่งต้นทางในกล่องพัก LINE');
     }
-    if (!targetDO || !['delivery_order', 'concrete', 'full_logistics'].includes(targetDO.docType || '')) {
+    if (!targetDO || !isDeliveryOrderPairingCandidate(targetDO)) {
       throw new Error('ไม่พบใบส่งของปลายทางที่เลือก');
     }
     const existingTicket = orders.find(item => item.lineInboxId === inboxId);

@@ -31,6 +31,7 @@ import {
   remapLineBillToDocType,
   rescanBillForTargetDocType
 } from '../utils/lineBillRemapper';
+import { isDeliveryOrderPairingCandidate } from '../utils/poReconciliation';
 
 interface LineInboxViewProps {
   inboxItems: LineBillInboxItem[];
@@ -357,10 +358,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
   };
 
-  const pairableDeliveryOrders = orders.filter(order =>
-    (order.docType === 'delivery_order' || order.docType === 'concrete' || order.docType === 'full_logistics') &&
-    Boolean(order.col6?.trim())
-  );
+  const pairableDeliveryOrders = orders.filter(isDeliveryOrderPairingCandidate);
   const normalizedPairOrderQuery = pairOrderSearchQuery.trim().toLocaleLowerCase();
   const filteredPairableDeliveryOrders = pairableDeliveryOrders.filter(order => {
     if (!normalizedPairOrderQuery) return true;

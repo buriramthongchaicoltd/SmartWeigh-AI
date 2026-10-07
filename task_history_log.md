@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-07] Include Legacy DO Rows in Weighbridge Pairing
+
+### การเปลี่ยนแปลง
+- แก้ตัวกรองตัวเลือกจับคู่ให้ยึดเลข DO ใน `col6` และตัดออกเฉพาะชนิดที่ไม่ใช่ DO (ตั๋วชั่งต้นทาง/ปลายทาง, ใบกำกับภาษี และ PO) แทนการ allowlist ชนิด DO แบบตายตัว เพื่อรองรับ DO ทุกชนิดและแถวเก่าที่ไม่มี `docType`
+- ใช้เงื่อนไขเดียวกันทั้งในหน้าตัวเลือกและก่อนบันทึกความสัมพันธ์ เพื่อป้องกันเลือกได้แต่ backend/UI ปฏิเสธ
+- ปรับ Database Storage Blueprint ให้บันทึกกติกาคัด DO ปัจจุบัน
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Load All Delivery Orders for Weighbridge Pairing
 
 ### การเปลี่ยนแปลง
