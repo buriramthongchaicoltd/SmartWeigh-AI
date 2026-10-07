@@ -593,7 +593,9 @@ const SHARED_OCR_POLICY = `มาตรฐาน OCR กลางของระ
 - ห้ามคัดลอก documentIssuerName หรือ buyerName ลง supplierName/storeName; storeName เป็นชื่อผู้ขายเท่านั้น และต้องตรงกับ supplierName ที่อ่านได้
 - จัดประเภทตามลำดับหลักฐาน: (1) ชื่อเอกสารที่พิมพ์บนเอกสาร (2) ป้ายชื่อช่องและรูปแบบฟอร์ม (3) เนื้อหา/รายการในเอกสาร แล้วจึงใช้คำอธิบายประเภทด้านล่างช่วยแยกกรณีที่ยังคล้ายกัน; ห้ามใช้ชนิดสินค้า หรือตัวเลข Gross/Tare/Net เพียงอย่างเดียวตัดสินประเภท
 - ถ้าเอกสารพิมพ์ว่า ใบส่งสินค้า/ใบส่งของ/Delivery Note/Delivery Receipt ให้เป็น delivery_order แม้มีตารางน้ำหนักหรือ Gross/Tare/Net; อ่านน้ำหนักจากเอกสารลงช่องต้นทางด้วย
-- เลือก weighbridge เมื่อชื่อ/ป้ายบนเอกสารระบุชัดว่าเป็นใบชั่งหรือตั๋วชั่ง และรูปแบบเอกสารสนับสนุนการจัดประเภทนั้น ไม่ใช่เพียงเพราะมีตัวเลขน้ำหนัก
+- แยกตั๋วชั่งจากหลักฐานบนเอกสาร: weighbridge คือใบชั่งต้นทาง/ฝั่งร้านค้าหรือลานจ่ายสินค้าก่อนขนส่ง (เช่น ป้ายต้นทาง, ชั่งออก, ผู้ขายออกตั๋ว); dest_weighbridge คือใบชั่งปลายทาง/ฝั่งไซต์งานหรือจุดรับสินค้าหลังรถมาถึง (เช่น ป้ายปลายทาง, ชั่งรับเข้า, มีเลข DO อ้างอิง). บันทึกน้ำหนักของ weighbridge ลงโซน 3 ช่อง 13–15 และ dest_weighbridge ลงโซน 4 ช่อง 18–20
+- คำว่า “ตั๋วชั่ง/ใบชั่ง” หรือการมี Gross/Tare/Net อย่างเดียวไม่พอแยกต้นทางกับปลายทาง; ห้ามตัดสินจากชื่อร้าน, โลโก้, น้ำหนัก, ชื่อกลุ่ม LINE หรือเลขอ้างอิงเพียงอย่างเดียว. ใช้หัวเอกสาร ป้ายกำกับ บทบาทจุดชั่ง และหลักฐานอ้างอิงร่วมกัน; หากหลักฐานต้นทาง/ปลายทางไม่ชัดหรือขัดกัน ให้ลด docTypeConfidence และอธิบายหลักฐาน/ความไม่ชัดใน docTypeEvidence แทนการอ้างว่ามั่นใจ
+- เลือก weighbridge เมื่อชื่อ/ป้ายบนเอกสารระบุชัดว่าเป็นใบชั่งหรือตั๋วชั่งต้นทาง และรูปแบบเอกสารสนับสนุนการจัดประเภทนั้น ไม่ใช่เพียงเพราะมีตัวเลขน้ำหนัก
 - จำแนกประเภทเอกสารให้ตรงหลักฐานบนภาพ: delivery_order, weighbridge (ตั๋วชั่งต้นทาง), dest_weighbridge (ตั๋วชั่งปลายทาง), concrete, tax_invoice, purchase_order หรือ full_logistics
 - ส่ง docTypeConfidence เป็นความมั่นใจในการจำแนกประเภท 0–100 แยกจากความมั่นใจอ่านเลขเอกสาร; หากชื่อ/หลักฐานในภาพไม่ชัดหรือขัดกัน ให้คะแนนต่ำและอธิบายความไม่ชัดใน docTypeEvidence ห้ามสร้างชื่อเอกสารที่ไม่มีหลักฐาน
 - ห้ามเดาหรือเติมค่า: ข้อมูลที่อ่านไม่ชัดหรือไม่มีบนภาพให้เว้นว่าง/ใส่ 0 ตามชนิดข้อมูล; ห้ามใช้วันที่ปัจจุบัน, จำนวน 1, ชื่อสินค้าทั่วไป หรือการคำนวณจากช่องอื่นแทนค่าที่อ่านไม่ได้
@@ -1135,7 +1137,9 @@ ${specificTargetInstructions}
 ${!specificTargetInstructions ? `กรุณาตรวจสอบรูปภาพเอกสารนี้อย่างละเอียด และระบุประเภทเอกสาร (docType) ให้ถูกต้อง:
 - ก่อนเลือก docType ให้คัดชื่อที่พิมพ์บนเอกสารลง documentTitle และยกข้อความ/ป้ายชื่อช่องที่มองเห็นจริงเป็น docTypeEvidence; จากนั้นจึงใช้คำอธิบายประเภทนี้ช่วยตัดสิน
 - 'delivery_order': ใบส่งสินค้า / ใบส่งของ / Delivery Note / Delivery Receipt จากผู้ขาย รวมถึงเอกสารส่งของที่มีน้ำหนักชั่งอยู่ในใบเดียวกัน
-- 'weighbridge': เอกสารที่ระบุชัดว่าเป็นใบชั่ง/ตั๋วชั่งต้นทาง ไม่ใช่ใบส่งของที่มีน้ำหนักประกอบ
+- 'weighbridge': ใบชั่ง/ตั๋วชั่งต้นทางฝั่งร้านค้าหรือลานจ่ายสินค้าก่อนขนส่ง; ใช้เมื่อมีหลักฐานชี้ว่าชั่งต้นทาง ไม่ใช่แค่มีตารางน้ำหนัก
+- 'dest_weighbridge': ใบชั่ง/ตั๋วชั่งปลายทางฝั่งไซต์งานหรือจุดรับสินค้าหลังรถมาถึง; ใช้ช่อง 18–20 และพิจารณาป้ายปลายทาง/ชั่งรับเข้า/เลข DO อ้างอิงจากภาพ
+- หากภาพระบุเพียงตั๋วชั่งแต่ไม่พอบอกว่าชั่งที่ต้นทางหรือปลายทาง ให้ลด docTypeConfidence และบอกเหตุผลใน docTypeEvidence; ห้ามสรุปจาก LINE sender/group หรือจากน้ำหนักอย่างเดียว
 - 'concrete': ใบส่งคอนกรีตผสมเสร็จ (ระบุเกรดคอนกรีต KSC, Slump, ปริมาณเป็นคิว/m3)
 - 'tax_invoice': ใบเสร็จรับเงิน / ใบกำกับภาษีซื้อ (มีเลขผู้เสียภาษี 13 หลัก, ตาราง VAT 7%)
 - 'purchase_order': ใบสั่งซื้อสินค้า (PO / Purchase Order ออกโดยฝ่ายจัดซื้อ มีตารางรายการสั่งซื้อ เงื่อนไขชำระ และช่องอนุมัติ)
@@ -1180,8 +1184,9 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
           type: Type.OBJECT,
           properties: {
             docType: { 
-              type: Type.STRING, 
-              description: "ประเภทเอกสารกลาง: delivery_order, weighbridge, dest_weighbridge, concrete, tax_invoice, purchase_order หรือ full_logistics"
+              type: Type.STRING,
+              enum: OCR_DOCUMENT_TYPES,
+              description: "เลือกจากหลักฐานภาพจริง: delivery_order คือใบส่งของแม้มีน้ำหนัก; weighbridge คือตั๋วชั่งต้นทางก่อนขนส่ง; dest_weighbridge คือตั๋วชั่งปลายทางที่จุดรับ/ไซต์งาน; concrete, tax_invoice, purchase_order หรือ full_logistics"
             },
             documentTitle: {
               type: Type.STRING,
@@ -1282,6 +1287,7 @@ ${!specificTargetInstructions ? `กรุณาตรวจสอบรูป�
               }
             }
           },
+          required: ['docType', 'documentTitle', 'docTypeEvidence', 'docTypeConfidence']
         }
       }
     });
@@ -2040,7 +2046,8 @@ async function analyzeLineBillWithGemini(
           nonBillReason: { type: Type.STRING, description: 'เหตุผลกรณีไม่ใช่เอกสารบิล เช่น รูปถ่ายหน้างานทั่วไป' },
           docType: {
             type: Type.STRING,
-            enum: OCR_DOCUMENT_TYPES
+            enum: OCR_DOCUMENT_TYPES,
+            description: 'แยก weighbridge (ต้นทางก่อนขนส่ง) ออกจาก dest_weighbridge (ปลายทางที่จุดรับ/ไซต์งาน) โดยอาศัยชื่อเอกสาร ป้ายจุดชั่ง และหลักฐานในภาพ ไม่ใช่จากตัวเลขน้ำหนักหรือบริบท LINE'
           },
           documentTitle: {
             type: Type.STRING,
@@ -2109,7 +2116,14 @@ async function analyzeLineBillWithGemini(
           confidence: { type: Type.NUMBER, description: 'ความมั่นใจภาพรวม 0 ถึง 100' },
           docNumberConfidence: { type: Type.NUMBER, description: 'ความมั่นใจในการอ่านเลขที่เอกสารหลักโดยเฉพาะ 0 ถึง 100' }
         },
-        required: ['isBillDocument', 'docNumberConfidence']
+        required: [
+          'isBillDocument',
+          'docType',
+          'documentTitle',
+          'docTypeEvidence',
+          'docTypeConfidence',
+          'docNumberConfidence'
+        ]
       }
     }
   });

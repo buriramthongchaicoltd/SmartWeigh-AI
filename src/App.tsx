@@ -1604,6 +1604,28 @@ export default function App() {
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
   const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
+    const persistVerifiedInboxItem = async (
+      item: LineBillInboxItem,
+      errorPrefix: string
+    ): Promise<boolean> => {
+      try {
+        const response = await fetch('/api/database/save-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table: 'line_inbox', record: item })
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.error || `HTTP ${response.status}`);
+        }
+        return true;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+        showToast(`${errorPrefix}: ${reason}`, 'error');
+        return false;
+      }
+    };
+
     const isExistingRecord = orders.some(o => o.id === order.id);
     if (order.lineInboxId && !isExistingRecord) {
       const inboxItem = lineInbox.find(item => item.id === order.lineInboxId);
@@ -2119,6 +2141,52 @@ export default function App() {
       });
     }
 
+    if (order.lineInboxId) {
+      const sourceInboxItem = lineInbox.find(item => item.id === order.lineInboxId);
+      if (sourceInboxItem) {
+        const verifiedAt = new Date().toISOString();
+        const verifiedInboxItem: LineBillInboxItem = {
+          ...sourceInboxItem,
+          status: 'verified',
+          duplicateInfo: undefined,
+          verifiedOrderId: order.col1,
+          verifiedBy: currentUser.fullName,
+          verifiedAt,
+          driveFileLocation: verifiedLineItem?.driveFileLocation || sourceInboxItem.driveFileLocation,
+          extractedData: {
+            ...sourceInboxItem.extractedData,
+            ...order
+          }
+        };
+        if (!await persistVerifiedInboxItem(verifiedInboxItem, 'ยืนยันสถานะรายการในกล่องพัก LINE ไม่สำเร็จ')) {
+          return false;
+        }
+      }
+    }
+    if (pairedWeighbridgeInboxItem) {
+      const sourceInboxItem = lineInbox.find(item => item.id === pairedWeighbridgeInboxItem.id);
+      if (sourceInboxItem) {
+        const verifiedInboxItem: LineBillInboxItem = {
+          ...sourceInboxItem,
+          status: 'verified',
+          duplicateInfo: undefined,
+          verifiedOrderId: pairedWeighbridgeInboxItem.extractedData.col1 || order.col1,
+          verifiedBy: currentUser.fullName,
+          verifiedAt: new Date().toISOString(),
+          driveFileLocation: pairedWeighbridgeDriveLocation || sourceInboxItem.driveFileLocation,
+          extractedData: {
+            ...sourceInboxItem.extractedData,
+            linkedViaDocNo: order.col6,
+            referenceDocNo: order.col6,
+            matchedOriginDoId: order.id
+          }
+        };
+        if (!await persistVerifiedInboxItem(verifiedInboxItem, 'ยืนยันสถานะตั๋วชั่งต้นทางในกล่องพัก LINE ไม่สำเร็จ')) {
+          return false;
+        }
+      }
+    }
+
     // If this order was verified from the LINE OA Bot Inbox, mark the inbox item as verified
     if (order.lineInboxId) {
       setLineInbox(prev => {
@@ -2279,7 +2347,6 @@ export default function App() {
         });
       });
     }
-
 
     if (order.docType === 'dest_weighbridge' && !autoMatchedNote) {
       setActiveTab('dest_wb');

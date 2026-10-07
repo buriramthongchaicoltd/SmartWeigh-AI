@@ -315,6 +315,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isDestWeighbridge = selectedDocType === 'dest_weighbridge';
   const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete';
   const isContractorChargeOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
+  const requiresRecipient = isContractorChargeOrder;
   const contractorChargeItems: OrderItemDetail[] = form.lineItems?.length
     ? form.lineItems.map(item => ({
         ...item,
@@ -948,7 +949,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       return;
     }
 
-    if (!form.col9?.trim()) {
+    if (requiresRecipient && !form.col9?.trim()) {
       setSaveError('กรุณาระบุผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมาที่ช่อง 9 ก่อนบันทึก');
       return;
     }
@@ -1720,7 +1721,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       </div>
                       <div className="col-span-2">
                         <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
-                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา
+                          {requiresRecipient && <span className="text-rose-500"> *</span>}
                         </label>
                         {isContractorChargeOrder && (
                           <div className="mb-1.5">
@@ -1744,7 +1746,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                           </div>
                         )}
                         <SmartDatabaseInput
-                          required
+                          required={requiresRecipient}
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}
@@ -2985,10 +2987,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       </div>
                       <div className="col-span-2 sm:col-span-1">
                         <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
-                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา
                         </label>
                         <SmartDatabaseInput
-                          required
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}
@@ -3270,10 +3271,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       </div>
                       <div>
                         <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา
+                          {requiresRecipient && <span className="text-rose-500"> *</span>}
                         </label>
                         <SmartDatabaseInput
-                          required
+                          required={requiresRecipient}
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}

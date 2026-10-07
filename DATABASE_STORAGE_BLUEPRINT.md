@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
   -- โซน 2: คู่ค้าและสินค้า (ช่อง 7-12)
   col7 TEXT, -- วันที่เอกสาร
   col8 TEXT, -- ชื่อร้านค้า/ผู้จำหน่าย
-  col9 TEXT, -- ผู้รับสินค้า/ผู้ซื้อ/ผู้รับเหมา (บังคับกรอกในฟอร์ม)
+  col9 TEXT, -- ผู้รับสินค้า/ผู้ซื้อ/ผู้รับเหมา (บังคับใน delivery_order, concrete และ full_logistics)
   col10 TEXT, -- ทะเบียนรถขนส่ง
   col11 TEXT, -- รายการสินค้าหลัก
   col12 TEXT, -- สเปก/รหัสวัสดุ
