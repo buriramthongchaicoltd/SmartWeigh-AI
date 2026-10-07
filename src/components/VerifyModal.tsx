@@ -937,13 +937,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       return;
     }
 
-    if (isExistingOrder && existingOrders.some(order =>
-      order.id !== form.id && order.col1.trim() === form.col1?.trim()
-    )) {
-      setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
-      return;
-    }
-
     // Strict Mandatory Check: "ชื่อโครงการ (ช่อง 2)" must be present before confirming save
     if (!form.col2 || !form.col2.trim()) {
       setProjectMissingError(true);
@@ -963,6 +956,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     setIsSaving(true);
     setSaveError('');
     try {
+      const trCheckParams = new URLSearchParams({ trNumber: form.col1.trim() });
+      if (isExistingOrder && form.id) trCheckParams.set('excludeId', form.id);
+      const trCheckResponse = await fetch(`/api/orders/check-tr-number?${trCheckParams.toString()}`);
+      const trCheckResult = await trCheckResponse.json();
+      if (!trCheckResponse.ok || !trCheckResult.success) {
+        throw new Error(trCheckResult.error || `ตรวจเลข TR ไม่สำเร็จ (HTTP ${trCheckResponse.status})`);
+      }
+      if (trCheckResult.isDuplicate) {
+        setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นในฐานข้อมูลแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
+        return;
+      }
+
       if (await onSaveOrder(finalizedOrder, storeToSave, true)) {
         onClose();
       } else {

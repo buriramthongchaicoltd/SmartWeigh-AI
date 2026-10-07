@@ -2567,7 +2567,18 @@ export default function App() {
         .map(order => order.lineInboxId)
         .filter((inboxId): inboxId is string => Boolean(inboxId))
     );
-    if (!(await deleteRecordFromDb('orders', id))) return;
+    if (saveDbTimerRef.current.orders) {
+      clearTimeout(saveDbTimerRef.current.orders);
+      saveDbTimerRef.current.orders = undefined;
+    }
+    dbSyncGenerationRef.current.orders = (dbSyncGenerationRef.current.orders || 0) + 1;
+    await Promise.all(
+      [...(dbSyncInFlightRef.current.orders || [])].map(request => request.catch(() => undefined))
+    );
+    if (!(await deleteRecordFromDb('orders', id))) {
+      debouncedSyncToDb('orders', orders);
+      return;
+    }
     setOrders(prev => {
       const target = prev.find(o => o.id === id);
       let remaining = prev.filter(o => o.id !== id);

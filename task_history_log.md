@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-07] Validate TR Against Live Database Before Save
+
+### การเปลี่ยนแปลง
+- ยืนยันจากโค้ดว่า API เสนอเลข TR ถัดไปอ่าน `orders` ใน Supabase จริง แต่การแจ้งเลขซ้ำเดิมอาศัย `existingOrders` ที่หน้าเว็บโหลดไว้ จึงอาจเตือนจากข้อมูลเก่าหลังแถวถูกลบ
+- เพิ่ม API ตรวจเลข TR แบบ exact lookup ใน Supabase และเปลี่ยน VerifyModal ให้ตรวจฐานข้อมูลก่อนบันทึก โดยไม่กันเลขจาก snapshot ใน browser; การแก้รายการเดิมยกเว้น ID ของตัวเอง
+- แก้ race ระหว่างลบ `orders` กับ batch upsert โดยยกเลิก timer, รอ request ที่ทำงานอยู่ก่อนลบ และยืนยันจาก Supabase ว่าลบแถวจริง; ป้องกัน snapshot เก่าเขียน TR กลับ
+- อัปเดต Database Storage Blueprint อธิบายแหล่งข้อมูลของเลขถัดไปและกติกาไม่ใช้เลขลำดับเก่าซ้ำเมื่อมีเลขที่สูงกว่า
+- ไม่ได้ตรวจหรืออ้างสถานะ record จริงใน production database
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Pair Weighbridge with Pending LINE Delivery Orders
 
 ### การเปลี่ยนแปลง

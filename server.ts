@@ -4191,6 +4191,34 @@ app.get('/api/orders/next-tr-number', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/orders/check-tr-number', async (req: Request, res: Response) => {
+  const trNumber = typeof req.query.trNumber === 'string' ? req.query.trNumber.trim() : '';
+  const excludeId = typeof req.query.excludeId === 'string' ? req.query.excludeId.trim() : '';
+  if (!trNumber || trNumber.length > 100 || /[\u0000-\u001f]/.test(trNumber)) {
+    return res.status(400).json({ success: false, error: 'รูปแบบเลข TR ไม่ถูกต้อง' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงตรวจเลข TR จริงไม่ได้' });
+    }
+
+    let query = client.from('orders').select('id').eq('col1', trNumber);
+    if (excludeId) query = query.neq('id', excludeId);
+    const { data, error } = await query.limit(1);
+    if (error) throw error;
+
+    return res.json({ success: true, isDuplicate: Boolean(data?.length) });
+  } catch (error: any) {
+    console.error('[TR Validation] Failed to check orders in database:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `ตรวจเลข TR กับฐานข้อมูลไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
 // 7. Save Single Record Directly to Supabase (100% Real Database Persistence)
 app.post('/api/database/save-record', async (req: Request, res: Response) => {
   try {
@@ -4262,6 +4290,25 @@ app.post('/api/database/delete-record', async (req: Request, res: Response) => {
 
     let targetTable = table;
     if (table === 'pos') targetTable = 'purchase_orders';
+
+    if (targetTable === 'orders') {
+      const { data: deletedRows, error } = await client
+        .from(targetTable)
+        .delete()
+        .eq('id', id)
+        .select('id');
+      if (error) {
+        console.error(`DB Delete Error on ${targetTable}:`, error);
+        return res.status(500).json({ success: false, error: error.message });
+      }
+      if (!deletedRows?.some(row => row.id === id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Supabase ไม่พบรายการ orders ที่ตรงกับ ID นี้ จึงยังยืนยันการลบข้อมูลไม่ได้'
+        });
+      }
+      return res.json({ success: true, deleted: true, message: 'Record deleted from orders' });
+    }
 
     if (targetTable === 'line_inbox') {
       const { data: deletedRows, error } = await client
