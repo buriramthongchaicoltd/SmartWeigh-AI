@@ -10,6 +10,7 @@
 - แก้ปัญหา production ไม่มีตาราง `auth_sessions` ซึ่งทำให้ login/session lookup ล้มเหลว โดยย้ายข้อมูล session ไปเก็บใน `system_config` ภายใต้ key prefix `auth_session:`; เก็บเฉพาะ SHA-256 token, user ID, วันหมดอายุ และสถานะเปลี่ยนรหัสผ่านครั้งแรก
 - คงการตรวจ role/status ล่าสุดจาก `app_users`, การเพิกถอนเมื่อ logout/เปลี่ยนข้อมูลบัญชี/เปลี่ยนรหัสผ่าน และการลบ session หมดอายุข้าม server instance
 - จำกัดการโหลด `system_config` ของการ sync และ config restore ให้ดึงเฉพาะ key ที่จำเป็น ไม่ส่ง/โหลด session records; ลบ `auth_sessions` ออกจาก schema check และ DDL และแก้จำนวนตารางในหน้าตั้งค่า/เอกสารกลับเป็น 10
+- จำกัดการค้นหา/ล้าง session ด้วยช่วง key prefix แบบตรงตัว เพื่อไม่ให้ wildcard ใน `LIKE` ไปจับ config key ที่ไม่ใช่ session
 - ไม่ต้องรัน DDL ใหม่สำหรับ session; ผู้ใช้ยังต้อง login ใหม่หลัง deploy เพราะ session ใน memory เดิมไม่มี persistent record
 
 ### การตรวจสอบ

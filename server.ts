@@ -107,7 +107,8 @@ async function getPersistedAuthSessionRows(client: NonNullable<ReturnType<typeof
   for (let offset = 0; ; offset += pageSize) {
     const { data, error } = await client.from('system_config')
       .select('config_key,config_value')
-      .like('config_key', 'auth_session:%')
+      .gte('config_key', 'auth_session:')
+      .lt('config_key', 'auth_session;')
       .order('config_key', { ascending: true })
       .range(offset, offset + pageSize - 1);
     if (error) throw error;
