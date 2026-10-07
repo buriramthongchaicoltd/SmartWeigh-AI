@@ -5171,9 +5171,11 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
       return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่าโฟลเดอร์หลักของ Google Drive' });
     }
 
-    const token = await getDriveAccessToken();
-    const isGasMode = Boolean(driveCfg.connectionMode === 'gas' || (!token && driveCfg.gasWebAppUrl));
-    if (isGasMode) {
+    const isGasMode = driveCfg.connectionMode === 'gas';
+    const token = isGasMode ? null : await getDriveAccessToken();
+    const shouldUseGasFallback = !token && Boolean(driveCfg.gasWebAppUrl);
+    const useGas = isGasMode || shouldUseGasFallback;
+    if (useGas) {
       if (!driveCfg.gasWebAppUrl) {
         return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script Web App URL' });
       }

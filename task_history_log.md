@@ -10,8 +10,9 @@
 - แก้ payload ย้ายรูปของตั๋วชั่งปลายทางให้ใช้เลขตั๋วช่อง 17 ก่อนเลขอ้างอิง DO ช่อง 6 เพื่อไม่ตั้งชื่อรูปด้วยเลขเอกสารคนละชนิด
 - อ่าน response เป็นข้อความและแสดง HTTP status/body บางส่วนเมื่อ gateway ตอบกลับไม่ใช่ JSON เช่น 502 แทนการเหลือเพียง JSON parse error; จำกัดเวลารอคำขอย้ายรูปไว้ 55 วินาที
 - ปรับข้อความกำลังบันทึกให้บอกชัดว่าเป็นการย้ายรูปตั๋วชั่งปลายทาง
-- แก้ `/api/drive/rename-and-move` ให้เลือกโหมดจาก config ก่อนขอ access token; เมื่อเลือก Google Apps Script จะไม่เรียก OAuth token ของ Service Account ที่ไม่ได้ใช้ และยังคง fallback ไป GAS เมื่อไม่มี token แต่มี GAS URL
-- ข้อผิดพลาด HTTP 502 ในภาพก่อนหน้าไม่มี URL ประกอบ จึงยืนยันไม่ได้ว่าเป็น request ใด; การแก้ลำดับ auth นี้กำจัดการเรียก OAuth ที่ไม่จำเป็นในโหมด GAS ซึ่งเป็นจุดหน่วง/ล้มเหลวที่พบจาก flow จริง แต่ต้องทดสอบการตรวจรับกับ Drive production หลัง deploy เพื่อยืนยันอาการ 502
+- แก้ `/api/drive/rename-and-move` และ `/api/drive/image/:fileId` ให้เลือกโหมดจาก config ก่อนขอ access token; เมื่อเลือก Google Apps Script จะไม่เรียก OAuth token ของ Service Account ที่ไม่ได้ใช้ และยังคง fallback ไป GAS เมื่อไม่ได้ token แต่มี GAS URL
+- ภาพ Console ยืนยันว่า `/api/drive/image/:fileId`, `/api/database/save-batch` และ `/api/startup/auto-check` เคยตอบ 502 พร้อมกัน. ตรวจซ้ำหลัง deploy แล้ว startup check สำเร็จและ `save-batch` ตอบ 401 ตามที่ควรเมื่อเรียกโดยไม่มี session; โค้ดของ `save-batch` ตอบ 500 เมื่อเกิด DB error ไม่ได้ตอบ 502 จึงชี้ว่า 502 ของ route นั้นเป็นเหตุการณ์ proxy/service ชั่วคราว ไม่ใช่การแปลง error ใน handler
+- แก้ต้นเหตุที่ยืนยันได้ของ route รูป: เมื่อ Drive ตั้งโหมด GAS เดิมยังพยายามขอ OAuth token ก่อนเรียก GAS และหาก token endpoint ล้มเหลว จะทำให้ image proxy ตอบ 502 โดยไม่ไปถึง Apps Script. การย้ายรูปจริงต้องทดสอบด้วย session ผู้ใช้และไฟล์ Drive จริงหลัง deploy
 
 ### การตรวจสอบ
 - รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
