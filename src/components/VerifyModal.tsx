@@ -722,11 +722,13 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       return;
     }
 
-    if (isContractorChargeOrder) {
-      if (contractorChargeItems.some(item => item.contractorChargeDecision === 'chargeable') && !form.col9?.trim()) {
-        setSaveError('กรุณาระบุผู้รับเหมาที่ช่อง 9 ก่อนกำหนดเรียกเก็บค่าวัสดุ');
-        return;
-      }
+    if (!form.col9?.trim()) {
+      setSaveError('กรุณาระบุผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมาที่ช่อง 9 ก่อนบันทึก');
+      return;
+    }
+    if (isContractorChargeOrder && contractorChargeItems.some(item => !item.contractorChargeDecision)) {
+      setSaveError('กรุณาเลือกทุกรายการว่าจะนำไปหักผู้รับเหมา หรือไม่นำหักเพราะบริษัทซื้อใช้เอง');
+      return;
     }
 
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
@@ -1465,13 +1467,16 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         />
                       </div>
                       <div className="col-span-2">
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">9. ผู้รับสินค้า / ผู้ซื้อ</label>
+                        <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                        </label>
                         <SmartDatabaseInput
+                          required
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}
                           showStatusBadge={false}
-                          fieldLabel="ผู้รับสินค้า"
+                          fieldLabel="ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา"
                           className="w-full p-2 border border-slate-300 rounded-lg bg-white"
                           placeholder="ชื่อบริษัทหรือวิศวกรผู้รับของ"
                         />
@@ -1707,7 +1712,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h4 className="text-xs font-bold text-violet-950">รายการวัสดุที่นำไปหักผู้รับเหมา</h4>
-                          <p className="mt-0.5 text-[10px] text-violet-800">เลือกเฉพาะรายการที่ต้องการทำเอกสารแนบ รายการที่ยังไม่เลือกจะไม่ถูกนำมาแสดง</p>
+                          <p className="mt-0.5 text-[10px] text-violet-800">กรุณาเลือกให้ครบทุกรายการ: นำไปหักผู้รับเหมา หรือไม่นำหัก (บริษัทซื้อใช้เอง)</p>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5">
                           <button
@@ -1722,7 +1727,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                             onClick={() => applyContractorChargeDecisionToAll('not_chargeable')}
                             className="rounded-lg border border-violet-200 bg-white px-2.5 py-1.5 text-[10px] font-semibold text-violet-900"
                           >
-                            ไม่หักทุกรายการ
+                            ไม่นำหัก (บริษัทซื้อใช้เอง)
                           </button>
                         </div>
                       </div>
@@ -1739,7 +1744,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                               <div className="text-[10px] text-slate-500">{item.qty || form.col22 || 0} {item.unit || form.col23}</div>
                             </div>
                             <select
-                              aria-label={`สถานะเรียกเก็บรายการ ${item.itemDescription || form.col11 || index + 1}`}
+                              aria-label={`สถานะหักค่าวัสดุรายการ ${item.itemDescription || form.col11 || index + 1}`}
                               value={item.contractorChargeDecision || ''}
                               onChange={event => updateContractorChargeDecision(
                                 index,
@@ -1747,9 +1752,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                               )}
                               className="rounded-lg border border-slate-300 px-2 py-2 text-[11px]"
                             >
-                              <option value="">ไม่รวมในเอกสารแนบ</option>
-                              <option value="chargeable">เรียกเก็บจากผู้รับเหมา</option>
-                              <option value="not_chargeable">ไม่เรียกเก็บ</option>
+                              <option value="">ยังไม่ระบุ</option>
+                              <option value="chargeable">นำไปหักผู้รับเหมา</option>
+                              <option value="not_chargeable">ไม่นำหัก (บริษัทซื้อใช้เอง)</option>
                             </select>
                           </div>
                         ))}
@@ -2697,13 +2702,16 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         />
                       </div>
                       <div className="col-span-2 sm:col-span-1">
-                        <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">9. ชื่อผู้ซื้อ / ผู้รับบิล</label>
+                        <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                        </label>
                         <SmartDatabaseInput
+                          required
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}
                           showStatusBadge={false}
-                          fieldLabel="ผู้ซื้อ"
+                          fieldLabel="ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา"
                           className="w-full p-2 border border-slate-300 rounded-lg bg-white"
                           placeholder="ชื่อบริษัทผู้ซื้อ หรือ ผู้เบิก"
                         />
@@ -2971,13 +2979,16 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         />
                       </div>
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">9. ผู้รับเหมา / ผู้ซื้อ</label>
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                          9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
+                        </label>
                         <SmartDatabaseInput
+                          required
                           value={form.col9 || ''}
                           onChange={(val) => handleTextChange('col9', val)}
                           options={dbCatalog.buyersAndStaff}
                           showStatusBadge={false}
-                          fieldLabel="ผู้รับเหมา/ผู้ซื้อ"
+                          fieldLabel="ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา"
                           className="w-full p-2 border border-slate-300 rounded-lg bg-white"
                         />
                       </div>

@@ -4,6 +4,27 @@
 
 ---
 
+## [2026-10-07] Bring Initial JavaScript Chunk Below 500 kB
+
+### การเปลี่ยนแปลง
+- แยก `TableView39Cols` ซึ่งเป็นโมดูลหลักขนาดใหญ่ให้โหลดแบบ dynamic เมื่อเปิดแท็บ DO/ตั๋วชั่ง/ใบกำกับ แทนการรวมใน initial bundle
+- ปรับ Handover ให้ระบุการโหลดหน้าหลักและตารางแบบ lazy พร้อมสถานะรอ
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+- Initial JS ลดจาก 524.97 kB (gzip 135.41 kB) เหลือ 405.05 kB (gzip 115.06 kB); ไม่มีคำเตือน Vite เรื่อง chunk เกิน 500 kB
+- ตาราง `TableView39Cols` แยกเป็น chunk 118.72 kB (gzip 21.27 kB)
+
+## [2026-10-07] Clarify Required DO Buyer and Contractor Deduction Choice
+
+### การเปลี่ยนแปลง
+- เปลี่ยนชื่อช่อง 9 ในฟอร์มเป็น “ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา” และบังคับกรอกก่อนบันทึกทุกประเภทเอกสารในฟอร์ม
+- สำหรับ DO บังคับเลือกสถานะให้ทุกรายการวัสดุ: นำไปหักผู้รับเหมา หรือไม่นำหัก โดยสถานะไม่นำหักระบุชัดว่าเป็นวัสดุที่บริษัทซื้อใช้เอง
+- ปรับคำอธิบายตัวเลือกและประวัติข้อมูลแนะนำให้ใช้ความหมายตรงกัน พร้อมอัปเดต Handover และ Database Blueprint
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Simplify Contractor Deduction Attachment Documents
 
 ### การเปลี่ยนแปลง

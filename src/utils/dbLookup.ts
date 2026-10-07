@@ -310,7 +310,7 @@ export function buildDatabaseCatalog(
     if (ord.col10) addOption(plateMap, ord.col10, ord.col8 ? `รถส่งจาก ${ord.col8}` : 'ทะเบียนรถเคยเข้าหน้างาน', ord.col26 || 'ทะเบียนรถ');
     if (ord.col26) addOption(vehicleMap, ord.col26, 'ประเภทรถ');
     if (ord.col37) addOption(locationMap, ord.col37, ord.col2 || 'จุดส่งหน้างาน', 'สถานที่ส่งมอบ');
-    if (ord.col9) addOption(staffMap, ord.col9, 'ผู้รับสินค้า / ผู้ซื้อ');
+    if (ord.col9) addOption(staffMap, ord.col9, 'ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา');
 
     if (ord.lineItems) {
       for (const li of ord.lineItems) {

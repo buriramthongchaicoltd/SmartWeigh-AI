@@ -6,7 +6,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Header, SidebarNav, MainTabType } from './components/Header';
 import { StatSummaryCards } from './components/StatSummaryCards';
-import { TableView39Cols } from './components/TableView39Cols';
 import { LoginModal } from './components/LoginModal';
 import {
   OrderRecord,
@@ -42,6 +41,7 @@ import { CheckCircle2, RefreshCw, AlertTriangle, Database, X } from 'lucide-reac
 const loadPOManagementView = () => import('./components/POManagementView');
 const loadPODetailModal = () => import('./components/PODetailModal');
 const loadPOEditModal = () => import('./components/POEditModal');
+const loadTableView39Cols = () => import('./components/TableView39Cols');
 const loadStoresManagement = () => import('./components/StoresManagementView');
 const loadAnalyticsView = () => import('./components/AnalyticsView');
 const loadLineInboxView = () => import('./components/LineInboxView');
@@ -58,6 +58,7 @@ const loadStoreEditModal = () => import('./components/StoreEditModal');
 const POManagementView = React.lazy(() => loadPOManagementView().then(module => ({ default: module.POManagementView })));
 const PODetailModal = React.lazy(() => loadPODetailModal().then(module => ({ default: module.PODetailModal })));
 const POEditModal = React.lazy(() => loadPOEditModal().then(module => ({ default: module.POEditModal })));
+const TableView39Cols = React.lazy(() => loadTableView39Cols().then(module => ({ default: module.TableView39Cols })));
 const StoresManagementView = React.lazy(() => loadStoresManagement().then(module => ({ default: module.StoresManagementView })));
 const ProjectsManagementView = React.lazy(() => loadStoresManagement().then(module => ({ default: module.ProjectsManagementView })));
 const AnalyticsView = React.lazy(() => loadAnalyticsView().then(module => ({ default: module.AnalyticsView })));
