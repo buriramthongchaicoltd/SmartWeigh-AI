@@ -3683,8 +3683,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    disabled={isSaving || isLoadingTrNumber || !form.col1}
-                    className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
+                    disabled={isSaving || isLoadingTrNumber}
+                    className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
                   >
                     <Save className="w-4 h-4" />
                     <span>
