@@ -13,7 +13,7 @@ import {
   BillingVatMode
 } from '../types';
 import { DEFAULT_COMPANY_LOGO_URL } from '../utils/systemConfig';
-import { isDocNumberMatch } from '../utils/poReconciliation';
+import { isDocNumberMatch, isMatchedOriginWeighbridge } from '../utils/poReconciliation';
 import { ImageDocViewer } from './ImageDocViewer';
 import {
   FileCheck2,
@@ -182,7 +182,9 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
   // All valid DOs (excluding destination weighbridge and standalone tax invoices)
   const allDeliveryOrders = useMemo(() => {
     return orders.filter(
-      o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice'
+      o => o.docType !== 'dest_weighbridge' &&
+        o.docType !== 'tax_invoice' &&
+        !isMatchedOriginWeighbridge(o)
     );
   }, [orders]);
 

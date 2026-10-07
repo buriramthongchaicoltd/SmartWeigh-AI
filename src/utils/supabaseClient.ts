@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.orders (
 
   linked_via_doc_no TEXT,
   matched_dest_ticket_id TEXT,
+  matched_origin_do_id TEXT,
   po_match_status TEXT,
   dest_match_status TEXT,
   auto_action_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -116,6 +117,7 @@ ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified BOOLEAN N
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified_by TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS auto_flags_verified_at TIMESTAMPTZ;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS reference_source TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS matched_origin_do_id TEXT;
 
 UPDATE public.orders
 SET po_match_status = 'auto_flagged',
@@ -486,6 +488,9 @@ export function mapOrderToSupabase(ord: OrderRecord): any {
     drive_folder_id: ord.driveFolderId || null,
     linked_via_doc_no: ord.linkedViaDocNo || null,
     matched_dest_ticket_id: ord.matchedDestTicketId || null,
+    ...(ord.matchedOriginDoId !== undefined
+      ? { matched_origin_do_id: ord.matchedOriginDoId || null }
+      : {}),
     po_match_status: ord.poMatchStatus || null,
     dest_match_status: ord.destMatchStatus || null,
     auto_action_flags: ord.autoActionFlags || [],
@@ -565,6 +570,7 @@ export function mapSupabaseToOrder(row: any): OrderRecord {
     driveFolderId: row.drive_folder_id || undefined,
     linkedViaDocNo: row.linked_via_doc_no || undefined,
     matchedDestTicketId: row.matched_dest_ticket_id || undefined,
+    matchedOriginDoId: row.matched_origin_do_id || undefined,
     poMatchStatus: row.po_match_status || undefined,
     destMatchStatus: row.dest_match_status || undefined,
     autoActionFlags: Array.isArray(row.auto_action_flags) ? row.auto_action_flags : [],

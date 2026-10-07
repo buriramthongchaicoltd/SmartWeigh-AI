@@ -11,6 +11,7 @@ import {
   Truck
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant } from '../types';
+import { isMatchedOriginWeighbridge } from '../utils/poReconciliation';
 
 interface AnalyticsViewProps {
   orders: OrderRecord[];
@@ -22,12 +23,13 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ orders, stores }) 
   const effectivePurchaseOrders = useMemo(() => {
     const storesWithPricedDeliveries = new Set(
       orders
-        .filter(r => r.docType !== 'tax_invoice' && r.docType !== 'dest_weighbridge' && (Number(r.col29) > 0 || Number(r.col25) > 0))
+        .filter(r => r.docType !== 'tax_invoice' && r.docType !== 'dest_weighbridge' && !isMatchedOriginWeighbridge(r) && (Number(r.col29) > 0 || Number(r.col25) > 0))
         .map(r => (r.storeId || r.col8 || '').trim().toLowerCase())
         .filter(Boolean)
     );
     return orders.filter(o => {
       if (o.docType === 'dest_weighbridge') return false;
+      if (isMatchedOriginWeighbridge(o)) return false;
       if (o.docType === 'tax_invoice' && o.linkedViaDocNo) return false;
       const storeKey = (o.storeId || o.col8 || '').trim().toLowerCase();
       if (o.docType === 'tax_invoice' && storeKey && storesWithPricedDeliveries.has(storeKey)) {
@@ -93,7 +95,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ orders, stores }) 
   // 4. Weight Diff / Discrepancy analysis
   const weightDiffOrders = useMemo(() => {
     return orders
-      .filter(o => o.docType !== 'dest_weighbridge' && Number(o.col21) > 0)
+      .filter(o => o.docType !== 'dest_weighbridge' && !isMatchedOriginWeighbridge(o) && Number(o.col21) > 0)
       .sort((a, b) => Number(b.col21) - Number(a.col21));
   }, [orders]);
 

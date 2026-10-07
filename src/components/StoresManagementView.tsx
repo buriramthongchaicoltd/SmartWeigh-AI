@@ -23,6 +23,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { StoreMerchant, OrderRecord, ProjectRecord, PurchaseOrder } from '../types';
+import { isMatchedOriginWeighbridge } from '../utils/poReconciliation';
 
 interface StoresManagementViewProps {
   stores: StoreMerchant[];
@@ -72,7 +73,8 @@ export const StoresManagementView: React.FC<StoresManagementViewProps> = ({
     return stores.map(store => {
       const storeOrders = orders.filter(
         o => (o.storeId === store.id || (o.col8 && o.col8.trim().toLowerCase() === store.name.trim().toLowerCase())) &&
-             o.docType !== 'dest_weighbridge'
+             o.docType !== 'dest_weighbridge' &&
+             !isMatchedOriginWeighbridge(o)
       );
       const hasPricedDeliveries = storeOrders.some(
         o => o.docType !== 'tax_invoice' && (Number(o.col29) > 0 || Number(o.col25) > 0)
@@ -691,6 +693,7 @@ export const ProjectsManagementView: React.FC<ProjectsManagementViewProps> = ({
       const projOrders = orders.filter(
         o => (o.col2 || '').trim().toLowerCase() === key &&
              o.docType !== 'dest_weighbridge' &&
+             !isMatchedOriginWeighbridge(o) &&
              !(o.docType === 'tax_invoice' && o.linkedViaDocNo)
       );
       const projPOs = pos.filter(p => (p.projectId || '').trim().toLowerCase() === key);

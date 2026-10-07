@@ -1,5 +1,9 @@
 import { OrderRecord, PurchaseOrder, POReconciliation, POStatus, ConvertedOrderUnitDetail, MatchedDeliveryShipment } from '../types';
 
+export function isMatchedOriginWeighbridge(order: OrderRecord): boolean {
+  return order.docType === 'weighbridge' && Boolean(order.matchedOriginDoId);
+}
+
 /**
  * Normalizes document reference numbers by stripping whitespace, dashes, slashes,
  * and converting to uppercase for deterministic matching without guessing.
@@ -358,12 +362,14 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
         !processedOrderIds.has(o.id) &&
         o.id !== ord.id &&
         (o.docType === 'weighbridge' || o.docType === 'dest_weighbridge' || Number(o.col13) > 0 || Number(o.col15) > 0 || Number(o.col18) > 0 || Number(o.col20) > 0) &&
-        (
-          isExactDocNumberReference(o.referenceDocNo, directDONum) ||
-          isExactDocNumberReference(o.linkedViaDocNo, directDONum) ||
-          isExactDocNumberReference(o.col6, directDONum) ||
-          extractDocReferences(o.col38).doNumbers.some(d => isExactDocNumberReference(d, directDONum))
-        )
+        (o.docType === 'weighbridge' && o.matchedOriginDoId !== undefined
+          ? o.matchedOriginDoId === ord.id
+          : (
+              isExactDocNumberReference(o.referenceDocNo, directDONum) ||
+              isExactDocNumberReference(o.linkedViaDocNo, directDONum) ||
+              isExactDocNumberReference(o.col6, directDONum) ||
+              extractDocReferences(o.col38).doNumbers.some(d => isExactDocNumberReference(d, directDONum))
+            ))
       );
 
       if (matchingWBs.length > 0) {

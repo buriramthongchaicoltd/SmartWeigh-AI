@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { OrderRecord, StoreMerchant, PurchaseOrder } from '../types';
-import { reconcilePO } from './poReconciliation';
+import { isMatchedOriginWeighbridge, reconcilePO } from './poReconciliation';
 
 export function exportAllDataToExcel(orders: OrderRecord[], stores: StoreMerchant[], pos?: PurchaseOrder[]) {
   const workbook = XLSX.utils.book_new();
@@ -65,7 +65,8 @@ export function exportAllDataToExcel(orders: OrderRecord[], stores: StoreMerchan
   const storeRows = stores.map((s, idx) => {
     const storeOrders = orders.filter(
       o => (o.storeId === s.id || (o.col8 && o.col8.trim().toLowerCase() === s.name.trim().toLowerCase())) &&
-           o.docType !== 'dest_weighbridge'
+           o.docType !== 'dest_weighbridge' &&
+           !isMatchedOriginWeighbridge(o)
     );
 
     const hasPricedDeliveryOrder = storeOrders.some(
@@ -165,7 +166,8 @@ export function exportStoreStatement(store: StoreMerchant, orders: OrderRecord[]
   const workbook = XLSX.utils.book_new();
   const storeOrders = orders.filter(
     o => (o.storeId === store.id || (o.col8 && o.col8.trim().toLowerCase() === store.name.trim().toLowerCase())) &&
-         o.docType !== 'dest_weighbridge'
+         o.docType !== 'dest_weighbridge' &&
+         !isMatchedOriginWeighbridge(o)
   );
 
   const rows = storeOrders.map((r, idx) => ({

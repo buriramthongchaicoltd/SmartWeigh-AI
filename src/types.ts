@@ -40,6 +40,8 @@ export interface OrderRecord {
   referenceDocNo?: string;     // เลขที่เอกสารอ้างอิง เช่น เลข DO ที่ตั๋วชั่งอ้างถึง หรือ เลข PO
   referenceSource?: 'form_field' | 'notes' | 'handwritten'; // แหล่งที่พบ: ในช่องฟอร์ม, ในช่องหมายเหตุ, หรือลายมือเขียน
   linkedViaDocNo?: string;     // ชนบิลผ่านเอกสารใด เช่น ชนเข้า PO ผ่านใบส่งของ DO-xxxxx
+  matchedOriginDoId?: string | null; // DO ที่ผู้ใช้เลือกจับคู่กับตั๋วชั่งต้นทาง; null ใช้ล้างความสัมพันธ์อย่างชัดเจน
+  pairedWeighbridgeInboxId?: string; // LINE Inbox ticket selected while verifying a DO; transient until save
   // Zone 1: Document Reference & Project (1 - 6)
   col1: string;  // 1. เลข TR
   col2: string;  // 2. โครงการ

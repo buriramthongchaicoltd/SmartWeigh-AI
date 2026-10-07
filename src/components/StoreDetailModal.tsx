@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { StoreMerchant, OrderRecord } from '../types';
 import { exportStoreStatement } from '../utils/excelExport';
+import { isMatchedOriginWeighbridge } from '../utils/poReconciliation';
 
 interface StoreDetailModalProps {
   store: StoreMerchant | null;
@@ -58,7 +59,8 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
 
   // Recalculate dynamic totals from actual orders
   const stats = useMemo(() => {
-    const hasPricedDeliveries = storeOrders.some(
+    const financialOrders = storeOrders.filter(o => !isMatchedOriginWeighbridge(o));
+    const hasPricedDeliveries = financialOrders.some(
       o => o.docType !== 'tax_invoice' && (Number(o.col29) > 0 || Number(o.col25) > 0)
     );
     let totalPurchases = 0;
@@ -69,7 +71,7 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
     const vehiclePlates = new Set<string>();
     const projectNames = new Set<string>();
 
-    storeOrders.forEach(o => {
+    financialOrders.forEach(o => {
       if (o.docType === 'tax_invoice' && o.linkedViaDocNo) return;
       if (o.docType === 'tax_invoice' && hasPricedDeliveries) {
         totalPaid += Number(o.col35) || 0;

@@ -5586,6 +5586,10 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         prefix     = 'WB';
         targetZone = 'zone_03';
         break;
+      case 'weighbridge':
+        prefix     = 'WB';
+        targetZone = 'zone_02';
+        break;
       case 'tax_invoice':
         prefix     = 'INV';
         targetZone = 'zone_04';

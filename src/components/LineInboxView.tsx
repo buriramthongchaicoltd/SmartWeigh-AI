@@ -16,7 +16,9 @@ import {
   Cloud,
   Archive,
   ShieldAlert,
-  X
+  X,
+  Link2,
+  Scale
 } from 'lucide-react';
 import {
   DocumentType,
@@ -38,6 +40,7 @@ interface LineInboxViewProps {
   onAddInboxItems: (newItems: LineBillInboxItem[]) => void;
   onDeleteInboxItem: (id: string) => Promise<void>;
   onOpenVerifyFromInbox: (item: LineBillInboxItem) => void;
+  onPairWeighbridgeInboxItem: (itemId: string, doOrderId: string) => Promise<void>;
   onSyncWebhookQueue: () => Promise<void>;
   onOpenSystemSettings: () => void;
   showToast: (msg: string, type?: 'success' | 'info') => void;
@@ -130,9 +133,11 @@ const loadInboxImage = async (item: LineBillInboxItem, signal?: AbortSignal): Pr
 
 export const LineInboxView: React.FC<LineInboxViewProps> = ({
   inboxItems,
+  orders,
   onUpdateInboxItem,
   onDeleteInboxItem,
   onOpenVerifyFromInbox,
+  onPairWeighbridgeInboxItem,
   onSyncWebhookQueue,
   onOpenSystemSettings,
   showToast
@@ -229,6 +234,9 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const cancelQuarantineRequested = useRef(false);
   const [isCancellingQuarantine, setIsCancellingQuarantine] = useState(false);
   const [deletingInboxId, setDeletingInboxId] = useState<string | null>(null);
+  const [pairingTicket, setPairingTicket] = useState<LineBillInboxItem | null>(null);
+  const [pairTargetOrderId, setPairTargetOrderId] = useState('');
+  const [isPairingTicket, setIsPairingTicket] = useState(false);
 
   const handleAuditDriveInbox = async () => {
     const controller = new AbortController();
@@ -329,6 +337,22 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       showToast(error?.message || 'ลบรายการในกล่องพักไม่สำเร็จ', 'info');
     } finally {
       setDeletingInboxId(null);
+    }
+  };
+
+  const handleConfirmWeighbridgePair = async () => {
+    if (!pairingTicket || !pairTargetOrderId || isPairingTicket) return;
+    setIsPairingTicket(true);
+    try {
+      await onPairWeighbridgeInboxItem(pairingTicket.id, pairTargetOrderId);
+      setPairingTicket(null);
+      setPairTargetOrderId('');
+      showToast('จับคู่และบันทึกตั๋วชั่งกับใบส่งของแล้ว');
+    } catch (error) {
+      const reason = error instanceof Error ? `: ${error.message}` : '';
+      showToast(`จับคู่ตั๋วชั่งไม่สำเร็จ${reason}`, 'info');
+    } finally {
+      setIsPairingTicket(false);
     }
   };
 
@@ -1582,6 +1606,20 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                             <Sparkles className="w-3 h-3 shrink-0" />
                             <span>{item.status === 'verified' ? 'ดู/แก้ไข' : 'ตรวจรับบิล'}</span>
                           </button>
+                          {item.detectedDocType === 'weighbridge' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPairingTicket(item);
+                                setPairTargetOrderId('');
+                              }}
+                              className="px-2 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
+                              title="เลือกใบส่งของที่ต้องการจับคู่กับตั๋วชั่งนี้"
+                            >
+                              <Link2 className="w-3 h-3 shrink-0" />
+                              <span>จับคู่ DO</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => handleDeleteInboxItem(item)}
@@ -1628,6 +1666,82 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 alt="Bill Full"
                 className="max-h-[70vh] object-contain rounded-lg"
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pairingTicket && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="line-weighbridge-pair-title"
+        >
+          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <h3 id="line-weighbridge-pair-title" className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                <Scale className="h-4 w-4 text-emerald-700" />
+                จับคู่ตั๋วชั่งกับใบส่งของ
+              </h3>
+              <button
+                type="button"
+                onClick={() => setPairingTicket(null)}
+                className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+                aria-label="ปิดหน้าต่างจับคู่"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-4 p-5">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
+                <div className="font-bold">ตั๋วชั่ง {pairingTicket.extractedData.col6 || '(ไม่มีเลขที่)'}</div>
+                <div className="mt-1">
+                  {pairingTicket.extractedData.col8 || 'ไม่ทราบร้าน'} · สุทธิ {(Number(pairingTicket.extractedData.col15) || Math.max(0, (Number(pairingTicket.extractedData.col13) || 0) - (Number(pairingTicket.extractedData.col14) || 0))).toLocaleString()} กก.
+                </div>
+                <div className="mt-1 text-emerald-800">เลือกใบส่งของปลายทางด้วยตนเอง ระบบจะไม่จับคู่จากชื่อร้านหรือเวลา</div>
+              </div>
+              <label className="block space-y-1.5 text-xs font-semibold text-slate-800">
+                <span>ใบส่งของที่ต้องการจับคู่</span>
+                <select
+                  value={pairTargetOrderId}
+                  onChange={event => setPairTargetOrderId(event.target.value)}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5"
+                >
+                  <option value="">เลือกใบส่งของ...</option>
+                  {orders
+                    .filter(order =>
+                      (order.docType === 'delivery_order' || order.docType === 'concrete') &&
+                      Boolean(order.col6?.trim())
+                    )
+                    .map(order => (
+                      <option key={order.id} value={order.id}>
+                        {order.col6} · {order.col8 || 'ไม่ทราบร้าน'} · {order.col1}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <p className="text-[11px] leading-relaxed text-slate-600">
+                เมื่อยืนยัน ระบบจะเก็บตั๋วชั่งเป็นเอกสารแยก เชื่อมด้วยรหัสใบส่งของที่เลือก และเติมน้ำหนักต้นทางในใบส่งของเฉพาะเมื่อยังไม่มีน้ำหนักบันทึกไว้
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPairingTicket(null)}
+                  disabled={isPairingTicket}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmWeighbridgePair()}
+                  disabled={!pairTargetOrderId || isPairingTicket}
+                  className="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50"
+                >
+                  {isPairingTicket ? 'กำลังจับคู่...' : 'ยืนยันจับคู่'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

@@ -8,6 +8,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { OrderRecord } from '../types';
+import { isMatchedOriginWeighbridge } from '../utils/poReconciliation';
 
 interface StatSummaryCardsProps {
   orders: OrderRecord[];
@@ -33,7 +34,7 @@ export const StatSummaryCards: React.FC<StatSummaryCardsProps> = ({ orders, onFi
 
   // Primary DO records shown in the 39-Column Table (strictly excluding standalone dest_weighbridge & tax_invoice rows)
   const primaryDOs = orders.filter(
-    o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice'
+    o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice' && !isMatchedOriginWeighbridge(o)
   );
 
   const uniqueProjects = new Set(primaryDOs.map(r => (r.col2 || '').trim()).filter(Boolean));

@@ -7,7 +7,7 @@ import {
   SystemSettings,
   AppUser
 } from '../types';
-import { reconcilePO } from '../utils/poReconciliation';
+import { isMatchedOriginWeighbridge, reconcilePO } from '../utils/poReconciliation';
 import { STANDARD_CONSTRUCTION_CATEGORIES } from '../utils/dbLookup';
 import { DEFAULT_COMPANY_LOGO_URL } from '../utils/systemConfig';
 import {
@@ -148,7 +148,9 @@ export const ReportsExportView: React.FC<ReportsExportViewProps> = ({
   // Primary Delivery Orders (Exclude standalone dest_weighbridge & merged tax_invoice for anti-double counting)
   const primaryDeliveries = useMemo(() => {
     return filteredOrders.filter(
-      o => o.docType !== 'dest_weighbridge' && !(o.docType === 'tax_invoice' && o.linkedViaDocNo)
+      o => o.docType !== 'dest_weighbridge' &&
+        !isMatchedOriginWeighbridge(o) &&
+        !(o.docType === 'tax_invoice' && o.linkedViaDocNo)
     );
   }, [filteredOrders]);
 

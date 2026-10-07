@@ -23,7 +23,7 @@ import {
   BillingNoteRecord,
   ContractorChargeDocument
 } from './types';
-import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO } from './utils/poReconciliation';
+import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
 import {
@@ -129,7 +129,8 @@ const syncStoreFinancials = (storesList: StoreMerchant[], ordersList: OrderRecor
   return storesList.map(store => {
     const storeOrders = ordersList.filter(
       o => (o.storeId === store.id || (o.col8 && o.col8.trim().toLowerCase() === store.name.trim().toLowerCase())) &&
-           o.docType !== 'dest_weighbridge'
+           o.docType !== 'dest_weighbridge' &&
+           !isMatchedOriginWeighbridge(o)
     );
     const hasPricedDeliveries = storeOrders.some(
       o => o.docType !== 'tax_invoice' && (Number(o.col29) > 0 || Number(o.col25) > 0)
@@ -1373,6 +1374,234 @@ export default function App() {
     showToast('สลับเข้าสู่หน้าต่างบันทึกใบสั่งซื้อ (PO) เรียบร้อยแล้ว');
   };
 
+  const handlePairWeighbridgeInboxItem = async (inboxId: string, doOrderId: string): Promise<void> => {
+    if (!currentPermissions.canEditOrder) {
+      throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์แก้ไขบิล`);
+    }
+    const inboxItem = lineInbox.find(item => item.id === inboxId);
+    const targetDO = orders.find(item => item.id === doOrderId);
+    if (!inboxItem || inboxItem.detectedDocType !== 'weighbridge') {
+      throw new Error('ไม่พบรายการตั๋วชั่งต้นทางในกล่องพัก LINE');
+    }
+    if (!targetDO || (targetDO.docType !== 'delivery_order' && targetDO.docType !== 'concrete')) {
+      throw new Error('ไม่พบใบส่งของปลายทางที่เลือก');
+    }
+    const existingTicket = orders.find(item => item.lineInboxId === inboxId);
+    if (existingTicket?.matchedOriginDoId === targetDO.id) {
+      throw new Error('ตั๋วชั่งใบนี้จับคู่กับใบส่งของที่เลือกอยู่แล้ว');
+    }
+    if (
+      existingTicket?.matchedOriginDoId &&
+      existingTicket.matchedOriginDoId !== targetDO.id &&
+      !window.confirm(`ตั๋วชั่งนี้จับคู่กับใบส่งของ ${existingTicket.linkedViaDocNo || existingTicket.matchedOriginDoId} อยู่แล้ว ต้องการย้ายไปจับคู่กับ ${targetDO.col6} หรือไม่?`)
+    ) {
+      throw new Error('ผู้ใช้ยกเลิกการเปลี่ยนคู่');
+    }
+    if (!inboxItem.driveFileId) {
+      throw new Error('ยังไม่มีรูปตั๋วชั่งใน Google Drive จึงจับคู่ไม่ได้');
+    }
+    const ticketData = inboxItem.extractedData;
+    const ticketNumber = ticketData.col6?.trim() || '';
+    const gross = Number(ticketData.col13) || 0;
+    const tare = Number(ticketData.col14) || 0;
+    const net = Number(ticketData.col15) || Math.max(0, gross - tare);
+    if (!ticketNumber || net <= 0) {
+      throw new Error('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิให้ครบก่อนจับคู่');
+    }
+
+    const driveResponse = await fetch('/api/drive/rename-and-move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: inboxItem.driveFileId,
+        docType: 'weighbridge',
+        docDate: ticketData.col7 || targetDO.col7,
+        docNumber: ticketNumber
+      })
+    });
+    const driveResult = await driveResponse.json();
+    if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== 'zone_02') {
+      throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปตั๋วชั่งไปโซนใบส่งของ');
+    }
+    const driveFileLocation: OrderRecord['driveFileLocation'] = 'zone_02';
+
+    const now = new Date().toISOString();
+    const pairedTicket: OrderRecord = normalizeOrderWeights({
+      ...(existingTicket || {}),
+      ...ticketData,
+      id: existingTicket?.id || `line-wb-${inboxItem.id}`,
+      docType: 'weighbridge',
+      col1: ticketData.col1 || targetDO.col1,
+      col2: ticketData.col2 || targetDO.col2,
+      col3: ticketData.col3 || 'งานหิน/ดิน/ทราย',
+      col4: ticketData.col4 || targetDO.col4,
+      col5: ticketData.col5 || '',
+      col6: ticketNumber,
+      col7: ticketData.col7 || targetDO.col7,
+      col8: ticketData.col8 || targetDO.col8,
+      col9: ticketData.col9 || targetDO.col9,
+      col10: ticketData.col10 || '',
+      col11: ticketData.col11 || targetDO.col11,
+      col12: ticketData.col12 || '',
+      col13: gross,
+      col14: tare,
+      col15: net,
+      col16: '',
+      col17: '',
+      col18: 0,
+      col19: 0,
+      col20: 0,
+      col21: 0,
+      col22: Number(ticketData.col22) || 0,
+      col23: ticketData.col23 || 'ตัน',
+      col24: Number(ticketData.col24) || 0,
+      col25: Number(ticketData.col25) || 0,
+      col26: ticketData.col26 || '',
+      col27: Number(ticketData.col27) || 0,
+      col28: Number(ticketData.col28) || 0,
+      col29: Number(ticketData.col29) || 0,
+      col30: ticketData.col30 || '',
+      col31: Number(ticketData.col31) || 0,
+      col32: Number(ticketData.col32) || 0,
+      col33: Number(ticketData.col33) || 0,
+      col34: Number(ticketData.col34) || 0,
+      col35: Number(ticketData.col35) || 0,
+      col36: Number(ticketData.col36) || 0,
+      col37: ticketData.col37 || '',
+      col38: ticketData.col38 || '',
+      image: inboxItem.driveWebViewLink ||
+        `https://drive.google.com/uc?export=view&id=${encodeURIComponent(inboxItem.driveFileId)}`,
+      driveFileId: inboxItem.driveFileId,
+      driveFileLocation,
+      lineInboxId: inboxItem.id,
+      lineMessageId: inboxItem.lineMessageId,
+      lineSenderName: inboxItem.lineSenderName,
+      lineGroupName: inboxItem.lineGroupName,
+      lineReceivedAt: inboxItem.receivedAt,
+      referenceDocNo: targetDO.col6,
+      referenceSource: 'form_field',
+      linkedViaDocNo: targetDO.col6,
+      matchedOriginDoId: targetDO.id,
+      status: 'verified',
+      autoFlagsVerified: true,
+      autoFlagsVerifiedBy: currentUser.fullName,
+      autoFlagsVerifiedAt: now,
+      createdBy: existingTicket?.createdBy || currentUser.fullName,
+      createdAt: existingTicket?.createdAt || now,
+      updatedBy: currentUser.fullName
+    });
+    const hasDOWeights = Number(targetDO.col13) > 0 || Number(targetDO.col14) > 0 || Number(targetDO.col15) > 0;
+    const updatedDO: OrderRecord = {
+      ...targetDO,
+      ...(hasDOWeights ? {} : { col13: gross, col14: tare, col15: net }),
+      updatedBy: currentUser.fullName
+    };
+    const verifiedInboxItem: LineBillInboxItem = {
+      ...inboxItem,
+      status: 'verified',
+      duplicateInfo: undefined,
+      verifiedOrderId: pairedTicket.col1,
+      verifiedBy: currentUser.fullName,
+      verifiedAt: now,
+      driveFileLocation,
+      extractedData: {
+        ...inboxItem.extractedData,
+        referenceDocNo: targetDO.col6,
+        linkedViaDocNo: targetDO.col6,
+        matchedOriginDoId: targetDO.id
+      }
+    };
+    const persistRecord = async (table: string, record: unknown) => {
+      const response = await fetch('/api/database/save-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table, record })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `บันทึก ${table} ไม่สำเร็จ`);
+      }
+    };
+    const rollbackRecord = async (table: string, id: string, previousRecord?: unknown) => {
+      if (previousRecord) {
+        await persistRecord(table, previousRecord);
+        return;
+      }
+      const response = await fetch('/api/database/delete-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table, id })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `ย้อนรายการ ${id} ไม่สำเร็จ`);
+      }
+    };
+
+    const inboxAfterDriveMove: LineBillInboxItem = {
+      ...inboxItem,
+      driveFileLocation
+    };
+    const ticketAfterDriveMove = existingTicket
+      ? { ...existingTicket, driveFileLocation }
+      : undefined;
+    let ticketWriteAttempted = false;
+    let doWriteAttempted = false;
+    let inboxWriteAttempted = false;
+    try {
+      ticketWriteAttempted = true;
+      await persistRecord('orders', pairedTicket);
+      doWriteAttempted = true;
+      await persistRecord('orders', updatedDO);
+      inboxWriteAttempted = true;
+      await persistRecord('line_inbox', verifiedInboxItem);
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (inboxWriteAttempted) {
+        try {
+          await rollbackRecord('line_inbox', inboxItem.id, inboxAfterDriveMove);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : 'ย้อนสถานะกล่องพัก LINE ไม่สำเร็จ');
+        }
+      }
+      if (doWriteAttempted) {
+        try {
+          await persistRecord('orders', targetDO);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : 'ย้อนใบส่งของไม่สำเร็จ');
+        }
+      }
+      if (ticketWriteAttempted) {
+        try {
+          await rollbackRecord('orders', pairedTicket.id, ticketAfterDriveMove);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : 'ย้อนตั๋วชั่งไม่สำเร็จ');
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw new Error(`บันทึกการจับคู่ไม่สำเร็จและย้อนข้อมูลไม่ครบ: ${rollbackErrors.join(' | ')}`);
+      }
+      throw error;
+    }
+
+    setOrders(previous => {
+      const updatedOrders = previous.map(item =>
+        item.id === updatedDO.id ? updatedDO : item
+      );
+      const ticketIndex = updatedOrders.findIndex(item => item.id === pairedTicket.id);
+      if (ticketIndex >= 0) updatedOrders[ticketIndex] = pairedTicket;
+      else updatedOrders.unshift(pairedTicket);
+      setStores(previousStores => syncStoreFinancials(previousStores, updatedOrders));
+      return updatedOrders;
+    });
+    setLineInbox(previous => previous.map(item =>
+      item.id === verifiedInboxItem.id ? verifiedInboxItem : item
+    ));
+    if (hasDOWeights) {
+      showToast('จับคู่ตั๋วชั่งแล้ว; ใบส่งของมีน้ำหนักเดิม ระบบจึงไม่เขียนทับน้ำหนักเดิม', 'info');
+    }
+  };
+
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
   const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
     const isExistingRecord = orders.some(o => o.id === order.id);
@@ -1415,9 +1644,66 @@ export default function App() {
     let verifiedLineItem: LineBillInboxItem | undefined;
     let verifiedLineTargetZone: OrderRecord['driveFileLocation'];
     let verifiedLineFileId: string | undefined;
+    let pairedWeighbridgeInboxItem: LineBillInboxItem | undefined;
+    let pairedWeighbridgeDriveLocation: OrderRecord['driveFileLocation'];
+    if (order.pairedWeighbridgeInboxId) {
+      pairedWeighbridgeInboxItem = lineInbox.find(item => item.id === order.pairedWeighbridgeInboxId);
+      if (
+        !pairedWeighbridgeInboxItem ||
+        pairedWeighbridgeInboxItem.status !== 'pending_review' ||
+        pairedWeighbridgeInboxItem.detectedDocType !== 'weighbridge' ||
+        !pairedWeighbridgeInboxItem.driveFileId
+      ) {
+        showToast('จับคู่ไม่ได้: ไม่พบตั๋วชั่งต้นทางที่ยังรอตรวจพร้อมรูปใน Google Drive', 'error');
+        return false;
+      }
+      const pairedTicketNumber = pairedWeighbridgeInboxItem.extractedData.col6?.trim();
+      const pairedTicketNet = Number(pairedWeighbridgeInboxItem.extractedData.col15) ||
+        Math.max(
+          0,
+          (Number(pairedWeighbridgeInboxItem.extractedData.col13) || 0) -
+          (Number(pairedWeighbridgeInboxItem.extractedData.col14) || 0)
+        );
+      if (!pairedTicketNumber || pairedTicketNet <= 0) {
+        showToast('จับคู่ไม่ได้: กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิจากภาพให้ครบก่อน', 'info');
+        return false;
+      }
+      try {
+        const driveResponse = await fetch('/api/drive/rename-and-move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileId: pairedWeighbridgeInboxItem.driveFileId,
+            docType: 'weighbridge',
+            docDate: pairedWeighbridgeInboxItem.extractedData.col7 || order.col7,
+            docNumber: pairedTicketNumber
+          })
+        });
+        const driveResult = await driveResponse.json();
+        if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== 'zone_02') {
+          throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปตั๋วชั่งไปโซนใบส่งของ');
+        }
+        pairedWeighbridgeDriveLocation = 'zone_02';
+        pairedWeighbridgeInboxItem = {
+          ...pairedWeighbridgeInboxItem,
+          driveFileLocation: 'zone_02'
+        };
+      } catch (error) {
+        const reason = error instanceof Error ? `: ${error.message}` : '';
+        showToast(`ยังไม่ได้บันทึกใบส่งของ เพราะย้ายรูปตั๋วชั่งไม่สำเร็จ${reason}`, 'error');
+        return false;
+      }
+    }
     if (order.lineInboxId) {
       verifiedLineItem = lineInbox.find(item => item.id === order.lineInboxId);
       if (!verifiedLineItem?.driveFileId) {
+        if (pairedWeighbridgeInboxItem && pairedWeighbridgeDriveLocation === 'zone_02') {
+          setLineInbox(previous => previous.map(item =>
+            item.id === pairedWeighbridgeInboxItem!.id
+              ? { ...item, driveFileLocation: 'zone_02' }
+              : item
+          ));
+        }
         showToast('ยังบันทึกใบตรวจรับไม่ได้: ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน', 'info');
         return false;
       }
@@ -1452,6 +1738,13 @@ export default function App() {
           };
         } catch (err: any) {
           console.error('[LINE Inbox] Could not move image before saving order:', err);
+          if (pairedWeighbridgeInboxItem && pairedWeighbridgeDriveLocation === 'zone_02') {
+            setLineInbox(previous => previous.map(item =>
+              item.id === pairedWeighbridgeInboxItem!.id
+                ? { ...item, driveFileLocation: 'zone_02' }
+                : item
+            ));
+          }
           showToast(`ยังไม่ได้บันทึกใบตรวจรับ เพราะย้ายรูปใน Google Drive ไม่สำเร็จ: ${err?.message || 'ตรวจสอบการเชื่อมต่อ Drive'}`, 'error');
           return false;
         }
@@ -1487,6 +1780,84 @@ export default function App() {
         createdBy: order.createdBy || currentUser.fullName,
         updatedBy: currentUser.fullName
       });
+      let pairedWeighbridgeOrder: OrderRecord | undefined;
+      if (pairedWeighbridgeInboxItem) {
+        const ticketData = pairedWeighbridgeInboxItem.extractedData;
+        const ticketNumber = ticketData.col6?.trim() || '';
+        const ticketGross = Number(ticketData.col13) || 0;
+        const ticketTare = Number(ticketData.col14) || 0;
+        const ticketNet = Number(ticketData.col15) || Math.max(0, ticketGross - ticketTare);
+        const existingTicketOrder = workingList.find(
+          existing => existing.lineInboxId === pairedWeighbridgeInboxItem!.id
+        );
+        const pairedTicketFlags = new Set<string>(existingTicketOrder?.autoActionFlags || []);
+        pairedTicketFlags.add(`⚖️ ผู้ใช้จับคู่ตั๋วชั่งกับใบส่งของ ${orderToSave.col6}`);
+        pairedWeighbridgeOrder = normalizeOrderWeights({
+          ...(existingTicketOrder || {}),
+          ...ticketData,
+          id: existingTicketOrder?.id || `line-wb-${pairedWeighbridgeInboxItem.id}`,
+          docType: 'weighbridge',
+          col1: ticketData.col1 || orderToSave.col1,
+          col2: orderToSave.col2,
+          col3: ticketData.col3 || 'งานหิน/ดิน/ทราย',
+          col4: ticketData.col4 || orderToSave.col4,
+          col5: ticketData.col5 || '',
+          col6: ticketNumber,
+          col7: ticketData.col7 || orderToSave.col7,
+          col8: ticketData.col8 || orderToSave.col8,
+          col9: ticketData.col9 || orderToSave.col9,
+          col10: ticketData.col10 || '',
+          col11: ticketData.col11 || orderToSave.col11,
+          col12: ticketData.col12 || '',
+          col13: ticketGross,
+          col14: ticketTare,
+          col15: ticketNet,
+          col16: '',
+          col17: '',
+          col18: 0,
+          col19: 0,
+          col20: 0,
+          col21: 0,
+          col22: Number(ticketData.col22) || 0,
+          col23: ticketData.col23 || 'ตัน',
+          col24: Number(ticketData.col24) || 0,
+          col25: Number(ticketData.col25) || 0,
+          col26: ticketData.col26 || '',
+          col27: Number(ticketData.col27) || 0,
+          col28: Number(ticketData.col28) || 0,
+          col29: Number(ticketData.col29) || 0,
+          col30: ticketData.col30 || '',
+          col31: Number(ticketData.col31) || 0,
+          col32: Number(ticketData.col32) || 0,
+          col33: Number(ticketData.col33) || 0,
+          col34: Number(ticketData.col34) || 0,
+          col35: Number(ticketData.col35) || 0,
+          col36: Number(ticketData.col36) || 0,
+          col37: ticketData.col37 || '',
+          col38: ticketData.col38 || '',
+          image: pairedWeighbridgeInboxItem.driveWebViewLink ||
+            `https://drive.google.com/uc?export=view&id=${encodeURIComponent(pairedWeighbridgeInboxItem.driveFileId || '')}`,
+          driveFileId: pairedWeighbridgeInboxItem.driveFileId,
+          driveFileLocation: pairedWeighbridgeDriveLocation || 'zone_02',
+          lineInboxId: pairedWeighbridgeInboxItem.id,
+          lineMessageId: pairedWeighbridgeInboxItem.lineMessageId,
+          lineSenderName: pairedWeighbridgeInboxItem.lineSenderName,
+          lineGroupName: pairedWeighbridgeInboxItem.lineGroupName,
+          lineReceivedAt: pairedWeighbridgeInboxItem.receivedAt,
+          referenceDocNo: orderToSave.col6,
+          referenceSource: 'form_field',
+          linkedViaDocNo: orderToSave.col6,
+          matchedOriginDoId: orderToSave.id,
+          status: 'verified',
+          autoActionFlags: Array.from(pairedTicketFlags),
+          autoFlagsVerified: true,
+          autoFlagsVerifiedBy: currentUser.fullName,
+          autoFlagsVerifiedAt: new Date().toISOString(),
+          createdBy: currentUser.fullName,
+          createdAt: existingTicketOrder?.createdAt || new Date().toISOString(),
+          updatedBy: currentUser.fullName
+        });
+      }
 
       // =========================================================================
       // STRICT REFERENCE-NUMBER-ONLY AUTO-MATCHING (ZONES 1-4) + VERIFICATION FLAGS
@@ -1686,6 +2057,11 @@ export default function App() {
       } else {
         workingList = [orderToSave, ...workingList];
       }
+      if (pairedWeighbridgeOrder) {
+        const pairedIdx = workingList.findIndex(item => item.id === pairedWeighbridgeOrder!.id);
+        if (pairedIdx >= 0) workingList[pairedIdx] = pairedWeighbridgeOrder;
+        else workingList = [pairedWeighbridgeOrder, ...workingList];
+      }
 
       workingList = reconcileAndHealOrders(workingList);
 
@@ -1878,11 +2254,29 @@ export default function App() {
         });
 
         // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
-        return updatedInbox.map(item =>
-          item.id === order.lineInboxId && verifiedLineItem
-            ? { ...item, driveFileLocation: verifiedLineItem.driveFileLocation }
-            : item
-        );
+        return updatedInbox.map(item => {
+          if (item.id === order.lineInboxId && verifiedLineItem) {
+            return { ...item, driveFileLocation: verifiedLineItem.driveFileLocation };
+          }
+          if (pairedWeighbridgeInboxItem && item.id === pairedWeighbridgeInboxItem.id) {
+            return {
+              ...item,
+              status: 'verified',
+              duplicateInfo: undefined,
+              verifiedOrderId: pairedWeighbridgeInboxItem.extractedData.col1 || order.col1,
+              verifiedBy: currentUser.fullName,
+              verifiedAt: new Date().toISOString(),
+              driveFileLocation: pairedWeighbridgeDriveLocation || item.driveFileLocation,
+              extractedData: {
+                ...item.extractedData,
+                linkedViaDocNo: order.col6,
+                referenceDocNo: order.col6,
+                matchedOriginDoId: order.id
+              }
+            };
+          }
+          return item;
+        });
       });
     }
 
@@ -2061,6 +2455,12 @@ export default function App() {
     }
     const orderToDelete = orders.find(order => order.id === id);
     if (!skipConfirm && !window.confirm(`ยืนยันลบรายการ ${orderToDelete?.col1 || id} หรือไม่?`)) return;
+    const releasedOriginTicketInboxIds = new Set(
+      orders
+        .filter(order => order.docType === 'weighbridge' && order.matchedOriginDoId === id)
+        .map(order => order.lineInboxId)
+        .filter((inboxId): inboxId is string => Boolean(inboxId))
+    );
     if (!(await deleteRecordFromDb('orders', id))) return;
     setOrders(prev => {
       const target = prev.find(o => o.id === id);
@@ -2139,6 +2539,15 @@ export default function App() {
                   linkedViaDocNo: kept.join(', ')
                 };
               }
+            } else if (ord.docType === 'weighbridge' && ord.matchedOriginDoId === target.id) {
+              return {
+                ...ord,
+                matchedOriginDoId: null,
+                referenceDocNo: '',
+                referenceSource: undefined,
+                linkedViaDocNo: '',
+                updatedBy: currentUser.fullName
+              };
             }
             return ord;
           });
@@ -2148,6 +2557,26 @@ export default function App() {
       setStores(prevStores => syncStoreFinancials(prevStores, remaining));
       return remaining;
     });
+    if (releasedOriginTicketInboxIds.size > 0) {
+      setLineInbox(previous => {
+        const next = previous.map(item =>
+          releasedOriginTicketInboxIds.has(item.id)
+            ? {
+                ...item,
+                extractedData: {
+                  ...item.extractedData,
+                  referenceDocNo: '',
+                  referenceSource: undefined,
+                  linkedViaDocNo: '',
+                  matchedOriginDoId: null
+                }
+              }
+            : item
+        );
+        debouncedSyncToDb('line_inbox', next);
+        return next;
+      });
+    }
     if (!skipConfirm) {
       showToast('ลบรายการและอัปเดตสถานะเอกสารที่เชื่อมโยงเรียบร้อยแล้ว');
     }
@@ -3246,6 +3675,7 @@ export default function App() {
                 await deleteLineInboxItem(id);
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
+              onPairWeighbridgeInboxItem={handlePairWeighbridgeInboxItem}
               onSyncWebhookQueue={syncWebhookQueueToLocal}
               onOpenSystemSettings={() => setActiveTab('settings')}
               showToast={showToast}
