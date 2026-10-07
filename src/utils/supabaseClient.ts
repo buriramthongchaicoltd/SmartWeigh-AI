@@ -215,6 +215,16 @@ CREATE TABLE IF NOT EXISTS public.app_users (
 ALTER TABLE public.app_users
   ADD COLUMN IF NOT EXISTS first_password_change_completed BOOLEAN NOT NULL DEFAULT FALSE;
 
+CREATE TABLE IF NOT EXISTS public.auth_sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES public.app_users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  first_password_change_pending BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS auth_sessions_user_id_idx ON public.auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS auth_sessions_expires_at_idx ON public.auth_sessions(expires_at);
+
 CREATE TABLE IF NOT EXISTS public.system_config (
   config_key TEXT PRIMARY KEY,
   config_value JSONB NOT NULL,
@@ -254,6 +264,7 @@ ALTER TABLE public.line_inbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.stores ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.auth_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.system_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.billing_notes ENABLE ROW LEVEL SECURITY;
 
@@ -269,7 +280,7 @@ BEGIN
     WHERE schemaname = 'public'
       AND tablename = ANY (ARRAY[
         'orders', 'purchase_orders', 'line_inbox', 'stores',
-        'projects', 'app_users', 'system_config', 'billing_notes'
+        'projects', 'app_users', 'auth_sessions', 'system_config', 'billing_notes'
       ])
   LOOP
     EXECUTE format(
@@ -289,6 +300,7 @@ REVOKE ALL PRIVILEGES ON TABLE
   public.stores,
   public.projects,
   public.app_users,
+  public.auth_sessions,
   public.system_config,
   public.billing_notes
 FROM PUBLIC, anon, authenticated;
@@ -299,6 +311,7 @@ GRANT ALL PRIVILEGES ON TABLE
   public.stores,
   public.projects,
   public.app_users,
+  public.auth_sessions,
   public.system_config,
   public.billing_notes
 TO service_role;

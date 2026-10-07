@@ -1159,7 +1159,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 )}
               </div>
               <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                ระบบเริ่มตรวจฐานข้อมูล 10 ตาราง, Google Drive, Gemini API และ LINE Token ตั้งแต่เปิดหน้าเข้าสู่ระบบ
+                ระบบเริ่มตรวจฐานข้อมูล 11 ตาราง, Google Drive, Gemini API และ LINE Token ตั้งแต่เปิดหน้าเข้าสู่ระบบ
               </p>
             </div>
           </div>
@@ -1215,13 +1215,13 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               ) : startupStatus?.supabase === 'error' ? (
                 <span className="text-rose-300">❌ {startupStatus.supabaseMessage}</span>
               ) : dbStatus?.isConfigured ? (
-                <span className="text-amber-300">⏳ กำลังตรวจสอบฐานข้อมูลและ 10 ตารางอัตโนมัติ...</span>
+                <span className="text-amber-300">⏳ กำลังตรวจสอบฐานข้อมูลและ 11 ตารางอัตโนมัติ...</span>
               ) : (
                 <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
               )}
             </div>
             <div className="text-[10px] text-slate-400 mt-1 truncate">
-              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 10 ตาราง'}
+              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 11 ตาราง'}
             </div>
           </div>
 
@@ -2284,7 +2284,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4 text-emerald-600" />
                     <h4 className="text-sm font-bold text-slate-900">
-                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 10 ตาราง
+                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 11 ตาราง
                     </h4>
                   </div>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">
@@ -2300,10 +2300,11 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     { key: 'stores', name: '4. stores', desc: 'ทะเบียนร้านค้า/คู่ค้า' },
                     { key: 'projects', name: '5. projects', desc: 'ทะเบียนโครงการก่อสร้าง' },
                     { key: 'app_users', name: '6. app_users', desc: 'บัญชีผู้ใช้และสิทธิ์การใช้งาน' },
-                    { key: 'system_config', name: '7. system_config', desc: 'ค่าตั้งค่าระบบที่บันทึกบน Cloud' },
-                    { key: 'billing_notes', name: '8. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' },
-                    { key: 'contractor_charge_notes', name: '9. contractor_charge_notes', desc: 'เอกสารแนบหักค่าวัสดุผู้รับเหมา' },
-                    { key: 'contractor_charge_lines', name: '10. contractor_charge_lines', desc: 'รายการ PO/DO ในเอกสารแนบ' }
+                    { key: 'auth_sessions', name: '7. auth_sessions', desc: 'session เข้ารหัสสำหรับทุก server instance' },
+                    { key: 'system_config', name: '8. system_config', desc: 'ค่าตั้งค่าระบบที่บันทึกบน Cloud' },
+                    { key: 'billing_notes', name: '9. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' },
+                    { key: 'contractor_charge_notes', name: '10. contractor_charge_notes', desc: 'เอกสารแนบหักค่าวัสดุผู้รับเหมา' },
+                    { key: 'contractor_charge_lines', name: '11. contractor_charge_lines', desc: 'รายการ PO/DO ในเอกสารแนบ' }
                   ].map(t => {
                     const isFound = dbStatus?.tables ? dbStatus.tables[t.key] : false;
                     const rowCount = dbStatus?.tableCounts ? dbStatus.tableCounts[t.key] : undefined;

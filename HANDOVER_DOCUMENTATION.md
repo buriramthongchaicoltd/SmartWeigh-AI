@@ -41,13 +41,13 @@
 
 ### สถานะความปลอดภัยหลังแก้ไขใน repository
 - ลบ `.supabase_config.json` ที่ติดตามใน Git และเอา credential fallback ออกจาก source; service-role key และ `DATABASE_URL` รับจาก runtime environment เท่านั้น. Backend ไม่ fallback ไป `SUPABASE_ANON_KEY`; ตั้ง `SUPABASE_URL` และ `SUPABASE_SERVICE_ROLE_KEY` ใน Render Environment เพื่อให้การตรวจ connection สะท้อน credential ที่ backend ต้องใช้จริง. **credential เดิมยังคงอยู่ใน Git history จึงต้องเพิกถอน/หมุนบน Supabase และตรวจการใช้งานย้อนหลัง**
-- หน้าตั้งค่ารายงานการเชื่อมต่อแยกตามค่า Environment/ค่าที่บันทึกผ่านแอป และตรวจ schema 10 ตาราง รวม `system_config` ซึ่งใช้ `config_key` เป็น key และ 2 ตารางเอกสารแนบหักผู้รับเหมา; การตรวจยืนยันเพียงชื่อตาราง/การอ่าน ไม่ได้ยืนยันว่าข้อมูล production ถูกต้องครบถ้วน
+- หน้าตั้งค่ารายงานการเชื่อมต่อแยกตามค่า Environment/ค่าที่บันทึกผ่านแอป และตรวจ schema 11 ตาราง รวม `auth_sessions` สำหรับ session ที่ใช้ร่วมกันระหว่าง server instance, `system_config` ซึ่งใช้ `config_key` เป็น key และ 2 ตารางเอกสารแนบหักผู้รับเหมา; การตรวจยืนยันเพียงชื่อตาราง/การอ่าน ไม่ได้ยืนยันว่าข้อมูล production ถูกต้องครบถ้วน
 - DDL ใน `src/utils/supabaseClient.ts` เปิด RLS, ลบ policy เดิมบนตารางแอป, เพิกถอนสิทธิ์ `anon`/`authenticated` และให้ `service_role` เท่านั้น. ผู้ดูแลต้องนำ DDL รุ่นนี้ไปรันใน Supabase จริง; การแก้ source ไม่เปลี่ยน production database อัตโนมัติ
 - API บังคับ role สำหรับการลบข้อมูลและการจัดการไฟล์; role `user` จำกัดตารางที่เขียนได้และ backend ป้องกันการเปลี่ยน RR/จำนวน/ราคา/การชำระเงินโดยตรง. ตรวจ session และ role ที่ server ทุกครั้ง ไม่ถือ UI เป็น security boundary
 - เมื่อยังไม่มี Master Admin ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; บัญชีเดิมที่ยังใช้ `@Admin` ล็อกอินได้เพื่อรองรับระบบเดิม ส่วน `123456` ถูกปฏิเสธ; runtime secret ใช้หมุนรหัส Master เดิมได้
 - Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Admin สร้างรหัสจากหน้า Settings ได้ ระบบเก็บไว้แบบเข้ารหัสใน `system_config` และไม่ต้องเพิ่มรหัสใน Render Environment. เจ้าของ Script ยังคงต้องบันทึก Property นี้ใน Apps Script หนึ่งครั้ง แล้ว deploy source รุ่นล่าสุด
 - **งานภายนอกที่ยังต้องทำโดยผู้ดูแล:** หมุน Supabase key, ตั้ง Render environment secrets, ใช้ DDL ปิด policy ในฐานข้อมูลจริง, deploy GAS รุ่นล่าสุด/ตั้ง Script Property และตรวจสอบ Git history กับสถานะ production. ยังไม่ได้เชื่อมต่อหรือแก้บริการ production จาก workspace นี้
-- Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. ทุกบัญชีที่ยังไม่เปลี่ยนรหัสจะแสดงหน้าต่างเปลี่ยนรหัสหลัง login; เปลี่ยนได้ด้วยรหัสเดิมและรหัสใหม่อย่างน้อย 12 ตัวอักษร หรือเลือกข้ามเฉพาะ session นี้เพื่อเข้าใช้งานและรับการเตือนอีกครั้งใน login ถัดไป. บันทึกสถานะใน `app_users.first_password_change_completed`; ต้องรัน DDL ล่าสุดก่อนเปิดใช้ feature. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
+- Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; token hash เก็บใน `auth_sessions` เพื่อให้ทุก server instance ตรวจ/เพิกถอน session ร่วมกัน และอ่าน role/status ปัจจุบันจาก `app_users` ทุกครั้ง. ต้องรัน DDL ล่าสุดก่อน deploy; session เดิมที่อยู่ใน memory จะใช้ต่อไม่ได้และผู้ใช้ต้อง login ใหม่หลัง deploy. ทุกบัญชีที่ยังไม่เปลี่ยนรหัสจะแสดงหน้าต่างเปลี่ยนรหัสหลัง login; เปลี่ยนได้ด้วยรหัสเดิมและรหัสใหม่อย่างน้อย 12 ตัวอักษร หรือเลือกข้ามเฉพาะ session นี้เพื่อเข้าใช้งานและรับการเตือนอีกครั้งใน login ถัดไป. บันทึกสถานะใน `app_users.first_password_change_completed`; ต้องรัน DDL ล่าสุดก่อนเปิดใช้ feature. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
 
 ---
 
@@ -164,7 +164,7 @@
      - **โหมดที่ 2: Google Service Account:** สำหรับองค์กรที่ใช้ Google Cloud Platform แบบเป็นทางการ โดยระบุ Service Account Email และ Private Key
    - **ระบบทดสอบการเชื่อมต่ออัตโนมัติ (Auto-Test & Real-Time Error Reporting):**
      - เริ่มตรวจสอบอัตโนมัติทั้งตอน server เริ่มทำงานและเมื่อเปิดเว็บไซต์ที่หน้าเข้าสู่ระบบ (`POST /api/startup/auto-check`); การเรียกซ้ำภายใน 60 วินาทีใช้ผลตรวจล่าสุดเพื่อไม่ยิง API ภายนอกซ้ำ
-     - ทดสอบการเชื่อมต่อฐานข้อมูลและตรวจ 10 ตาราง, Google Drive, Gemini API และ LINE Channel Access Token; ผลละเอียดแสดงในหน้าตั้งค่าระบบ
+     - ทดสอบการเชื่อมต่อฐานข้อมูลและตรวจ 11 ตาราง, Google Drive, Gemini API และ LINE Channel Access Token; ผลละเอียดแสดงในหน้าตั้งค่าระบบ
      - LINE self-test ตรวจเฉพาะ Token กับ LINE Messaging API ไม่ได้ยืนยันการตั้งค่า Webhook หรือการรับบิลจริง
      - Admin สั่งทดสอบใหม่ได้จากปุ่ม Self-Test ใน Settings (`POST /api/startup/retest`)
      - ตรวจสอบทันทีหลังกดปุ่มบันทึกข้อมูล พร้อมแสดงป้าย `เชื่อมต่อสำเร็จ (ชื่อโฟลเดอร์)` หรือป้ายเตือนสีแดงพร้อมระบุสาเหตุข้อผิดพลาดทันทีหากตั้งค่าไม่ถูกต้อง

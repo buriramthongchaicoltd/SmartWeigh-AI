@@ -64,11 +64,12 @@ const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SYSTEM_MASTER_USERNAME = 'Admin';
 const SYSTEM_MASTER_INITIAL_PASSWORD = (process.env.SYSTEM_MASTER_ADMIN_PASSWORD || '').trim();
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
-const authSessions = new Map<string, {
+type AuthSession = {
   user: AuthenticatedAppUser;
   expiresAt: number;
   firstPasswordChangePending: boolean;
-}>();
+};
+const authSessions = new Map<string, AuthSession>();
 const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
 
 function publicAppUser(row: Record<string, any>): AuthenticatedAppUser {
@@ -92,19 +93,62 @@ function getSessionToken(req: Request): string | null {
   return sessionCookie ? decodeURIComponent(sessionCookie.slice(AUTH_COOKIE_NAME.length + 1)) : null;
 }
 
-function getAuthenticatedSession(req: Request) {
+function hashSessionToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function isMissingAuthSessionsTable(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error)) return false;
+  return error.code === '42P01' || error.code === 'PGRST205';
+}
+
+async function getAuthenticatedSession(req: Request) {
   const token = getSessionToken(req);
   if (!token) return null;
-  const session = authSessions.get(token);
-  if (!session || session.expiresAt <= Date.now()) {
+  const client = getSupabaseClient();
+  if (!client) throw new Error('ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับตรวจสอบ session');
+
+  const { data, error } = await client
+    .from('auth_sessions')
+    .select('user_id,expires_at,first_password_change_pending')
+    .eq('token_hash', hashSessionToken(token))
+    .gt('expires_at', new Date().toISOString())
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) {
     authSessions.delete(token);
     return null;
   }
+
+  const { data: userRow, error: userError } = await client
+    .from('app_users')
+    .select('*')
+    .eq('id', data.user_id)
+    .maybeSingle();
+  if (userError) throw userError;
+  if (!userRow || userRow.status === 'suspended') {
+    const { error: revokeError } = await client.from('auth_sessions')
+      .delete()
+      .eq('token_hash', hashSessionToken(token));
+    if (revokeError) throw revokeError;
+    authSessions.delete(token);
+    return null;
+  }
+
+  const session: AuthSession = {
+    user: publicAppUser(userRow),
+    expiresAt: new Date(data.expires_at).getTime(),
+    firstPasswordChangePending: Boolean(data.first_password_change_pending)
+  };
+  authSessions.set(token, session);
   return { token, session };
 }
 
 function getAuthenticatedUser(req: Request): AuthenticatedAppUser | null {
-  return getAuthenticatedSession(req)?.session.user || null;
+  const token = getSessionToken(req);
+  if (!token) return null;
+  const session = authSessions.get(token);
+  return session && session.expiresAt > Date.now() ? session.user : null;
 }
 
 function setSessionCookie(res: Response, token: string, maxAgeSeconds: number) {
@@ -140,7 +184,11 @@ function verifyPassword(password: string, stored: string): { valid: boolean; nee
   };
 }
 
-function invalidateUserSessions(userId: string) {
+async function invalidateUserSessions(userId: string) {
+  const client = getSupabaseClient();
+  if (!client) throw new Error('ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับเพิกถอน session');
+  const { error } = await client.from('auth_sessions').delete().eq('user_id', userId);
+  if (error) throw error;
   for (const [token, session] of authSessions) {
     if (session.user.id === userId) authSessions.delete(token);
   }
@@ -230,36 +278,68 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     const user = publicAppUser(row);
     const firstPasswordChangePending = row.first_password_change_completed !== true;
     const token = crypto.randomBytes(32).toString('base64url');
-    authSessions.set(token, { user, expiresAt: now + AUTH_SESSION_TTL_MS, firstPasswordChangePending });
+    const session: AuthSession = {
+      user,
+      expiresAt: now + AUTH_SESSION_TTL_MS,
+      firstPasswordChangePending
+    };
+    const { error: sessionError } = await client.from('auth_sessions').insert({
+      token_hash: hashSessionToken(token),
+      user_id: user.id,
+      expires_at: new Date(session.expiresAt).toISOString(),
+      first_password_change_pending: firstPasswordChangePending
+    });
+    if (sessionError) throw sessionError;
+    authSessions.set(token, session);
     loginRateLimits.delete(ip);
     setSessionCookie(res, token, Math.floor(AUTH_SESSION_TTL_MS / 1000));
     return res.json({ success: true, user, mustChangePassword: firstPasswordChangePending });
   } catch (err: any) {
     console.error('[Auth] Login failed:', err?.message || err);
+    if (isMissingAuthSessionsTable(err)) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนเข้าสู่ระบบ' });
+    }
     return res.status(500).json({ success: false, error: 'เข้าสู่ระบบไม่สำเร็จเนื่องจากระบบยืนยันตัวตนขัดข้อง' });
   }
 });
 
-app.get('/api/auth/me', (req: Request, res: Response) => {
+app.get('/api/auth/me', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
-  const authenticated = getAuthenticatedSession(req);
-  return authenticated
-    ? res.json({
+  try {
+    const authenticated = await getAuthenticatedSession(req);
+    return authenticated
+      ? res.json({
         success: true,
         user: authenticated.session.user,
         mustChangePassword: authenticated.session.firstPasswordChangePending
       })
-    : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
+      : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
+  } catch (error) {
+    console.error('[Auth] Session lookup failed:', error);
+    const message = isMissingAuthSessionsTable(error)
+      ? 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนเข้าสู่ระบบ'
+      : 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง';
+    return res.status(503).json({ success: false, error: message });
+  }
 });
 
-app.post('/api/auth/logout', (req: Request, res: Response) => {
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
   const token = getSessionToken(req);
-  if (token) authSessions.delete(token);
+  if (token) {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับออกจากระบบ' });
+    const { error } = await client.from('auth_sessions').delete().eq('token_hash', hashSessionToken(token));
+    if (error) {
+      console.error('[Auth] Session revocation failed:', error);
+      return res.status(503).json({ success: false, error: 'เพิกถอน session ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' });
+    }
+    authSessions.delete(token);
+  }
   setSessionCookie(res, '', 0);
   return res.json({ success: true });
 });
 
-app.use('/api', (req: Request, res: Response, next) => {
+app.use('/api', async (req: Request, res: Response, next) => {
   const internalToken = req.headers['x-internal-api-token'];
   if (typeof internalToken === 'string' && internalToken.length === INTERNAL_API_TOKEN.length &&
       crypto.timingSafeEqual(Buffer.from(internalToken), Buffer.from(INTERNAL_API_TOKEN))) {
@@ -268,7 +348,17 @@ app.use('/api', (req: Request, res: Response, next) => {
   const publicPaths = new Set(['/auth/login', '/auth/me', '/auth/logout', '/status', '/line/webhook', '/startup/auto-check']);
   if (publicPaths.has(req.path)) return next();
 
-  const user = getAuthenticatedUser(req);
+  let user: AuthenticatedAppUser | null;
+  try {
+    const authenticated = await getAuthenticatedSession(req);
+    user = authenticated?.session.user || null;
+  } catch (error) {
+    console.error('[Auth] Protected API session lookup failed:', error);
+    const message = isMissingAuthSessionsTable(error)
+      ? 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนใช้งาน'
+      : 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง';
+    return res.status(503).json({ success: false, error: message });
+  }
   if (!user) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
 
   const adminOnlyPaths = new Set([
@@ -319,17 +409,38 @@ app.use('/api', (req: Request, res: Response, next) => {
   return next();
 });
 
-app.post('/api/auth/password/skip-first-change', (req: Request, res: Response) => {
+app.post('/api/auth/password/skip-first-change', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
-  const authenticated = getAuthenticatedSession(req);
+  let authenticated: Awaited<ReturnType<typeof getAuthenticatedSession>>;
+  try {
+    authenticated = await getAuthenticatedSession(req);
+  } catch (error) {
+    console.error('[Auth] Session lookup failed while skipping password change:', error);
+    return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
+  }
   if (!authenticated) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
+  const client = getSupabaseClient();
+  if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
+  const { error } = await client.from('auth_sessions')
+    .update({ first_password_change_pending: false })
+    .eq('token_hash', hashSessionToken(authenticated.token));
+  if (error) {
+    console.error('[Auth] Could not persist first-password-change choice:', error);
+    return res.status(503).json({ success: false, error: 'บันทึกสถานะ session ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' });
+  }
   authenticated.session.firstPasswordChangePending = false;
   return res.json({ success: true });
 });
 
 app.post('/api/auth/password/change', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
-  const authenticated = getAuthenticatedSession(req);
+  let authenticated: Awaited<ReturnType<typeof getAuthenticatedSession>>;
+  try {
+    authenticated = await getAuthenticatedSession(req);
+  } catch (error) {
+    console.error('[Auth] Session lookup failed while changing password:', error);
+    return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
+  }
   if (!authenticated) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
 
   const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
@@ -382,6 +493,16 @@ app.post('/api/auth/password/change', async (req: Request, res: Response) => {
       return res.status(409).json({ success: false, error: 'รหัสผ่านบัญชีเปลี่ยนไปแล้ว กรุณาเข้าสู่ระบบใหม่' });
     }
 
+    const currentTokenHash = hashSessionToken(authenticated.token);
+    const { error: revokeError } = await client.from('auth_sessions')
+      .delete()
+      .eq('user_id', account.id)
+      .neq('token_hash', currentTokenHash);
+    if (revokeError) throw revokeError;
+    const { error: refreshSessionError } = await client.from('auth_sessions')
+      .update({ first_password_change_pending: false })
+      .eq('token_hash', currentTokenHash);
+    if (refreshSessionError) throw refreshSessionError;
     for (const [token, session] of authSessions) {
       if (session.user.id === account.id && token !== authenticated.token) authSessions.delete(token);
     }
@@ -452,6 +573,19 @@ setInterval(() => {
   }
   for (const [ip, record] of loginRateLimits.entries()) {
     if (now > record.resetAt) loginRateLimits.delete(ip);
+  }
+  const client = getSupabaseClient();
+  if (client) {
+    void (async () => {
+      try {
+        const { error } = await client.from('auth_sessions')
+          .delete()
+          .lt('expires_at', new Date(now).toISOString());
+        if (error) console.error('[Auth] Failed to purge expired sessions:', error);
+      } catch (error) {
+        console.error('[Auth] Failed to purge expired sessions:', error);
+      }
+    })();
   }
 }, 5 * 60 * 1000);
 
@@ -585,6 +719,7 @@ const startupStatus: {
     stores: false,
     projects: false,
     app_users: false,
+    auth_sessions: false,
     system_config: false,
     billing_notes: false
   },
@@ -3593,6 +3728,7 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
     stores: false,
     projects: false,
     app_users: false,
+    auth_sessions: false,
     system_config: false,
     billing_notes: false,
     contractor_charge_notes: false,
@@ -3672,7 +3808,11 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
 
     const checkTable = async (tableName: string) => {
       try {
-        const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
+        const primaryKey = tableName === 'system_config'
+          ? 'config_key'
+          : tableName === 'auth_sessions'
+            ? 'token_hash'
+            : 'id';
         const { count, error } = await client.from(tableName).select(primaryKey, { count: 'exact', head: true });
         if (!error) {
           tablesCounts[tableName] = count ?? 0;
@@ -4182,7 +4322,7 @@ app.post('/api/auth/users', async (req: Request, res: Response) => {
       .single();
     if (saveError) throw saveError;
     if (password.trim() || row.status === 'suspended' || existing?.role !== row.role || existing?.username !== row.username) {
-      invalidateUserSessions(id);
+      await invalidateUserSessions(id);
     }
     return res.json({ success: true, user: publicAppUser(saved) });
   } catch (err: any) {
@@ -6674,7 +6814,11 @@ async function testStartupDatabase() {
   }
 
   await Promise.all(Object.keys(tables).map(async tableName => {
-    const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
+    const primaryKey = tableName === 'system_config'
+      ? 'config_key'
+      : tableName === 'auth_sessions'
+        ? 'token_hash'
+        : 'id';
     const { count, error } = await client
       .from(tableName)
       .select(primaryKey, { count: 'exact', head: true });

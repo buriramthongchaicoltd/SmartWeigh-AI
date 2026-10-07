@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-07] Persist Authentication Sessions Across Server Instances
+
+### การเปลี่ยนแปลง
+- แก้สาเหตุที่ session อยู่ใน memory ทำให้ request จาก browser ได้ 401 เมื่อ Render ส่งไปยัง instance อื่นหรือ process restart
+- เก็บ SHA-256 ของ session token (ไม่เก็บ token ดิบ) ใน `auth_sessions` และตรวจ session/user status จาก Supabase ในทุก protected request; revoke session ข้าม instance ได้
+- เพิ่ม schema table/index, RLS และ service-role-only grants ใน DDL พร้อมแสดงสถานะตารางในหน้าตั้งค่า
+- ระบุให้รัน DDL รุ่นล่าสุดก่อน deploy; session ใน memory เดิมใช้ต่อไม่ได้ ผู้ใช้ต้อง login ใหม่หลัง deploy
+- อัปเดต Handover และ Database Storage Blueprint
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Link Destination Weighbridge by Origin Ticket Reference
 
 ### การเปลี่ยนแปลง
