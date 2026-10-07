@@ -148,6 +148,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [docTypeFilter, setDocTypeFilter] = useState<DocumentType | 'all'>('all');
   const [groupFilter, setGroupFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [pairOrderSearchQuery, setPairOrderSearchQuery] = useState('');
 
   // Webhook Settings Modal State
   const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
@@ -355,6 +356,21 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       setIsPairingTicket(false);
     }
   };
+
+  const pairableDeliveryOrders = orders.filter(order =>
+    (order.docType === 'delivery_order' || order.docType === 'concrete' || order.docType === 'full_logistics') &&
+    Boolean(order.col6?.trim())
+  );
+  const normalizedPairOrderQuery = pairOrderSearchQuery.trim().toLocaleLowerCase();
+  const filteredPairableDeliveryOrders = pairableDeliveryOrders.filter(order => {
+    if (!normalizedPairOrderQuery) return true;
+    return [
+      order.col6,
+      order.col8,
+      order.col1,
+      order.col2
+    ].some(value => value?.toLocaleLowerCase().includes(normalizedPairOrderQuery));
+  });
 
   // Load bill image on-demand from server (image_url is NOT in list payload to save bandwidth)
   const handleOpenImagePreview = async (item: LineBillInboxItem) => {
@@ -1612,6 +1628,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                               onClick={() => {
                                 setPairingTicket(item);
                                 setPairTargetOrderId('');
+                                setPairOrderSearchQuery('');
                               }}
                               className="px-2 py-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-[11px] flex items-center gap-1 whitespace-nowrap"
                               title="เลือกใบส่งของที่ต้องการจับคู่กับตั๋วชั่งนี้"
@@ -1703,23 +1720,34 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               </div>
               <label className="block space-y-1.5 text-xs font-semibold text-slate-800">
                 <span>ใบส่งของที่ต้องการจับคู่</span>
+                <input
+                  type="search"
+                  value={pairOrderSearchQuery}
+                  onChange={event => setPairOrderSearchQuery(event.target.value)}
+                  placeholder="ค้นหาเลข DO, ร้านค้า, TR หรือโครงการ"
+                  aria-label="ค้นหาใบส่งของสำหรับจับคู่"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
+                />
+                <span className="block text-[11px] font-normal text-slate-600" aria-live="polite">
+                  แสดง {filteredPairableDeliveryOrders.length.toLocaleString()} จาก {pairableDeliveryOrders.length.toLocaleString()} ใบส่งของ
+                </span>
                 <select
                   value={pairTargetOrderId}
                   onChange={event => setPairTargetOrderId(event.target.value)}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5"
                 >
                   <option value="">เลือกใบส่งของ...</option>
-                  {orders
-                    .filter(order =>
-                      (order.docType === 'delivery_order' || order.docType === 'concrete') &&
-                      Boolean(order.col6?.trim())
-                    )
-                    .map(order => (
+                  {filteredPairableDeliveryOrders.map(order => (
                       <option key={order.id} value={order.id}>
                         {order.col6} · {order.col8 || 'ไม่ทราบร้าน'} · {order.col1}
                       </option>
-                    ))}
+                  ))}
                 </select>
+                {filteredPairableDeliveryOrders.length === 0 && (
+                  <span className="block text-[11px] font-normal text-amber-800" role="status">
+                    ไม่พบใบส่งของที่ตรงกับคำค้น — ลองค้นด้วยเลข DO บางส่วน หรือชื่อร้าน/โครงการ
+                  </span>
+                )}
               </label>
               <p className="text-[11px] leading-relaxed text-slate-600">
                 เมื่อยืนยัน ระบบจะเก็บตั๋วชั่งเป็นเอกสารแยก เชื่อมด้วยรหัสใบส่งของที่เลือก และเติมน้ำหนักต้นทางในใบส่งของเฉพาะเมื่อยังไม่มีน้ำหนักบันทึกไว้

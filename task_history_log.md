@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Load All Delivery Orders for Weighbridge Pairing
+
+### การเปลี่ยนแปลง
+- แก้ API โหลด orders จาก Supabase ที่จำกัดไว้ 2,000 แถว ให้ดึงแบบแบ่งหน้าจนหมด เพื่อไม่ให้ใบส่งของเก่าหรือรายการที่อยู่นอกช่วงแรกหายจากระบบ
+- เพิ่ม `full_logistics` ที่มีเลข DO เข้า candidate และ validation ของการจับคู่ตั๋วชั่งต้นทาง
+- เพิ่มช่องค้นหา DO/ร้านค้า/TR/โครงการและตัวนับผลลัพธ์ในหน้าต่างจับคู่; แจ้งผู้ใช้เมื่อไม่พบผลค้นหา
+- อัปเดต Database Storage Blueprint โดยไม่เปลี่ยน schema
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Persist LINE Verification and Require OCR Document Classification
 
 ### การเปลี่ยนแปลง

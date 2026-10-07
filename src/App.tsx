@@ -1383,7 +1383,7 @@ export default function App() {
     if (!inboxItem || inboxItem.detectedDocType !== 'weighbridge') {
       throw new Error('ไม่พบรายการตั๋วชั่งต้นทางในกล่องพัก LINE');
     }
-    if (!targetDO || (targetDO.docType !== 'delivery_order' && targetDO.docType !== 'concrete')) {
+    if (!targetDO || !['delivery_order', 'concrete', 'full_logistics'].includes(targetDO.docType || '')) {
       throw new Error('ไม่พบใบส่งของปลายทางที่เลือก');
     }
     const existingTicket = orders.find(item => item.lineInboxId === inboxId);

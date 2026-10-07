@@ -3971,8 +3971,22 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
     // NOTE: line_inbox intentionally excludes 'image_url' — base64 images are ~33MB total
     // Images are loaded on-demand via GET /api/line/inbox/image/:id to prevent sync-all timeout
     const LINE_INBOX_COLUMNS = 'id,received_at,line_message_id,line_quote_token,line_sender_name,line_group_name,drive_file_id,drive_file_location,drive_web_view_link,detected_doc_type,ai_confidence,status,duplicate_of_order_id,duplicate_reason,bot_replied,bot_reply_mode,bot_reply_text,extracted_data,store_suggestion,doc_number,doc_date,store_name,is_bill_document,image_hash';
+    const fetchAllOrders = async () => {
+      const pageSize = 1000;
+      const rows: any[] = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const result = await client
+          .from('orders')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .range(offset, offset + pageSize - 1);
+        if (result.error) return { data: null, error: result.error };
+        rows.push(...(result.data || []));
+        if ((result.data || []).length < pageSize) return { data: rows, error: null };
+      }
+    };
     const [ordersRes, posRes, storesRes, projectsRes, billingNotesRes, lineInboxRes, usersRes, configRes] = await Promise.all([
-      client.from('orders').select('*').order('created_at', { ascending: false }).limit(2000),
+      fetchAllOrders(),
       client.from('purchase_orders').select('*').order('created_at', { ascending: false }),
       client.from('stores').select('*').order('name', { ascending: true }),
       client.from('projects').select('*').order('name', { ascending: true }),
