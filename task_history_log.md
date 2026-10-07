@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Prevent Deleted LINE Inbox Rows from Reappearing
+
+### การเปลี่ยนแปลง
+- ให้ API ลบ `line_inbox` ตรวจสอบกับ Supabase หลังลบ และตอบสำเร็จต่อเมื่อไม่พบแถวเดิมแล้ว
+- เมื่อลบสำเร็จ ให้นำรายการเดียวกันออกจากคิว webhook ในหน่วยความจำ เพื่อไม่ให้ API โหลดกล่องพักส่งรายการที่ลบกลับมา
+- ให้ API ยืนยันจากแถวที่ Supabase ส่งกลับหลัง DELETE ก่อนรายงานว่าลบสำเร็จ; ถ้าไม่มีแถวที่ตรง ID จะรายงานว่าลบไม่ได้
+- เปลี่ยน webhook และ batch sync ของ `line_inbox` เป็น update แถวที่มีอยู่เท่านั้น ป้องกันงาน webhook หรือ snapshot เก่าสร้างแถวที่ผู้ใช้ลบกลับขึ้นมา
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Delete LINE Inbox Item and Its Image
 
 ### การเปลี่ยนแปลง

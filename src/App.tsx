@@ -610,7 +610,10 @@ export default function App() {
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
   const dbSyncGenerationRef = React.useRef<Record<string, number>>({});
   const dbSyncInFlightRef = React.useRef<Record<string, Set<Promise<void>> | undefined>>({});
+  const lineInboxSyncRevisionRef = React.useRef(0);
+  const lineInboxDeleteCountRef = React.useRef(0);
   const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
+    if (table === 'line_inbox' && lineInboxDeleteCountRef.current > 0) return;
     if (saveDbTimerRef.current[table]) {
       clearTimeout(saveDbTimerRef.current[table]);
     }
@@ -731,6 +734,7 @@ export default function App() {
   // Real-Time Multi-User Sync: Keep lineInbox strictly synced from Supabase Cloud so all users see identical bills
   const lastInboxSyncWarningRef = useRef(0);
   const syncWebhookQueueToLocal = React.useCallback(async () => {
+    const syncRevision = lineInboxSyncRevisionRef.current;
     const warnOnce = (message: string) => {
       if (Date.now() - lastInboxSyncWarningRef.current < 60_000) return;
       lastInboxSyncWarningRef.current = Date.now();
@@ -745,7 +749,9 @@ export default function App() {
         return;
       }
       const incoming: LineBillInboxItem[] = Array.isArray(data?.items) ? data.items : [];
+      if (lineInboxDeleteCountRef.current > 0 || lineInboxSyncRevisionRef.current !== syncRevision) return;
       setLineInbox(current => {
+        if (lineInboxDeleteCountRef.current > 0 || lineInboxSyncRevisionRef.current !== syncRevision) return current;
         const unchanged = current.length === incoming.length && current.every((item, index) => {
           const nextItem = incoming[index];
           return nextItem &&
@@ -3104,38 +3110,45 @@ export default function App() {
                 if (!currentPermissions.canDeleteOrder) {
                   throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
                 }
-                if (saveDbTimerRef.current.line_inbox) {
-                  clearTimeout(saveDbTimerRef.current.line_inbox);
-                  saveDbTimerRef.current.line_inbox = undefined;
-                }
-                dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
-                await Promise.all(
-                  [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
-                );
+                lineInboxDeleteCountRef.current += 1;
+                lineInboxSyncRevisionRef.current += 1;
+                try {
+                  if (saveDbTimerRef.current.line_inbox) {
+                    clearTimeout(saveDbTimerRef.current.line_inbox);
+                    saveDbTimerRef.current.line_inbox = undefined;
+                  }
+                  dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
+                  await Promise.all(
+                    [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
+                  );
 
-                const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ inboxId: id })
-                });
-                const driveResult = await driveResponse.json();
-                if (!driveResponse.ok || !driveResult.success) {
-                  throw new Error(driveResult.error || 'ลบไฟล์จาก Google Drive ไม่สำเร็จ; ยังไม่ได้ลบรายการ');
-                }
+                  const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ inboxId: id })
+                  });
+                  const driveResult = await driveResponse.json();
+                  if (!driveResponse.ok || !driveResult.success) {
+                    throw new Error(driveResult.error || 'ลบไฟล์จาก Google Drive ไม่สำเร็จ; ยังไม่ได้ลบรายการ');
+                  }
 
-                const dbResponse = await fetch('/api/database/delete-record', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ table: 'line_inbox', id })
-                });
-                const dbResult = await dbResponse.json();
-                if (!dbResponse.ok || !dbResult.success) {
-                  throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
+                  const dbResponse = await fetch('/api/database/delete-record', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ table: 'line_inbox', id })
+                  });
+                  const dbResult = await dbResponse.json();
+                  if (!dbResponse.ok || !dbResult.success) {
+                    throw new Error(dbResult.error || 'ลบรายการจากฐานข้อมูลไม่สำเร็จ');
+                  }
+                  setLineInbox(prev => prev.filter(i => i.id !== id));
+                  showToast(driveResult.deleted
+                    ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
+                    : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
+                } finally {
+                  lineInboxDeleteCountRef.current -= 1;
+                  lineInboxSyncRevisionRef.current += 1;
                 }
-                setLineInbox(prev => prev.filter(i => i.id !== id));
-                showToast(driveResult.deleted
-                  ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
-                  : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}

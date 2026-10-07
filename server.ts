@@ -2714,7 +2714,8 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
     const persistInboxItem = async (item: any) => {
       const { error } = await client!
         .from('line_inbox')
-        .upsert(mapLineInboxToSupabase(item), { onConflict: 'id' });
+        .update(mapLineInboxToSupabase(item))
+        .eq('id', item.id);
       if (error) {
         throw new Error(`อัปเดตรายการ LINE ${item.id} ลง Supabase ไม่สำเร็จ: ${error.message}`);
       }
@@ -4115,6 +4116,31 @@ app.post('/api/database/delete-record', async (req: Request, res: Response) => {
     let targetTable = table;
     if (table === 'pos') targetTable = 'purchase_orders';
 
+    if (targetTable === 'line_inbox') {
+      const { data: deletedRows, error } = await client
+        .from(targetTable)
+        .delete()
+        .eq('id', id)
+        .select('id');
+      if (error) {
+        console.error(`DB Delete Error on ${targetTable}:`, error);
+        return res.status(500).json({ success: false, error: error.message });
+      }
+      if (!deletedRows?.some(row => row.id === id)) {
+        return res.status(404).json({
+          success: false,
+          error: 'Supabase ไม่พบแถว line_inbox ที่ตรงกับ ID นี้ จึงยังยืนยันการลบข้อมูลไม่ได้'
+        });
+      }
+
+      for (let i = lineWebhookInboxQueue.length - 1; i >= 0; i--) {
+        if (lineWebhookInboxQueue[i].id === id) {
+          lineWebhookInboxQueue.splice(i, 1);
+        }
+      }
+      return res.json({ success: true, deleted: true, message: 'Record deleted from line_inbox' });
+    }
+
     const { error } = await client.from(targetTable).delete().eq('id', id);
     if (error) {
       console.error(`DB Delete Error on ${targetTable}:`, error);
@@ -4163,6 +4189,17 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     const chunkSize = 50;
     for (let i = 0; i < rows.length; i += chunkSize) {
       const chunk = rows.slice(i, i + chunkSize);
+      if (targetTable === 'line_inbox') {
+        const updateResults = await Promise.all(
+          chunk.map(row => {
+            if (!row.id) throw new Error('พบรายการ line_inbox ที่ไม่มี ID จึงบันทึกชุดข้อมูลไม่ได้');
+            return client.from(targetTable).update(row).eq('id', row.id);
+          })
+        );
+        const updateError = updateResults.find(result => result.error)?.error;
+        if (updateError) throw updateError;
+        continue;
+      }
       const { error } = await client.from(targetTable).upsert(chunk, { onConflict: 'id' });
       if (error) throw error;
     }
