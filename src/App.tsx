@@ -1379,9 +1379,48 @@ export default function App() {
       throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์แก้ไขบิล`);
     }
     const inboxItem = lineInbox.find(item => item.id === inboxId);
-    const targetDO = orders.find(item => item.id === doOrderId);
+    const [targetKind, targetId] = doOrderId.split(':', 2);
+    const pendingInboxDO = targetKind === 'inbox'
+      ? lineInbox.find(item => item.id === targetId)
+      : undefined;
+    const targetDO = targetKind === 'order'
+      ? orders.find(item => item.id === targetId)
+      : undefined;
     if (!inboxItem || inboxItem.detectedDocType !== 'weighbridge') {
       throw new Error('ไม่พบรายการตั๋วชั่งต้นทางในกล่องพัก LINE');
+    }
+    if (pendingInboxDO) {
+      if (
+        pendingInboxDO.status !== 'pending_review' ||
+        !isDeliveryOrderPairingCandidate({
+          docType: pendingInboxDO.detectedDocType,
+          col6: pendingInboxDO.extractedData.col6 || ''
+        })
+      ) {
+        throw new Error('ไม่พบใบส่งของที่ยังรอตรวจและมีเลข DO');
+      }
+      if (inboxItem.status !== 'pending_review' || !inboxItem.driveFileId || !pendingInboxDO.driveFileId) {
+        throw new Error('ใบส่งของและตั๋วชั่งต้องรอตรวจและมีรูปใน Google Drive ก่อนจับคู่');
+      }
+      const ticketData = inboxItem.extractedData;
+      const ticketNumber = ticketData.col6?.trim() || '';
+      const gross = Number(ticketData.col13) || 0;
+      const tare = Number(ticketData.col14) || 0;
+      const net = Number(ticketData.col15) || Math.max(0, gross - tare);
+      if (!ticketNumber || net <= 0) {
+        throw new Error('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิให้ครบก่อนจับคู่');
+      }
+      await handleOpenVerifyFromInbox({
+        ...pendingInboxDO,
+        extractedData: {
+          ...pendingInboxDO.extractedData,
+          pairedWeighbridgeInboxId: inboxItem.id,
+          col13: gross,
+          col14: tare,
+          col15: net
+        }
+      });
+      return;
     }
     if (!targetDO || !isDeliveryOrderPairingCandidate(targetDO)) {
       throw new Error('ไม่พบใบส่งของปลายทางที่เลือก');

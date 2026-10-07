@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Pair Weighbridge with Pending LINE Delivery Orders
+
+### การเปลี่ยนแปลง
+- เพิ่ม DO ที่ยัง `pending_review` ในกล่องพัก LINE เป็นตัวเลือกจับคู่ตั๋วชั่ง โดยแยกจากรายการ orders ที่บันทึกแล้ว และใช้กฎคัดประเภท/เลข DO เดียวกัน
+- เมื่อเลือก DO ที่ยังรอตรวจ ระบบเปิด VerifyModal ของ DO พร้อมแนบตั๋วชั่งและเติมน้ำหนักต้นทาง; ยังไม่ย้ายรูปหรือบันทึกความสัมพันธ์จนกว่าผู้ใช้ยืนยันตรวจรับ
+- ปรับ VerifyModal ให้รักษา `pairedWeighbridgeInboxId` ตอนเปิดฟอร์มและส่งต่อค่าเมื่อบันทึก เพื่อให้ขั้นตอนจับคู่แบบเลือกจากตั๋วชั่งทำงานครบ
+- อัปเดต Handover และ Database Storage Blueprint โดยไม่เพิ่ม schema
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Include Legacy DO Rows in Weighbridge Pairing
 
 ### การเปลี่ยนแปลง

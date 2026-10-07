@@ -349,7 +349,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       await onPairWeighbridgeInboxItem(pairingTicket.id, pairTargetOrderId);
       setPairingTicket(null);
       setPairTargetOrderId('');
-      showToast('จับคู่และบันทึกตั๋วชั่งกับใบส่งของแล้ว');
+      showToast(
+        pairTargetOrderId.startsWith('inbox:')
+          ? 'เปิดตรวจรับใบส่งของพร้อมแนบตั๋วชั่งแล้ว กรุณาตรวจสอบและบันทึก'
+          : 'จับคู่และบันทึกตั๋วชั่งกับใบส่งของแล้ว'
+      );
     } catch (error) {
       const reason = error instanceof Error ? `: ${error.message}` : '';
       showToast(`จับคู่ตั๋วชั่งไม่สำเร็จ${reason}`, 'info');
@@ -359,6 +363,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   };
 
   const pairableDeliveryOrders = orders.filter(isDeliveryOrderPairingCandidate);
+  const pairablePendingDeliveryInboxItems = inboxItems.filter(item =>
+    item.status === 'pending_review' &&
+    item.id !== pairingTicket?.id &&
+    isDeliveryOrderPairingCandidate({
+      docType: item.detectedDocType,
+      col6: item.extractedData.col6 || ''
+    })
+  );
   const normalizedPairOrderQuery = pairOrderSearchQuery.trim().toLocaleLowerCase();
   const filteredPairableDeliveryOrders = pairableDeliveryOrders.filter(order => {
     if (!normalizedPairOrderQuery) return true;
@@ -367,6 +379,15 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       order.col8,
       order.col1,
       order.col2
+    ].some(value => value?.toLocaleLowerCase().includes(normalizedPairOrderQuery));
+  });
+  const filteredPairablePendingDeliveryInboxItems = pairablePendingDeliveryInboxItems.filter(item => {
+    if (!normalizedPairOrderQuery) return true;
+    return [
+      item.extractedData.col6,
+      item.extractedData.col8,
+      item.extractedData.col1,
+      item.extractedData.col2
     ].some(value => value?.toLocaleLowerCase().includes(normalizedPairOrderQuery));
   });
 
@@ -1714,7 +1735,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 <div className="mt-1">
                   {pairingTicket.extractedData.col8 || 'ไม่ทราบร้าน'} · สุทธิ {(Number(pairingTicket.extractedData.col15) || Math.max(0, (Number(pairingTicket.extractedData.col13) || 0) - (Number(pairingTicket.extractedData.col14) || 0))).toLocaleString()} กก.
                 </div>
-                <div className="mt-1 text-emerald-800">เลือกใบส่งของปลายทางด้วยตนเอง ระบบจะไม่จับคู่จากชื่อร้านหรือเวลา</div>
+                <div className="mt-1 text-emerald-800">เลือกใบส่งของที่ต้องการด้วยตนเอง ระบบจะไม่จับคู่จากชื่อร้านหรือเวลา</div>
               </div>
               <label className="block space-y-1.5 text-xs font-semibold text-slate-800">
                 <span>ใบส่งของที่ต้องการจับคู่</span>
@@ -1727,7 +1748,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 font-normal"
                 />
                 <span className="block text-[11px] font-normal text-slate-600" aria-live="polite">
-                  แสดง {filteredPairableDeliveryOrders.length.toLocaleString()} จาก {pairableDeliveryOrders.length.toLocaleString()} ใบส่งของ
+                  แสดง {(filteredPairableDeliveryOrders.length + filteredPairablePendingDeliveryInboxItems.length).toLocaleString()} จาก {(pairableDeliveryOrders.length + pairablePendingDeliveryInboxItems.length).toLocaleString()} ใบส่งของ
                 </span>
                 <select
                   value={pairTargetOrderId}
@@ -1735,20 +1756,33 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5"
                 >
                   <option value="">เลือกใบส่งของ...</option>
-                  {filteredPairableDeliveryOrders.map(order => (
-                      <option key={order.id} value={order.id}>
-                        {order.col6} · {order.col8 || 'ไม่ทราบร้าน'} · {order.col1}
-                      </option>
-                  ))}
+                  {filteredPairableDeliveryOrders.length > 0 && (
+                    <optgroup label="ใบส่งของที่บันทึกแล้ว">
+                      {filteredPairableDeliveryOrders.map(order => (
+                        <option key={`order:${order.id}`} value={`order:${order.id}`}>
+                          {order.col6} · {order.col8 || 'ไม่ทราบร้าน'} · {order.col1}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {filteredPairablePendingDeliveryInboxItems.length > 0 && (
+                    <optgroup label="ใบส่งของที่รอตรวจรับจาก LINE">
+                      {filteredPairablePendingDeliveryInboxItems.map(item => (
+                        <option key={`inbox:${item.id}`} value={`inbox:${item.id}`}>
+                          {item.extractedData.col6} · {item.extractedData.col8 || 'ไม่ทราบร้าน'} · {item.extractedData.col1 || 'ยังไม่มีเลข TR'}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
-                {filteredPairableDeliveryOrders.length === 0 && (
+                {filteredPairableDeliveryOrders.length + filteredPairablePendingDeliveryInboxItems.length === 0 && (
                   <span className="block text-[11px] font-normal text-amber-800" role="status">
-                    ไม่พบใบส่งของที่ตรงกับคำค้น — ลองค้นด้วยเลข DO บางส่วน หรือชื่อร้าน/โครงการ
+                    ไม่พบใบส่งของที่ตรงกับคำค้น — ลองค้นด้วยเลข DO บางส่วน หรือชื่อร้าน/โครงการ และตรวจว่า AI ระบุประเภทเป็นใบส่งของแล้ว
                   </span>
                 )}
               </label>
               <p className="text-[11px] leading-relaxed text-slate-600">
-                เมื่อยืนยัน ระบบจะเก็บตั๋วชั่งเป็นเอกสารแยก เชื่อมด้วยรหัสใบส่งของที่เลือก และเติมน้ำหนักต้นทางในใบส่งของเฉพาะเมื่อยังไม่มีน้ำหนักบันทึกไว้
+                ใบส่งของที่บันทึกแล้วจะจับคู่ทันที ส่วนใบส่งของที่รอตรวจรับจะเปิดฟอร์มตรวจรับพร้อมแนบตั๋วชั่ง และบันทึกเมื่อคุณยืนยัน
               </p>
               <div className="flex justify-end gap-2">
                 <button
@@ -1765,7 +1799,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   disabled={!pairTargetOrderId || isPairingTicket}
                   className="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50"
                 >
-                  {isPairingTicket ? 'กำลังจับคู่...' : 'ยืนยันจับคู่'}
+                  {isPairingTicket
+                    ? 'กำลังดำเนินการ...'
+                    : pairTargetOrderId.startsWith('inbox:')
+                      ? 'เปิดตรวจรับ DO'
+                      : 'ยืนยันจับคู่'}
                 </button>
               </div>
             </div>

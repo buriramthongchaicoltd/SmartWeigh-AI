@@ -4,7 +4,7 @@ export function isMatchedOriginWeighbridge(order: OrderRecord): boolean {
   return order.docType === 'weighbridge' && Boolean(order.matchedOriginDoId);
 }
 
-export function isDeliveryOrderPairingCandidate(order: OrderRecord): boolean {
+export function isDeliveryOrderPairingCandidate(order: Pick<OrderRecord, 'docType' | 'col6'>): boolean {
   if (!order.col6?.trim()) return false;
   return !['weighbridge', 'dest_weighbridge', 'tax_invoice', 'purchase_order'].includes(order.docType || '');
 }

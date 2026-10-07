@@ -195,7 +195,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setRemappedNotice(null);
       setHasAttachedImage(false);
       setIsRecoveringLineImage(false);
-      setPairedWeighbridgeInboxId('');
+      setPairedWeighbridgeInboxId(normalized.pairedWeighbridgeInboxId || '');
 
       // Preserve a document type already classified by the shared OCR pipeline.
       let detectedType: DocumentType = normalized.docType || 'delivery_order';
@@ -883,6 +883,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       status: 'verified',
       createdAt: overrideExistingOrder?.createdAt || form.createdAt || new Date().toISOString(),
       lineInboxId: form.lineInboxId || overrideExistingOrder?.lineInboxId,
+      pairedWeighbridgeInboxId: pairedWeighbridgeInboxId || undefined,
       lineMessageId: form.lineMessageId || overrideExistingOrder?.lineMessageId,
       lineUserId: form.lineUserId || overrideExistingOrder?.lineUserId,
       lineSenderName: form.lineSenderName || overrideExistingOrder?.lineSenderName,
