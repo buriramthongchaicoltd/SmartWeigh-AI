@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-07] Show Linked Weighbridge Images on Hover in the Main Table
+
+### การเปลี่ยนแปลง
+- เพิ่ม hover preview สำหรับป้ายเลขตั๋วชั่งต้นทางและตั๋วชั่งปลายทางเพิ่มเติมในแถว DO โดยโหลดภาพจากข้อมูลของ ticket record นั้นผ่าน Drive image proxy/fallback เดิม
+- คงการคลิกป้ายเพื่อเปิด record จริง และไม่เปลี่ยนความสัมพันธ์หรือข้อมูลที่จัดเก็บ
+- อัปเดตคำอธิบายพฤติกรรมตารางหลักใน Handover
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Group Matched Documents into a Single DO Table Row
 
 ### การเปลี่ยนแปลง

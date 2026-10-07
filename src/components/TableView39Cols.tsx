@@ -2136,6 +2136,63 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                     });
                   };
 
+                  const triggerOriginTicketHover = (
+                    e: React.MouseEvent<HTMLElement>,
+                    ticket: OrderRecord
+                  ) => {
+                    const ticketNo = ticket.col6 || ticket.col1 || '-';
+                    openDocHoverPreview(e, {
+                      rowId: ticket.id,
+                      trNo: ticket.col1,
+                      zoneBadge: 'โซน 3 • ตั๋วชั่งน้ำหนักต้นทาง',
+                      docTypeLabel: 'ตั๋วชั่งน้ำหนักต้นทาง (Origin Weighbridge)',
+                      docNo: ticketNo,
+                      driveFileId: ticket.driveFileId,
+                      imageUrl: ticket.image,
+                      matchStatus: ticket.autoFlagsVerified
+                        ? 'verified'
+                        : hasUnverifiedAutoActions(ticket)
+                          ? 'auto_flagged'
+                          : 'manual',
+                      referenceNote: `🔗 จับคู่กับใบส่งของ DO: ${row.col6 || row.col1 || '-'}`,
+                      details: [
+                        { label: 'เลขที่ตั๋วชั่งต้นทาง', value: ticketNo, highlight: true },
+                        { label: 'วันที่ชั่ง', value: ticket.col7 || '-' },
+                        { label: 'ร้านค้าผู้ขาย', value: ticket.col8 || '-' },
+                        { label: 'ทะเบียนรถ', value: ticket.col10 || '-' },
+                        { label: 'น้ำหนักเข้า', value: `${fmtNum(ticket.col13)} กก.` },
+                        { label: 'น้ำหนักออก', value: `${fmtNum(ticket.col14)} กก.` },
+                        { label: 'น้ำหนักสุทธิ', value: `${fmtNum(ticket.col15)} กก.`, highlight: true }
+                      ]
+                    });
+                  };
+
+                  const triggerLinkedDestTicketHover = (
+                    e: React.MouseEvent<HTMLElement>,
+                    ticket: OrderRecord
+                  ) => {
+                    const ticketNo = ticket.col17 || ticket.col6 || ticket.col1 || '-';
+                    openDocHoverPreview(e, {
+                      rowId: ticket.id,
+                      trNo: ticket.col1,
+                      zoneBadge: 'โซน 4 • ตั๋วชั่งน้ำหนักปลายทาง',
+                      docTypeLabel: 'ตั๋วชั่งน้ำหนักปลายทาง (Destination Weighbridge)',
+                      docNo: ticketNo,
+                      driveFileId: ticket.driveFileId,
+                      imageUrl: ticket.image,
+                      matchStatus: ticket.destMatchStatus,
+                      referenceNote: `🔗 จับคู่กับใบส่งของ DO: ${row.col6 || row.col1 || '-'}`,
+                      details: [
+                        { label: 'เลขที่ตั๋วชั่งปลายทาง', value: ticketNo, highlight: true },
+                        { label: 'วันที่ชั่ง', value: ticket.col16 || ticket.col7 || '-' },
+                        { label: 'ทะเบียนรถ', value: ticket.col10 || '-' },
+                        { label: 'น้ำหนักเข้า', value: `${fmtNum(ticket.col18)} กก.` },
+                        { label: 'น้ำหนักออก', value: `${fmtNum(ticket.col19)} กก.` },
+                        { label: 'น้ำหนักสุทธิ', value: `${fmtNum(ticket.col20)} กก.`, highlight: true }
+                      ]
+                    });
+                  };
+
                   const triggerDestHover = (e: React.MouseEvent<HTMLElement>) => {
                     if (!hasZone4Doc) return;
                     const destDocNo = effectiveCol17 || 'ตั๋วชั่งปลายทาง';
@@ -2529,7 +2586,11 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 <button
                                   key={ticket.id}
                                   type="button"
+                                  onMouseEnter={e => triggerOriginTicketHover(e, ticket)}
+                                  onMouseLeave={closeDocHoverPreview}
                                   onClick={() => onInspectOrder(ticket)}
+                                  data-preview-image-src={getPreloadableDocPreviewImageUrl(ticket.driveFileId, ticket.image)}
+                                  data-preview-image-fallback={getDocPreviewFallbackImageUrl(ticket.driveFileId, ticket.image)}
                                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[10px] cursor-pointer"
                                   title={`เปิดตั๋วชั่งต้นทาง ${ticket.col6 || '-'} · TR ${ticket.col1 || '-'} · จับคู่กับ DO นี้แล้ว`}
                                   aria-label={`เปิดตั๋วชั่งต้นทาง ${ticket.col6 || ''} ที่จับคู่กับ DO ${row.col6 || ''}`}
@@ -2615,7 +2676,11 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   <button
                                     key={ticket.id}
                                     type="button"
+                                    onMouseEnter={e => triggerLinkedDestTicketHover(e, ticket)}
+                                    onMouseLeave={closeDocHoverPreview}
                                     onClick={() => onInspectOrder(ticket)}
+                                    data-preview-image-src={getPreloadableDocPreviewImageUrl(ticket.driveFileId, ticket.image)}
+                                    data-preview-image-fallback={getDocPreviewFallbackImageUrl(ticket.driveFileId, ticket.image)}
                                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-[10px] cursor-pointer"
                                     title={`เปิดตั๋วชั่งปลายทาง ${ticket.col17 || ticket.col6 || ticket.col1 || '-'} ที่จับคู่กับ DO นี้แล้ว`}
                                   >
