@@ -4253,12 +4253,41 @@ app.get('/api/orders/check-tr-number', async (req: Request, res: Response) => {
       return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงตรวจเลข TR จริงไม่ได้' });
     }
 
-    let query = client.from('orders').select('id').eq('col1', trNumber);
-    if (excludeId) query = query.neq('id', excludeId);
-    const { data, error } = await query.limit(1);
+    const { data: matchingRows, error } = await client
+      .from('orders')
+      .select('id,doc_type,matched_origin_do_id,matched_dest_ticket_id,linked_via_doc_no,col6,col17')
+      .eq('col1', trNumber);
     if (error) throw error;
 
-    return res.json({ success: true, isDuplicate: Boolean(data?.length) });
+    let editedRow: Record<string, any> | null = null;
+    if (excludeId) {
+      const { data, error: editedRowError } = await client
+        .from('orders')
+        .select('id,doc_type,matched_origin_do_id,matched_dest_ticket_id,linked_via_doc_no,col6,col17')
+        .eq('id', excludeId)
+        .maybeSingle();
+      if (editedRowError) throw editedRowError;
+      editedRow = data;
+    }
+
+    const editedDocNo = String(editedRow?.col6 || '').trim();
+    const isSameDocumentBundle = (row: Record<string, any>) => {
+      if (!editedRow || row.id === editedRow.id) return Boolean(editedRow);
+      if (row.matched_origin_do_id === editedRow.id || editedRow.matched_origin_do_id === row.id) return true;
+      if (row.matched_dest_ticket_id === editedRow.id || editedRow.matched_dest_ticket_id === row.id) return true;
+
+      const linkedDoNo = String(row.linked_via_doc_no || '').trim();
+      const editedLinkedDoNo = String(editedRow.linked_via_doc_no || '').trim();
+      return Boolean(
+        (editedDocNo && linkedDoNo === editedDocNo) ||
+        (editedLinkedDoNo && String(row.col6 || '').trim() === editedLinkedDoNo)
+      );
+    };
+    const isDuplicate = (matchingRows || []).some(
+      (row: Record<string, any>) => !isSameDocumentBundle(row)
+    );
+
+    return res.json({ success: true, isDuplicate });
   } catch (error: any) {
     console.error('[TR Validation] Failed to check orders in database:', error?.message || error);
     return res.status(500).json({

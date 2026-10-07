@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-07] Allow Shared TR Within a Linked Document Bundle
+
+### การเปลี่ยนแปลง
+- แก้ `/api/orders/check-tr-number` ที่เดิมยกเว้นเฉพาะ record ที่กำลังแก้ ทำให้ DO ถูกแจ้งเลข TR ซ้ำกับตั๋วชั่งต้นทาง/ปลายทางที่เป็นเอกสารคนละ record ในชุดเดียวกัน
+- การตรวจใหม่อ่านความสัมพันธ์ที่บันทึกไว้ (`matched_origin_do_id`, `matched_dest_ticket_id`, `linked_via_doc_no`) แล้วอนุญาตเลข TR เดียวกันเฉพาะ record ในชุดเอกสารเดียวกัน; เลขที่อยู่ใน record ของชุดอื่นยังถูกปฏิเสธ
+- คงการแก้ไขเป็น upsert โดย ID เดิม ไม่สร้าง record ใหม่ และไม่เปลี่ยนความสัมพันธ์เอกสาร
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Separate Existing Document Edits from New Document Verification
 
 ### การเปลี่ยนแปลง
