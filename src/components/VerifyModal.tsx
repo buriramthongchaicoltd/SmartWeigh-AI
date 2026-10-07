@@ -29,6 +29,47 @@ import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
 import { optimizeImageForAI } from '../utils/imageProcessing';
 
+type AIRescanZone = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const AI_RESCAN_ZONE_FIELDS: Record<AIRescanZone, Array<keyof OrderRecord>> = {
+  1: ['col3', 'col4', 'col6'],
+  2: ['col7', 'col8', 'col9', 'col10', 'col11', 'col12'],
+  3: ['col13', 'col14'],
+  4: ['col16', 'col17', 'col18', 'col19'],
+  5: ['col22', 'col23', 'col24', 'col26', 'col27'],
+  6: ['col30', 'col31', 'col33', 'col35'],
+  7: ['col37', 'col38']
+};
+
+const AI_RESCAN_FIELD_LABELS: Partial<Record<keyof OrderRecord, string>> = {
+  col3: 'หมวดหมู่',
+  col4: 'เลขที่ PO',
+  col6: 'เลขที่ DO / เอกสาร',
+  col7: 'วันที่เอกสาร',
+  col8: 'ร้านค้า / ผู้จำหน่าย',
+  col9: 'ผู้ขับ / ผู้ส่ง',
+  col10: 'ทะเบียนรถ',
+  col11: 'รายการสินค้า',
+  col12: 'สเปกสินค้า',
+  col13: 'น้ำหนัก Gross ต้นทาง',
+  col14: 'น้ำหนัก Tare ต้นทาง',
+  col16: 'วันที่ชั่งปลายทาง',
+  col17: 'เลขที่ตั๋วชั่งปลายทาง',
+  col18: 'น้ำหนัก Gross ปลายทาง',
+  col19: 'น้ำหนัก Tare ปลายทาง',
+  col22: 'ปริมาณ / จำนวน',
+  col23: 'หน่วยนับ',
+  col24: 'ราคาต่อหน่วย',
+  col26: 'ประเภทรถ',
+  col27: 'ค่าขนส่งต่อหน่วย',
+  col30: 'รูปแบบการชำระ',
+  col31: 'ชำระให้ผู้จำหน่าย',
+  col33: 'ชำระค่าขนส่ง',
+  col35: 'ยอดชำระรวม',
+  col37: 'สถานที่ส่งมอบ',
+  col38: 'หมายเหตุ'
+};
+
 interface VerifyModalProps {
   isOpen: boolean;
   orderData: Partial<OrderRecord> | null;
@@ -83,6 +124,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [remappedNotice, setRemappedNotice] = useState<string | null>(null);
   const [isRecoveringLineImage, setIsRecoveringLineImage] = useState(false);
   const [isRescanningAI, setIsRescanningAI] = useState(false);
+  const [isRescanningZone, setIsRescanningZone] = useState<AIRescanZone | null>(null);
+  const [zoneRescanProposal, setZoneRescanProposal] = useState<{
+    zone: AIRescanZone;
+    data: Partial<OrderRecord>;
+  } | null>(null);
   const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [hasAttachedImage, setHasAttachedImage] = useState(false);
   const [pairedWeighbridgeInboxId, setPairedWeighbridgeInboxId] = useState('');
@@ -91,9 +137,13 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [trRetryCount, setTrRetryCount] = useState(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const trLookupGeneration = useRef(0);
+  const zoneRescanGeneration = useRef(0);
   const isExistingOrder = Boolean(orderData?.id && existingOrders.some(order => order.id === orderData.id));
 
   useEffect(() => {
+    zoneRescanGeneration.current += 1;
+    setIsRescanningZone(null);
+    setZoneRescanProposal(null);
     if (orderData) {
       setSaveToStoreDirectory(false);
       const normalized = { ...orderData };
@@ -512,6 +562,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   };
 
   const handleDocTypeSelect = (docType: DocumentType) => {
+    if (isRescanningAI || isRescanningZone !== null) return;
     if (docType !== 'delivery_order' && docType !== 'concrete') {
       setPairedWeighbridgeInboxId('');
     }
@@ -519,6 +570,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setRemappedNotice('ใบส่งของจากร้านค้าและตั๋วชั่งต้นทางใช้แบบฟอร์มรับของกลุ่มเดียวกัน ระบบคงชนิดเอกสาร “ตั๋วชั่งต้นทาง” จาก OCR และเก็บน้ำหนักช่อง 13–15');
       return;
     }
+    setZoneRescanProposal(null);
     setSelectedDocType(docType);
     const updated = remapLineBillToDocType(form, docType);
 
@@ -556,7 +608,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   const handleOptionalAIRescan = async () => {
     const imgToScan = currentImage || billImage || form.image;
-    if (!imgToScan || isRescanningAI) return;
+    if (!imgToScan || isRescanningAI || isRescanningZone !== null) return;
+    setZoneRescanProposal(null);
     setIsRescanningAI(true);
     setRemappedNotice('🤖 กำลังให้ AI อ่านข้อมูลใหม่เฉพาะตามประเภทเอกสารที่เลือก...');
     try {
@@ -579,6 +632,146 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     } finally {
       setIsRescanningAI(false);
     }
+  };
+
+  const handleZoneAIRescan = async (zone: AIRescanZone) => {
+    const imgToScan = currentImage || billImage || form.image;
+    if (!imgToScan || isRescanningAI || isRescanningZone !== null) return;
+    const requestGeneration = ++zoneRescanGeneration.current;
+    setIsRescanningZone(zone);
+    setZoneRescanProposal(null);
+    try {
+      const result = await rescanBillForTargetDocType(imgToScan, selectedDocType, form);
+      if (requestGeneration !== zoneRescanGeneration.current) return;
+      if (!result.success || !result.orderData) {
+        throw new Error(result.error || 'AI ไม่ได้ส่งผลการอ่านกลับมา');
+      }
+
+      const zoneData: Partial<OrderRecord> = {};
+      for (const field of AI_RESCAN_ZONE_FIELDS[zone]) {
+        const value = result.orderData[field];
+        if (value !== undefined) {
+          Object.assign(zoneData, { [field]: value });
+        }
+      }
+      setZoneRescanProposal({ zone, data: zoneData });
+      setRemappedNotice(`AI อ่านโซน ${zone} แล้ว กรุณาเทียบค่าก่อนยืนยันนำไปใช้`);
+    } catch (error) {
+      if (requestGeneration !== zoneRescanGeneration.current) return;
+      const message = error instanceof Error ? error.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      setRemappedNotice(`⚠️ อ่านโซน ${zone} ไม่สำเร็จ: ${message} (ข้อมูลเดิมยังอยู่ครบ)`);
+    } finally {
+      if (requestGeneration === zoneRescanGeneration.current) {
+        setIsRescanningZone(null);
+      }
+    }
+  };
+
+  const getZoneRescanChanges = (zone: AIRescanZone) => {
+    if (!zoneRescanProposal || zoneRescanProposal.zone !== zone) return [];
+    return AI_RESCAN_ZONE_FIELDS[zone]
+      .filter(field => zoneRescanProposal.data[field] !== undefined)
+      .filter(field =>
+        String(form[field] ?? '').trim() !== String(zoneRescanProposal.data[field] ?? '').trim()
+      );
+  };
+
+  const applyZoneAIRescan = () => {
+    if (!zoneRescanProposal) return;
+    const { zone, data } = zoneRescanProposal;
+    const nextForm: Partial<OrderRecord> = { ...form, ...data };
+
+    if (zone === 3) {
+      const gross = Number(nextForm.col13) || 0;
+      const tare = Number(nextForm.col14) || 0;
+      nextForm.col15 = gross >= tare ? gross - tare : Number(nextForm.col15) || 0;
+      setEnableDOWeighing(gross > 0 || tare > 0 || Number(nextForm.col15) > 0);
+    } else if (zone === 4) {
+      const gross = Number(nextForm.col18) || 0;
+      const tare = Number(nextForm.col19) || 0;
+      nextForm.col20 = gross >= tare ? gross - tare : Number(nextForm.col20) || 0;
+      if (Number(nextForm.col15) > 0 && Number(nextForm.col20) > 0) {
+        nextForm.col21 = Number(nextForm.col15) - Number(nextForm.col20);
+      }
+    }
+
+    if (zone === 3 || zone === 5 || zone === 6) {
+      recalculateFinancials(nextForm);
+    } else {
+      setForm(nextForm);
+    }
+    setZoneRescanProposal(null);
+    setRemappedNotice(`ยืนยันใช้ผล AI เฉพาะโซน ${zone} แล้ว โซนอื่นคงข้อมูลเดิม`);
+  };
+
+  const renderZoneRescanButton = (zone: AIRescanZone) => (
+    <button
+      type="button"
+      onClick={() => void handleZoneAIRescan(zone)}
+      disabled={!(currentImage || billImage || form.image) || isRescanningAI || isRescanningZone !== null || isPreparingImage}
+      className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-indigo-800 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+      aria-label={isRescanningZone === zone ? `AI กำลังอ่านโซน ${zone}` : `ให้ AI อ่านโซน ${zone} ใหม่`}
+      title={`อ่านเอกสารด้วย AI แล้วเสนอเปลี่ยนเฉพาะข้อมูลโซน ${zone}`}
+    >
+      <Sparkles className={`h-3.5 w-3.5 ${isRescanningZone === zone ? 'animate-pulse' : ''}`} />
+      {isRescanningZone === zone ? `กำลังอ่านโซน ${zone}...` : 'AI อ่านใหม่'}
+    </button>
+  );
+
+  const renderZoneRescanReview = (zone: AIRescanZone) => {
+    if (!zoneRescanProposal || zoneRescanProposal.zone !== zone) return null;
+    const changedFields = getZoneRescanChanges(zone);
+    const availableFields = AI_RESCAN_ZONE_FIELDS[zone].filter(
+      field => zoneRescanProposal.data[field] !== undefined
+    );
+    const formatValue = (value: unknown) =>
+      value === undefined || value === null || String(value).trim() === ''
+        ? '— (ว่าง)'
+        : String(value);
+
+    return (
+      <div
+        className="space-y-2 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs"
+        aria-live="polite"
+      >
+        <p className="font-semibold text-indigo-950">
+          ตรวจผลอ่านโซน {zone} — จะไม่เปลี่ยนข้อมูลจนกว่าจะกดยืนยัน
+        </p>
+        {availableFields.length === 0 ? (
+          <p className="text-slate-700">AI ไม่ได้ส่งค่าที่ใช้ได้สำหรับโซนนี้กลับมา ข้อมูลเดิมยังอยู่ครบ</p>
+        ) : changedFields.length === 0 ? (
+          <p className="text-slate-700">ค่าที่ AI อ่านได้ตรงกับข้อมูลปัจจุบัน ไม่มีรายการเปลี่ยนแปลง</p>
+        ) : (
+          <div className="space-y-1.5">
+            {changedFields.map(field => (
+              <div key={field} className="grid gap-1 rounded-md bg-white px-2.5 py-2 sm:grid-cols-[minmax(0,0.8fr)_1fr_1fr]">
+                <span className="font-semibold text-slate-700">{AI_RESCAN_FIELD_LABELS[field] || String(field)}</span>
+                <span className="break-words text-slate-600">เดิม: {formatValue(form[field])}</span>
+                <span className="break-words font-semibold text-indigo-900">AI: {formatValue(zoneRescanProposal.data[field])}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setZoneRescanProposal(null)}
+            className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 py-2 font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            ยกเลิก
+          </button>
+          {changedFields.length > 0 && (
+            <button
+              type="button"
+              onClick={applyZoneAIRescan}
+              className="min-h-10 rounded-lg bg-indigo-700 px-3 py-2 font-bold text-white hover:bg-indigo-800"
+            >
+              ยืนยันใช้ค่า AI เฉพาะโซนนี้
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const handleRecoverLineImage = async () => {
@@ -844,7 +1037,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                 <button
                   type="button"
                   onClick={() => imageInputRef.current?.click()}
-                  disabled={isPreparingImage || isRescanningAI}
+                  disabled={isPreparingImage || isRescanningAI || isRescanningZone !== null}
                   className="min-h-10 px-3 py-2 rounded-lg border border-slate-600 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 transition cursor-pointer"
                 >
                   <Upload className="w-4 h-4 text-sky-300" />
@@ -923,7 +1116,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {(currentImage || billImage || form.image) && (
                     <button
                       type="button"
-                      disabled={isRescanningAI || isPreparingImage}
+                      disabled={isRescanningAI || isRescanningZone !== null || isPreparingImage}
                       onClick={handleOptionalAIRescan}
                       title="ปกติเมื่อสลับประเภทบิล ระบบจะย้ายช่องข้อมูลให้อัตโนมัติทันที แต่หากต้องการให้ AI อ่านซ้ำเฉพาะตามประเภทนี้สามารถกดปุ่มนี้ได้"
                       className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200 hover:bg-indigo-100 transition cursor-pointer disabled:opacity-50"
@@ -1850,21 +2043,25 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <Scale className="w-4 h-4 text-emerald-600" />
                         <span>[โซน 3] น้ำหนักตราชั่งรถบรรทุก (กรณีสินค้าชั่งน้ำหนัก)</span>
                       </div>
-                      <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-emerald-900 bg-white px-2.5 py-1 rounded-lg border border-emerald-300 shadow-2xs hover:bg-emerald-50 transition">
-                        <input
-                          type="checkbox"
-                          checked={enableDOWeighing}
-                          onChange={(e) => {
-                            setEnableDOWeighing(e.target.checked);
-                            if (e.target.checked && (!form.col23 || form.col23 === 'รายการ')) {
-                              handleTextChange('col23', 'ตัน');
-                            }
-                          }}
-                          className="rounded text-emerald-600 focus:ring-emerald-500 h-3.5 w-3.5"
-                        />
-                        <span>{enableDOWeighing ? 'เปิดบันทึกชั่งน้ำหนักอยู่' : '⚖️ ใบส่งของนี้มีการชั่งน้ำหนักรถบรรทุก'}</span>
-                      </label>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {renderZoneRescanButton(3)}
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-emerald-900 bg-white px-2.5 py-1 rounded-lg border border-emerald-300 shadow-2xs hover:bg-emerald-50 transition">
+                          <input
+                            type="checkbox"
+                            checked={enableDOWeighing}
+                            onChange={(e) => {
+                              setEnableDOWeighing(e.target.checked);
+                              if (e.target.checked && (!form.col23 || form.col23 === 'รายการ')) {
+                                handleTextChange('col23', 'ตัน');
+                              }
+                            }}
+                            className="rounded text-emerald-600 focus:ring-emerald-500 h-3.5 w-3.5"
+                          />
+                          <span>{enableDOWeighing ? 'เปิดบันทึกชั่งน้ำหนักอยู่' : '⚖️ ใบส่งของนี้มีการชั่งน้ำหนักรถบรรทุก'}</span>
+                        </label>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(3)}
 
                     {enableDOWeighing && (
                       <div className="space-y-2 pt-1 animate-fadeIn">
@@ -2176,15 +2373,19 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <Scale className="w-4 h-4 text-teal-600" />
                         <span>[โซน 4] ส่วนเก็บน้ำหนักตั๋วชั่ง (ช่อง 18, 19, 20)</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={handleSwapDestWeights}
-                        className="px-2.5 py-1 bg-white hover:bg-teal-50 text-teal-900 border border-teal-300 rounded-lg font-bold text-[11px] cursor-pointer shadow-2xs transition"
-                        title="คลิกเพื่อสลับตัวเลขระหว่างช่อง 18 กับ ช่อง 19"
-                      >
-                        ⇄ สลับค่า 18 ↔ 19
-                      </button>
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {renderZoneRescanButton(4)}
+                        <button
+                          type="button"
+                          onClick={handleSwapDestWeights}
+                          className="px-2.5 py-1 bg-white hover:bg-teal-50 text-teal-900 border border-teal-300 rounded-lg font-bold text-[11px] cursor-pointer shadow-2xs transition"
+                          title="คลิกเพื่อสลับตัวเลขระหว่างช่อง 18 กับ ช่อง 19"
+                        >
+                          ⇄ สลับค่า 18 ↔ 19
+                        </button>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(4)}
 
                     <div className="grid grid-cols-3 gap-2.5">
                       <div>
@@ -2947,8 +3148,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-orange-500"></span>
                         <span>[โซน 1] เอกสารอ้างอิงหลัก & โครงการ (คอลัมน์ 1 - 6)</span>
                       </span>
-                      <span className="text-[11px] text-orange-700 font-mono">Reference & Logistics</span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(1)}
+                        <span className="text-[11px] text-orange-700 font-mono">Reference & Logistics</span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(1)}
 
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       <div>
@@ -3031,8 +3236,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-sky-500"></span>
                         <span>[โซน 2] วันที่ ร้านค้าผู้จำหน่าย & รายการสินค้า (คอลัมน์ 7 - 12)</span>
                       </span>
-                      <span className="text-[11px] text-sky-700">Merchant & Products</span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(2)}
+                        <span className="text-[11px] text-sky-700">Merchant & Products</span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(2)}
 
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                       <div>
@@ -3119,8 +3328,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
                         <span>[โซน 3] น้ำหนักต้นทางจากตราชั่งรถบรรทุก (คอลัมน์ 13 - 15)</span>
                       </span>
-                      <span className="text-[11px] text-emerald-700 font-mono">Gross - Tare = Net Weight</span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(3)}
+                        <span className="text-[11px] text-emerald-700 font-mono">Gross - Tare = Net Weight</span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(3)}
                     <div className="grid grid-cols-3 gap-2">
                       <div>
                         <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">13. หนักเข้า (Gross กก.)</label>
@@ -3159,10 +3372,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-teal-500"></span>
                         <span>[โซน 4] น้ำหนักปลายทางหน้างาน & ผลต่างน้ำหนัก (คอลัมน์ 16 - 21)</span>
                       </span>
-                      <span className="text-[10px] font-mono font-bold text-rose-600">
-                        ผลต่าง: {form.col21 || 0} กก.
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(4)}
+                        <span className="text-[10px] font-mono font-bold text-rose-600">
+                          ผลต่าง: {form.col21 || 0} กก.
+                        </span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(4)}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       <div>
                         <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">16. วันที่ปลายทาง</label>
@@ -3228,10 +3445,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
                         <span>[โซน 5] จำนวน ปริมาณ ราคา & ค่าสินค้า (คอลัมน์ 22 - 29)</span>
                       </span>
-                      <span className="text-[11px] font-mono font-bold text-blue-700">
-                        ยอดรวมสุทธิ: ฿{(form.col29 || 0).toLocaleString()}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(5)}
+                        <span className="text-[11px] font-mono font-bold text-blue-700">
+                          ยอดรวมสุทธิ: ฿{(form.col29 || 0).toLocaleString()}
+                        </span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(5)}
 
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       <div>
@@ -3322,10 +3543,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
                         <span>[โซน 6] เงื่อนไขการชำระเงิน & ยอดคงค้าง (คอลัมน์ 30 - 36)</span>
                       </span>
-                      <span className="text-[11px] font-mono font-bold text-rose-700">
-                        หนี้ค้างชำระ: ฿{(form.col36 || 0).toLocaleString()}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {renderZoneRescanButton(6)}
+                        <span className="text-[11px] font-mono font-bold text-rose-700">
+                          หนี้ค้างชำระ: ฿{(form.col36 || 0).toLocaleString()}
+                        </span>
+                      </div>
                     </div>
+                    {renderZoneRescanReview(6)}
 
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                       <div>
@@ -3378,10 +3603,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
                   {/* Zone 7: Location & Remarks */}
                   <div className="border border-slate-300 rounded-xl p-3 bg-slate-50 space-y-2">
-                    <div className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                      <span className="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
-                      <span>[โซน 7] สถานที่ส่งมอบ & หมายเหตุ (คอลัมน์ 37 - 38)</span>
+                    <div className="font-bold text-slate-800 text-xs flex items-center justify-between flex-wrap gap-2">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+                        <span>[โซน 7] สถานที่ส่งมอบ & หมายเหตุ (คอลัมน์ 37 - 38)</span>
+                      </span>
+                      {renderZoneRescanButton(7)}
                     </div>
+                    {renderZoneRescanReview(7)}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <div>
                         <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">
