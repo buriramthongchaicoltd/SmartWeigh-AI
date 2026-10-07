@@ -70,6 +70,7 @@
 ### กฎข้อที่ 2: การป้องกันการนับยอดซ้ำ (Anti-Double Counting)
 - **`delivery_order` (ใบส่งของ DO):** เป็นระเบียนหลักในตาราง 39 คอลัมน์ (รวมทั้ง DO สินค้าทั่วไป และ DO สินค้าที่มีการชั่งน้ำหนัก)
 - **`dest_weighbridge` (ตั๋วชั่งปลายทาง):** เป็นเอกสารประกอบเพื่อเติมข้อมูลลงโซน 4 (ช่อง 16–21) ของใบ DO **ห้ามนำ `dest_weighbridge` มานับรวมเป็นจำนวนบิลส่งของหรือบวกยอดเงินซ้ำใน `StatSummaryCards`, `AnalyticsView`, `StoresManagementView`, หรือ `ReportsExportView` เด็ดขาด**
+- เมื่อตรวจรับตั๋วชั่งปลายทาง เลขอ้างอิงอาจเป็นเลขตั๋วชั่งต้นทาง ไม่ใช่เลข DO; ระบบตามเลขอ้างอิงไปยัง record ตั๋วต้นทางใบใดก็ได้ แล้วใช้ `matchedOriginDoId` หรือ `linkedViaDocNo` หา DO. หากตั๋วต้นทางหลายใบชี้ DO เดียวกัน ให้ผูกกับ DO เดียวกัน. ใช้ TR เป็น fallback เฉพาะเมื่อพบ DO ที่ตรงเพียงรายการเดียว และไม่จับคู่เมื่อผลลัพธ์กำกวม
 - **`tax_invoice` (ใบเสร็จ/กำกับภาษี):** หากมี `linkedViaDocNo` (ผูกชนกับใบ DO แล้ว) ห้ามนำยอดเงินมาบวกซ้ำกับใบ DO
 - **Cascade Unlink Cleanup:** เมื่อลบตั๋วชั่งปลายทาง ลบ DO หรือลบ PO ระบบใน `App.tsx` (`handleDeleteOrder`, `handleDeletePO`) จะล้างค่าการผูกบิล (`linkedViaDocNo`, `matchedDestTicketId`, ช่อง 16–21) อัตโนมัติเพื่อไม่ให้เกิดลิงก์ค้าง (Orphaned Links)
 

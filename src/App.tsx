@@ -1932,7 +1932,7 @@ export default function App() {
         autoFlagsSet.add('🤖 AI สแกนและสกัดข้อมูลจากรูปบิลอัตโนมัติ');
       }
 
-      // 1A. Case 1: Saving an unlinked Destination Weighbridge ticket -> Auto-match to Origin DO strictly by Reference DO Number
+      // 1A. Resolve a destination ticket reference either directly to a DO or through its origin weighbridge ticket.
       if (orderToSave.docType === 'dest_weighbridge' && !orderToSave.linkedViaDocNo) {
         const textRefs = extractDocReferences(orderToSave.col38);
         const refCandidates = [
@@ -1941,15 +1941,51 @@ export default function App() {
         ].filter(Boolean) as string[];
 
         if (refCandidates.length > 0) {
-          const candIdx = workingList.findIndex(ord => {
-            if (ord.id === orderToSave.id || ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return false;
-            if (Number(ord.col18) > 0 || Number(ord.col20) > 0) return false;
-            if (!ord.col6) return false;
-            return refCandidates.some(ref => isExactDocNumberReference(ord.col6, ref));
+          const eligibleDeliveryOrders = workingList.filter(order =>
+            order.id !== orderToSave.id &&
+            isDeliveryOrderPairingCandidate(order) &&
+            Number(order.col18) === 0 &&
+            Number(order.col20) === 0
+          );
+          const referenceMatches = (docNo?: string) =>
+            Boolean(docNo && refCandidates.some(ref => isExactDocNumberReference(docNo, ref)));
+          const matchingDeliveryOrders = new Map<string, OrderRecord>();
+
+          eligibleDeliveryOrders.forEach(order => {
+            if (referenceMatches(order.col6)) matchingDeliveryOrders.set(order.id, order);
           });
 
-          if (candIdx >= 0) {
-            const candidate = workingList[candIdx];
+          const referencedOriginTickets = workingList.filter(order =>
+            order.docType === 'weighbridge' && referenceMatches(order.col6)
+          );
+          referencedOriginTickets.forEach(ticket => {
+            const explicitlyMatchedOrder = eligibleDeliveryOrders.find(order =>
+              order.id === ticket.matchedOriginDoId
+            );
+            if (explicitlyMatchedOrder) {
+              matchingDeliveryOrders.set(explicitlyMatchedOrder.id, explicitlyMatchedOrder);
+              return;
+            }
+
+            const linkedOrderMatches = eligibleDeliveryOrders.filter(order =>
+              Boolean(ticket.linkedViaDocNo && isExactDocNumberReference(order.col6, ticket.linkedViaDocNo))
+            );
+            if (linkedOrderMatches.length === 1) {
+              matchingDeliveryOrders.set(linkedOrderMatches[0].id, linkedOrderMatches[0]);
+              return;
+            }
+
+            const sameTrOrders = eligibleDeliveryOrders.filter(order =>
+              Boolean(ticket.col1?.trim() && order.col1.trim() === ticket.col1.trim())
+            );
+            if (sameTrOrders.length === 1) {
+              matchingDeliveryOrders.set(sameTrOrders[0].id, sameTrOrders[0]);
+            }
+          });
+
+          if (matchingDeliveryOrders.size === 1) {
+            const candidate = Array.from(matchingDeliveryOrders.values())[0];
+            const candIdx = workingList.findIndex(order => order.id === candidate.id);
             const grossD = Number(orderToSave.col18) || 0;
             const tareD = Number(orderToSave.col19) || 0;
             const netD = Number(orderToSave.col20) || Math.max(0, grossD - tareD);
@@ -1957,7 +1993,7 @@ export default function App() {
             const diff = (netO > 0 && netD > 0) ? (netO - netD) : 0;
             const destTicketNo = orderToSave.col17 || orderToSave.col6 || orderToSave.col1;
             const candFlags = new Set<string>(candidate.autoActionFlags || []);
-            candFlags.add(`⚖️ ชนตั๋วชั่งปลายทาง #${destTicketNo} เข้าโซน 4 อัตโนมัติ (อ้างอิงเลข DO ${candidate.col6})`);
+            candFlags.add(`⚖️ ชนตั๋วชั่งปลายทาง #${destTicketNo} เข้าโซน 4 อัตโนมัติ (ตามเลขอ้างอิงเอกสารที่เกี่ยวข้องกับ DO ${candidate.col6})`);
 
             workingList[candIdx] = {
               ...candidate,
@@ -1978,7 +2014,7 @@ export default function App() {
             };
             orderToSave.linkedViaDocNo = candidate.col6;
             orderToSave.destMatchStatus = 'auto_flagged';
-            autoFlagsSet.add(`⚖️ ชนเข้าใบส่งของ DO ${candidate.col6 || candidate.col1} อัตโนมัติ (ตามเลขอ้างอิง)`);
+            autoFlagsSet.add(`⚖️ ชนตั๋วชั่งปลายทางเข้า DO ${candidate.col6 || candidate.col1} อัตโนมัติ (ผ่านเลขอ้างอิงเอกสาร)`);
             orderToSave.autoActionFlags = Array.from(autoFlagsSet);
             orderToSave.autoFlagsVerified = false;
             autoMatchedNote = `🚩 ชนตั๋วชั่งปลายทางเข้ากับ DO ${candidate.col6 || candidate.col1} อัตโนมัติแล้ว (ติดธงรอตรวจสอบยืนยัน)`;

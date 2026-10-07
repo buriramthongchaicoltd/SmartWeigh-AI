@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Link Destination Weighbridge by Origin Ticket Reference
+
+### การเปลี่ยนแปลง
+- แก้การตรวจรับตั๋วชั่งปลายทางที่เลขอ้างอิงชี้ไปยังเลขตั๋วชั่งต้นทาง ไม่ใช่เลข DO โดยตรง
+- ตามเลขอ้างอิงไปยัง record ตั๋วต้นทางใบใดก็ได้ แล้วหา DO ด้วย `matchedOriginDoId` หรือ `linkedViaDocNo`; เมื่อตั๋วต้นทางหลายใบชี้ DO เดียวกันจะ deduplicate ที่ DO ID. ใช้ TR ร่วมกันเป็น fallback เมื่อพบ DO ที่ตรงเพียงรายการเดียว
+- หากเลขอ้างอิง resolve ได้หลาย DO จะไม่จับคู่ผิดรายการ; คงตั๋วชั่งปลายทางเป็น record แยกและผูกข้อมูลโซน 4 กับ DO ที่พบ
+- อัปเดต Handover และ Database Storage Blueprint
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Group Origin Tickets with Their DO by Shared TR
 
 ### การเปลี่ยนแปลง
