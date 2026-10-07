@@ -264,7 +264,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete';
   const isContractorChargeOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
   const contractorChargeItems: OrderItemDetail[] = form.lineItems?.length
-    ? form.lineItems
+    ? form.lineItems.map(item => ({
+        ...item,
+        contractorChargeDecision: item.contractorChargeDecision || 'chargeable'
+      }))
     : [{
         id: 'main',
         itemDescription: form.col11 || '',
@@ -272,8 +275,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
         qty: Number(form.col22) || 0,
         unit: form.col23 || '',
         unitPrice: Number(form.col24) || undefined,
-        totalAmount: Number(form.col25) || undefined
+        totalAmount: Number(form.col25) || undefined,
+        contractorChargeDecision: 'chargeable'
       }];
+  const contractorChargeMode = contractorChargeItems.every(item => item.contractorChargeDecision === 'not_chargeable')
+    ? 'not_chargeable'
+    : 'chargeable';
   const isTaxInvoice = selectedDocType === 'tax_invoice';
   const isPO = selectedDocType === 'purchase_order';
   const isFullLogistics = selectedDocType === 'full_logistics';
@@ -1470,6 +1477,27 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <label className="block text-[11px] font-semibold text-slate-700 mb-0.5">
                           9. ผู้รับสินค้า / ผู้ซื้อ / ผู้รับเหมา <span className="text-rose-500">*</span>
                         </label>
+                        {isContractorChargeOrder && (
+                          <div className="mb-1.5">
+                            <label htmlFor="contractor-charge-mode" className="mb-0.5 block text-[10px] font-semibold text-slate-600">
+                              สถานะการหักค่าวัสดุ
+                            </label>
+                            <select
+                              id="contractor-charge-mode"
+                              value={contractorChargeMode}
+                              onChange={event => applyContractorChargeDecisionToAll(
+                                event.target.value === 'not_chargeable' ? 'not_chargeable' : 'chargeable'
+                              )}
+                              className="w-full rounded-lg border border-slate-300 bg-white p-2 text-xs"
+                            >
+                              <option value="chargeable">นำไปหักผู้รับเหมา (ใช้ข้อมูลผู้รับเหมาด้านล่าง)</option>
+                              <option value="not_chargeable">ไม่นำหัก (บริษัทซื้อใช้เอง)</option>
+                            </select>
+                            <p className="mt-0.5 text-[10px] text-slate-500">
+                              ค่าเริ่มต้นนำไปหักทุกรายการ คุณสามารถเปลี่ยนรายการที่ไม่นำหักได้ด้านล่าง
+                            </p>
+                          </div>
+                        )}
                         <SmartDatabaseInput
                           required
                           value={form.col9 || ''}
@@ -1712,7 +1740,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h4 className="text-xs font-bold text-violet-950">รายการวัสดุที่นำไปหักผู้รับเหมา</h4>
-                          <p className="mt-0.5 text-[10px] text-violet-800">กรุณาเลือกให้ครบทุกรายการ: นำไปหักผู้รับเหมา หรือไม่นำหัก (บริษัทซื้อใช้เอง)</p>
+                          <p className="mt-0.5 text-[10px] text-violet-800">รายการเริ่มต้นนำไปหักผู้รับเหมาตามช่อง 9; เปลี่ยนสถานะเฉพาะรายการที่บริษัทซื้อใช้เองได้</p>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5">
                           <button

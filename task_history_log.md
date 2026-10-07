@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-07] Default DO Materials to Contractor Deduction
+
+### การเปลี่ยนแปลง
+- เพิ่มตัวเลือกสถานะหักที่ช่อง 9: ค่าเริ่มต้นนำทุกรายการไปหักกับผู้รับเหมาที่ระบุ; เลือก “ไม่นำหัก (บริษัทซื้อใช้เอง)” เพื่อกำหนดทั้ง DO แล้วค่อยแก้แยกรายการได้
+- รายการที่ยังไม่มีสถานะเดิมจะเริ่มเป็น `chargeable`; คงสถานะ `not_chargeable` ที่มีการบันทึกไว้แล้ว
+- อัปเดตคำอธิบาย flow ใน Handover และ Database Blueprint
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Bring Initial JavaScript Chunk Below 500 kB
 
 ### การเปลี่ยนแปลง
