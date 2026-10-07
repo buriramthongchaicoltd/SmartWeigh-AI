@@ -64,7 +64,11 @@ const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const SYSTEM_MASTER_USERNAME = 'Admin';
 const SYSTEM_MASTER_INITIAL_PASSWORD = (process.env.SYSTEM_MASTER_ADMIN_PASSWORD || '').trim();
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
-const authSessions = new Map<string, { user: AuthenticatedAppUser; expiresAt: number }>();
+const authSessions = new Map<string, {
+  user: AuthenticatedAppUser;
+  expiresAt: number;
+  firstPasswordChangePending: boolean;
+}>();
 const loginRateLimits = new Map<string, { attempts: number; resetAt: number }>();
 
 function publicAppUser(row: Record<string, any>): AuthenticatedAppUser {
@@ -88,7 +92,7 @@ function getSessionToken(req: Request): string | null {
   return sessionCookie ? decodeURIComponent(sessionCookie.slice(AUTH_COOKIE_NAME.length + 1)) : null;
 }
 
-function getAuthenticatedUser(req: Request): AuthenticatedAppUser | null {
+function getAuthenticatedSession(req: Request) {
   const token = getSessionToken(req);
   if (!token) return null;
   const session = authSessions.get(token);
@@ -96,7 +100,11 @@ function getAuthenticatedUser(req: Request): AuthenticatedAppUser | null {
     authSessions.delete(token);
     return null;
   }
-  return session.user;
+  return { token, session };
+}
+
+function getAuthenticatedUser(req: Request): AuthenticatedAppUser | null {
+  return getAuthenticatedSession(req)?.session.user || null;
 }
 
 function setSessionCookie(res: Response, token: string, maxAgeSeconds: number) {
@@ -220,11 +228,12 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     }
 
     const user = publicAppUser(row);
+    const firstPasswordChangePending = row.first_password_change_completed !== true;
     const token = crypto.randomBytes(32).toString('base64url');
-    authSessions.set(token, { user, expiresAt: now + AUTH_SESSION_TTL_MS });
+    authSessions.set(token, { user, expiresAt: now + AUTH_SESSION_TTL_MS, firstPasswordChangePending });
     loginRateLimits.delete(ip);
     setSessionCookie(res, token, Math.floor(AUTH_SESSION_TTL_MS / 1000));
-    return res.json({ success: true, user });
+    return res.json({ success: true, user, mustChangePassword: firstPasswordChangePending });
   } catch (err: any) {
     console.error('[Auth] Login failed:', err?.message || err);
     return res.status(500).json({ success: false, error: 'เข้าสู่ระบบไม่สำเร็จเนื่องจากระบบยืนยันตัวตนขัดข้อง' });
@@ -233,9 +242,13 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
 app.get('/api/auth/me', (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
-  const user = getAuthenticatedUser(req);
-  return user
-    ? res.json({ success: true, user })
+  const authenticated = getAuthenticatedSession(req);
+  return authenticated
+    ? res.json({
+        success: true,
+        user: authenticated.session.user,
+        mustChangePassword: authenticated.session.firstPasswordChangePending
+      })
     : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
 });
 
@@ -304,6 +317,80 @@ app.use('/api', (req: Request, res: Response, next) => {
     return res.status(403).json({ success: false, error: 'บัญชีของคุณไม่มีสิทธิ์แก้ไขข้อมูลตารางนี้' });
   }
   return next();
+});
+
+app.post('/api/auth/password/skip-first-change', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const authenticated = getAuthenticatedSession(req);
+  if (!authenticated) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
+  authenticated.session.firstPasswordChangePending = false;
+  return res.json({ success: true });
+});
+
+app.post('/api/auth/password/change', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const authenticated = getAuthenticatedSession(req);
+  if (!authenticated) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
+
+  const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+  const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ success: false, error: 'กรุณากรอกรหัสผ่านปัจจุบันและรหัสผ่านใหม่' });
+  }
+  if (currentPassword.length > 1024) {
+    return res.status(400).json({ success: false, error: 'รหัสผ่านปัจจุบันยาวเกินกำหนด' });
+  }
+  if (newPassword.length < 12 || newPassword.length > 1024) {
+    return res.status(400).json({ success: false, error: 'รหัสผ่านใหม่ต้องมีความยาว 12 ถึง 1,024 ตัวอักษร' });
+  }
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ success: false, error: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
+    const { data: account, error: accountError } = await client.from('app_users')
+      .select('id,password,status')
+      .eq('id', authenticated.session.user.id)
+      .maybeSingle();
+    if (accountError) throw accountError;
+    if (!account || account.status === 'suspended' || typeof account.password !== 'string') {
+      return res.status(403).json({ success: false, error: 'บัญชีนี้ไม่สามารถเปลี่ยนรหัสผ่านได้' });
+    }
+    if (!verifyPassword(currentPassword, account.password).valid) {
+      return res.status(400).json({ success: false, error: 'รหัสผ่านปัจจุบันไม่ถูกต้อง' });
+    }
+
+    const { data: updated, error: updateError } = await client.from('app_users')
+      .update({
+        password: hashPassword(newPassword),
+        first_password_change_completed: true
+      })
+      .eq('id', account.id)
+      .eq('password', account.password)
+      .select('id')
+      .maybeSingle();
+    if (updateError?.code === '42703' || updateError?.code === 'PGRST204') {
+      return res.status(503).json({
+        success: false,
+        error: 'ฐานข้อมูลยังไม่มีสถานะเปลี่ยนรหัสผ่านครั้งแรก กรุณาให้ผู้ดูแลอัปเดต schema ใน Supabase ก่อน'
+      });
+    }
+    if (updateError) throw updateError;
+    if (!updated) {
+      return res.status(409).json({ success: false, error: 'รหัสผ่านบัญชีเปลี่ยนไปแล้ว กรุณาเข้าสู่ระบบใหม่' });
+    }
+
+    for (const [token, session] of authSessions) {
+      if (session.user.id === account.id && token !== authenticated.token) authSessions.delete(token);
+    }
+    authenticated.session.firstPasswordChangePending = false;
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Auth] Password change failed:', err?.message || err);
+    return res.status(500).json({ success: false, error: 'เปลี่ยนรหัสผ่านไม่สำเร็จ กรุณาลองใหม่' });
+  }
 });
 
 const RESTRICTED_ORDER_FIELDS = [
@@ -3867,7 +3954,7 @@ app.post('/api/auth/users', async (req: Request, res: Response) => {
     }
 
     const [{ data: existing, error: existingError }, { data: knownUsers, error: usersError }] = await Promise.all([
-      client.from('app_users').select('id,username,password,full_name,department,phone,role,status,created_at').eq('id', id).maybeSingle(),
+      client.from('app_users').select('id,username,password,full_name,department,phone,role,status,created_at,first_password_change_completed').eq('id', id).maybeSingle(),
       client.from('app_users').select('id,username')
     ]);
     if (existingError) throw existingError;
@@ -3887,6 +3974,9 @@ app.post('/api/auth/users', async (req: Request, res: Response) => {
       phone: typeof input.phone === 'string' ? input.phone.trim() : null,
       role: isSystemMaster ? 'admin' : role,
       status: isSystemMaster ? 'active' : (input.status === 'suspended' ? 'suspended' : 'active'),
+      first_password_change_completed: password.trim()
+        ? false
+        : Boolean(existing?.first_password_change_completed),
       created_at: existing?.created_at || new Date().toISOString()
     };
     if (password.trim()) row.password = hashPassword(password);

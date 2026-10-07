@@ -47,7 +47,7 @@
 - เมื่อยังไม่มี Master Admin ต้องตั้ง `SYSTEM_MASTER_ADMIN_PASSWORD` เป็น secret อย่างน้อย 16 ตัวอักษรใน runtime ก่อน; บัญชีเดิมที่ยังใช้ `@Admin` ล็อกอินได้เพื่อรองรับระบบเดิม ส่วน `123456` ถูกปฏิเสธ; runtime secret ใช้หมุนรหัส Master เดิมได้
 - Google Apps Script ตรวจ `SMARTWEIGH_SHARED_SECRET` จาก Script Properties ทุก `POST`; Admin สร้างรหัสจากหน้า Settings ได้ ระบบเก็บไว้แบบเข้ารหัสใน `system_config` และไม่ต้องเพิ่มรหัสใน Render Environment. เจ้าของ Script ยังคงต้องบันทึก Property นี้ใน Apps Script หนึ่งครั้ง แล้ว deploy source รุ่นล่าสุด
 - **งานภายนอกที่ยังต้องทำโดยผู้ดูแล:** หมุน Supabase key, ตั้ง Render environment secrets, ใช้ DDL ปิด policy ในฐานข้อมูลจริง, deploy GAS รุ่นล่าสุด/ตั้ง Script Property และตรวจสอบ Git history กับสถานะ production. ยังไม่ได้เชื่อมต่อหรือแก้บริการ production จาก workspace นี้
-- Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
+- Login ใช้ hash scrypt และ HttpOnly/SameSite cookie อายุ 8 ชั่วโมง; session อยู่ใน memory จึงหมดเมื่อ process restart/deploy. ทุกบัญชีที่ยังไม่เปลี่ยนรหัสจะแสดงหน้าต่างเปลี่ยนรหัสหลัง login; เปลี่ยนได้ด้วยรหัสเดิมและรหัสใหม่อย่างน้อย 12 ตัวอักษร หรือเลือกข้ามเฉพาะ session นี้เพื่อเข้าใช้งานและรับการเตือนอีกครั้งใน login ถัดไป. บันทึกสถานะใน `app_users.first_password_change_completed`; ต้องรัน DDL ล่าสุดก่อนเปิดใช้ feature. การตรวจนี้ไม่ใช่การทดสอบ production หรือฐานข้อมูลจริง
 
 ---
 
@@ -96,6 +96,7 @@
 ### กฎข้อที่ 5: ทุกบัญชีรวมถึง Admin ต้องยืนยัน Username/Password
 - ห้ามให้ `Admin` หรือบัญชีอื่นเข้าใช้งานจากการเลือกชื่อ/สลับบัญชีโดยไม่กรอกรหัสผ่าน; หน้าเว็บไม่ถือเป็นตัวตรวจสอบตัวตน
 - Server ตรวจ `app_users.password`, ออก session cookie และปฏิเสธ API ที่ไม่มี session; รหัสผ่านใหม่บันทึกเป็น scrypt hash และไม่ส่งคืนใน response
+- บัญชีที่ยังไม่ตั้ง `first_password_change_completed` จะแสดงหน้าต่างเปลี่ยนรหัสครั้งแรกหลัง login; การข้ามปิดเฉพาะ session ปัจจุบันและจะแจ้งอีกในการ login ถัดไป. เปลี่ยนสำเร็จจึงบันทึก flag; รหัสใหม่ต้องมีอย่างน้อย 12 ตัวอักษร
 - หากยังไม่มี Master Admin ใน `app_users`, server จะสร้างบัญชีได้ต่อเมื่อกำหนด `SYSTEM_MASTER_ADMIN_PASSWORD` ที่ยาวอย่างน้อย 16 ตัวอักษรใน runtime; หากมีบัญชีเดิม รหัส `@Admin` ยังใช้ได้ แต่ `123456` ถูกปฏิเสธ
 
 ### กฎข้อที่ 6: ห้ามใช้ `window.alert` หรือ `window.confirm`

@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-10-07] Add Skippable First-Login Password Change
+
+### การเปลี่ยนแปลง
+- แสดงหน้าต่างเปลี่ยนรหัสผ่านสำหรับทุกบัญชีที่ยังไม่มีสถานะเปลี่ยนรหัสสำเร็จ; เปลี่ยนได้หลังกรอกรหัสปัจจุบันและรหัสใหม่ขั้นต่ำ 12 ตัวอักษร
+- เพิ่มตัวเลือกข้ามเฉพาะ session ปัจจุบัน; เตือนอีกครั้งในการ login ครั้งถัดไปจนกว่าจะเปลี่ยนรหัสสำเร็จ
+- เพิ่ม API เปลี่ยนรหัส/ข้ามที่ผูกกับบัญชีใน session, อัปเดตรหัสเป็น scrypt hash และ invalidates session อื่นของบัญชีหลังเปลี่ยนรหัส
+- เพิ่ม `app_users.first_password_change_completed` ด้วย DDL แบบ additive; การเปลี่ยนรหัสและสถานะเสร็จสิ้นอัปเดตพร้อมกัน
+- อัปเดต Handover และ Database Blueprint; ผู้ดูแลต้องรัน DDL รุ่นล่าสุดใน Supabase ก่อนเปิดใช้
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Default DO Materials to Contractor Deduction
 
 ### การเปลี่ยนแปลง

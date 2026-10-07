@@ -14,7 +14,7 @@ interface LoginModalProps {
   isOpen: boolean;
   companyName: string;
   companyLogoUrl?: string;
-  onLoginSuccess: (user: AppUser) => Promise<void>;
+  onLoginSuccess: (user: AppUser, mustChangePassword: boolean) => Promise<void>;
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({
@@ -46,7 +46,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         setErrorMsg(result.error || 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง');
         return;
       }
-      await onLoginSuccess(result.user);
+      await onLoginSuccess(result.user, Boolean(result.mustChangePassword));
       setUsername('');
       setPassword('');
     } catch (error) {

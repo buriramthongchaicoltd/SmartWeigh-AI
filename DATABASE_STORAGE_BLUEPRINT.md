@@ -21,7 +21,7 @@
 - `getSupabaseClient()` ใช้ `SUPABASE_SERVICE_ROLE_KEY` จาก runtime environment เท่านั้น; ไม่ใช้ anon key สำหรับ backend เพราะ DDL ถอนสิทธิ์ `PUBLIC`, `anon`, `authenticated` และให้ `service_role` เท่านั้น. ตั้ง Project URL และ service-role key ใน Render Environment; ห้ามใส่ secret ใน browser/Git. ต้องนำ DDL ไป execute ใน Supabase SQL Editor ด้วยตนเอง; source change ไม่ปรับ cloud database อัตโนมัติ. หน้าตั้งค่าตรวจ 10 ตาราง รวม `system_config` ซึ่งใช้ `config_key` เป็น key และตารางเอกสารแนบหักผู้รับเหมาอีก 2 ตาราง
 - เมื่อเปิดเว็บไซต์ การตรวจบริการเริ่มทำงานตั้งแต่หน้าเข้าสู่ระบบ โดยเช็คฐานข้อมูลและ 10 ตาราง, Google Drive, Gemini API และ LINE Token; ระบบแชร์ผลตรวจล่าสุดภายใน 60 วินาทีเพื่อลดการเรียกบริการซ้ำ. การตรวจ LINE ยืนยัน Token เท่านั้น ไม่ได้ยืนยัน webhook delivery หรือการรับบิลจริง
 - API ที่ไม่ใช่ health/login/LINE webhook บังคับ server session. การเขียน/ลบข้อมูลและไฟล์ถูกจำกัดตาม role ที่ backend; role `user` จำกัดตารางที่เขียนได้และไม่สามารถแก้ไขฟิลด์ราคา/การเงิน/การชำระเงินที่ถูกป้องกันผ่าน API. UI ไม่ใช่ security boundary
-- Login ใช้บัญชี `app_users`, password hash scrypt และ HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และหมดเมื่อ process restart/deploy. Master Admin ใหม่ต้อง bootstrap ด้วย `SYSTEM_MASTER_ADMIN_PASSWORD` ความยาวอย่างน้อย 16 ตัวอักษร; บัญชีเดิมที่ยังใช้ `@Admin` สามารถล็อกอินได้ ส่วน `123456` ถูกปฏิเสธ และ runtime secret ใช้หมุนรหัส Master เดิมได้
+- Login ใช้บัญชี `app_users`, password hash scrypt และ HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และหมดเมื่อ process restart/deploy. บัญชีที่ยังไม่เปลี่ยนรหัสผ่านจะแสดงหน้าต่างเปลี่ยนรหัสครั้งแรก; ข้ามได้เฉพาะ session นั้นและระบบจะแจ้งอีกครั้งเมื่อเข้าระบบใหม่จนกว่าจะเปลี่ยนสำเร็จ. รหัสใหม่ต้องมีอย่างน้อย 12 ตัวอักษร. สถานะเก็บใน `app_users.first_password_change_completed`; ต้องรัน DDL รุ่นล่าสุดเพื่อเพิ่มคอลัมน์นี้. Master Admin ใหม่ต้อง bootstrap ด้วย `SYSTEM_MASTER_ADMIN_PASSWORD` ความยาวอย่างน้อย 16 ตัวอักษร; บัญชีเดิมที่ยังใช้ `@Admin` สามารถล็อกอินได้ ส่วน `123456` ถูกปฏิเสธ และ runtime secret ใช้หมุนรหัส Master เดิมได้
 - GAS ต้องมี secret อย่างน้อย 32 ตัวอักษรตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`; Admin สร้างและคัดลอก secret จากหน้าตั้งค่าได้ โดยระบบเก็บค่าเข้ารหัสใน `system_config` และใช้ service-role key/`DATABASE_URL` ที่ server เพื่อเข้ารหัส. หากหมุน database credential ต้องสร้าง GAS secret ใหม่และอัปเดต Script Property เพราะค่าเดิมถอดรหัสไม่ได้. รองรับ `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ใน Environment เป็น override เดิม แต่ไม่จำเป็นสำหรับการตั้งค่าใหม่. ต้อง deploy `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้ endpoint ปฏิเสธ request ที่ไม่มี secret
 - การเปลี่ยนแปลงนี้ไม่ได้หมุน key, รัน DDL, deploy GAS หรือทดสอบ production จริง. ผู้ดูแลต้องทำขั้นตอนภายนอกและตรวจ service logs หลัง deploy
 
@@ -316,8 +316,11 @@ CREATE TABLE IF NOT EXISTS public.app_users (
   department TEXT,
   phone TEXT,
   status TEXT DEFAULT 'active',
+  first_password_change_completed BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE public.app_users
+  ADD COLUMN IF NOT EXISTS first_password_change_completed BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.system_config (
   config_key TEXT PRIMARY KEY,

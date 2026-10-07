@@ -7,6 +7,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Header, SidebarNav, MainTabType } from './components/Header';
 import { StatSummaryCards } from './components/StatSummaryCards';
 import { LoginModal } from './components/LoginModal';
+import { FirstPasswordChangeModal } from './components/FirstPasswordChangeModal';
 import {
   OrderRecord,
   StoreMerchant,
@@ -302,6 +303,7 @@ export default function App() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(DEFAULT_SYSTEM_SETTINGS);
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [authenticatedUser, setAuthenticatedUser] = useState<AppUser | null>(null);
+  const [needsFirstPasswordChange, setNeedsFirstPasswordChange] = useState(false);
   const [isAuthChecked, setIsAuthChecked] = useState<boolean>(false);
   const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -506,6 +508,7 @@ export default function App() {
         if (!cancelled && result.success && result.user) {
           setAuthenticatedUser(result.user);
           setCurrentUserId(result.user.id);
+          setNeedsFirstPasswordChange(Boolean(result.mustChangePassword));
           await fetchDatabaseData();
         }
       } catch (error) {
@@ -802,9 +805,10 @@ export default function App() {
   };
 
   // User Auth & Management Handlers
-  const handleLoginSuccess = async (loggedInUser: AppUser) => {
+  const handleLoginSuccess = async (loggedInUser: AppUser, mustChangePassword: boolean) => {
     setAuthenticatedUser(loggedInUser);
     setCurrentUserId(loggedInUser.id);
+    setNeedsFirstPasswordChange(mustChangePassword);
     await fetchDatabaseData();
     showToast(`เข้าใช้งานในชื่อ "${loggedInUser.fullName}" (${rolePermissions[loggedInUser.role]?.label || loggedInUser.role})`);
   };
@@ -818,6 +822,7 @@ export default function App() {
       showToast(`แจ้งออกจากระบบไปยังเซิร์ฟเวอร์ไม่สำเร็จ${reason}`, 'error');
     } finally {
       setAuthenticatedUser(null);
+      setNeedsFirstPasswordChange(false);
       setCurrentUserId('');
       setUsers([]);
       setIsDbLoaded(false);
@@ -2979,6 +2984,15 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex font-sans">
+      {needsFirstPasswordChange && (
+        <FirstPasswordChangeModal
+          onChanged={() => {
+            setNeedsFirstPasswordChange(false);
+            showToast('เปลี่ยนรหัสผ่านเรียบร้อยแล้ว');
+          }}
+          onSkipped={() => setNeedsFirstPasswordChange(false)}
+        />
+      )}
       {/* Left Navigation Sidebar */}
       <SidebarNav
         activeTab={activeTab}

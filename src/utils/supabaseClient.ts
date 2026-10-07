@@ -207,8 +207,11 @@ CREATE TABLE IF NOT EXISTS public.app_users (
   department TEXT,
   phone TEXT,
   status TEXT DEFAULT 'active',
+  first_password_change_completed BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE public.app_users
+  ADD COLUMN IF NOT EXISTS first_password_change_completed BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.system_config (
   config_key TEXT PRIMARY KEY,
