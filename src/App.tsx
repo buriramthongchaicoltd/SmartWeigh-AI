@@ -608,21 +608,37 @@ export default function App() {
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
+  const dbSyncGenerationRef = React.useRef<Record<string, number>>({});
+  const dbSyncInFlightRef = React.useRef<Record<string, Set<Promise<void>> | undefined>>({});
   const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
     if (saveDbTimerRef.current[table]) {
       clearTimeout(saveDbTimerRef.current[table]);
     }
+    const generation = dbSyncGenerationRef.current[table] || 0;
     saveDbTimerRef.current[table] = setTimeout(async () => {
       const saveBatch = async (attempt: number): Promise<void> => {
+        if ((dbSyncGenerationRef.current[table] || 0) !== generation) return;
         try {
-          const response = await fetch('/api/database/save-batch', {
+          const request = fetch('/api/database/save-batch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ table, records })
+          }).then(async response => {
+            const result = await response.json();
+            if (!response.ok || !result?.success) {
+              throw new Error(result?.error || `HTTP ${response.status}`);
+            }
           });
-          const result = await response.json();
-          if (!response.ok || !result?.success) {
-            throw new Error(result?.error || `HTTP ${response.status}`);
+          const inFlight = dbSyncInFlightRef.current[table] || new Set<Promise<void>>();
+          inFlight.add(request);
+          dbSyncInFlightRef.current[table] = inFlight;
+          try {
+            await request;
+          } finally {
+            inFlight.delete(request);
+            if (inFlight.size === 0) {
+              dbSyncInFlightRef.current[table] = undefined;
+            }
           }
           failedDbSyncTablesRef.current.delete(table);
         } catch (err) {
@@ -3088,6 +3104,15 @@ export default function App() {
                 if (!currentPermissions.canDeleteOrder) {
                   throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
                 }
+                if (saveDbTimerRef.current.line_inbox) {
+                  clearTimeout(saveDbTimerRef.current.line_inbox);
+                  saveDbTimerRef.current.line_inbox = undefined;
+                }
+                dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
+                await Promise.all(
+                  [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
+                );
+
                 const driveResponse = await fetch('/api/drive/delete-line-inbox-file', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
@@ -3110,9 +3135,7 @@ export default function App() {
                 setLineInbox(prev => prev.filter(i => i.id !== id));
                 showToast(driveResult.deleted
                   ? 'ลบรายการและนำรูปออกจาก Google Drive ไปยังถังขยะแล้ว'
-                  : driveResult.retained
-                    ? `ลบรายการแล้ว แต่เก็บรูปไว้เพราะยังมีรายการอื่นใช้งาน: ${driveResult.message}`
-                    : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
+                  : 'ลบรายการออกจากกล่องพักบิล LINE แล้ว; ไม่มีไฟล์ Drive ที่ต้องลบ');
               }}
               onOpenVerifyFromInbox={handleOpenVerifyFromInbox}
               onSyncWebhookQueue={syncWebhookQueueToLocal}

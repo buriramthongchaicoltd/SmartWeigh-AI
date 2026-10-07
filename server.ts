@@ -2719,6 +2719,14 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         throw new Error(`อัปเดตรายการ LINE ${item.id} ลง Supabase ไม่สำเร็จ: ${error.message}`);
       }
     };
+    const sendAndPersistReply = async (item: any, replyToken?: string, quoteToken?: string) => {
+      item.botReplyAttempted = true;
+      item.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, item.botReplyText || '');
+      item.botReplyError = item.botReplySent
+        ? undefined
+        : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
+      await persistInboxItem(item);
+    };
 
     for (const event of events) {
       if (event.type !== 'message' || event.message?.type !== 'image') {
@@ -2788,12 +2796,8 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           senderName,
           scanFailed: true
         });
-        inboxItem.botReplyAttempted = true;
-        inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, inboxItem.botReplyText);
-        inboxItem.botReplyError = inboxItem.botReplySent
-          ? undefined
-          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
         await persistInboxItem(inboxItem);
+        await sendAndPersistReply(inboxItem, replyToken, quoteToken);
         continue;
       }
 
@@ -2844,11 +2848,6 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
         });
 
         inboxItem.botReplyText = replyText;
-        inboxItem.botReplyAttempted = true;
-        inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, replyText);
-        inboxItem.botReplyError = inboxItem.botReplySent
-          ? undefined
-          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
         if (!billNo) {
           console.log(`[LINE Webhook] Unreadable bill saved as scan_failed (collect-first mode). messageId=${messageId}, sender=${senderName}`);
         }
@@ -2861,11 +2860,6 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
           scanFailed: true
         });
         inboxItem.botReplyText = fallbackReply;
-        inboxItem.botReplyAttempted = true;
-        inboxItem.botReplySent = await sendLineFreeQuoteReply(replyToken, quoteToken, fallbackReply);
-        inboxItem.botReplyError = inboxItem.botReplySent
-          ? undefined
-          : 'ส่งข้อความกลับ LINE ไม่สำเร็จ อาจเกิดจาก Reply Token หมดอายุหรือการเชื่อมต่อขัดข้อง';
       }
 
       // Step 5: Upload to Google Drive ZONE_00 BEFORE saving to Supabase
@@ -2923,6 +2917,9 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
       }
 
       await persistInboxItem(inboxItem);
+      if (inboxItem.botReplyText) {
+        await sendAndPersistReply(inboxItem, replyToken, quoteToken);
+      }
     }
   } catch (err) {
     console.error('LINE Webhook handler error:', err);
@@ -5633,6 +5630,14 @@ app.post('/api/drive/cleanup-file', async (req: Request, res: Response) => {
   }
 });
 
+function getLineInboxDriveFileId(row: Record<string, any>): string | null {
+  const extractedData = row.extracted_data && typeof row.extracted_data === 'object'
+    ? row.extracted_data as Record<string, unknown>
+    : {};
+  const fileId = row.drive_file_id || extractedData.driveFileId || extractedData.drive_file_id;
+  return typeof fileId === 'string' && fileId.trim() ? fileId.trim() : null;
+}
+
 async function getDriveLinkedFileIds(
   client: any,
   tables: string[] = ['line_inbox', 'orders', 'purchase_orders'],
@@ -5644,17 +5649,22 @@ async function getDriveLinkedFileIds(
     for (let offset = 0; ; offset += pageSize) {
       let query = client
         .from(table)
-        .select('drive_file_id')
-        .not('drive_file_id', 'is', null)
+        .select(table === 'line_inbox' ? 'drive_file_id,extracted_data' : 'drive_file_id')
+        .order('id', { ascending: true })
         .range(offset, offset + pageSize - 1);
+      if (table !== 'line_inbox') query = query.not('drive_file_id', 'is', null);
       if (signal) query = query.abortSignal(signal);
       const { data, error } = await query;
       if (error) {
         throw new Error(`ตรวจรายการเชื่อมโยง Drive ใน ${table} ไม่สำเร็จ: ${error.message}`);
       }
       for (const row of data || []) {
-        if (row.drive_file_id) {
-          const fileId = String(row.drive_file_id);
+        const fileId = table === 'line_inbox'
+          ? getLineInboxDriveFileId(row)
+          : typeof row.drive_file_id === 'string' && row.drive_file_id.trim()
+            ? row.drive_file_id.trim()
+            : null;
+        if (fileId) {
           const sources = linkedFileIds.get(fileId) || [];
           if (!sources.includes(table)) sources.push(table);
           linkedFileIds.set(fileId, sources);
@@ -5927,29 +5937,13 @@ app.post('/api/drive/delete-line-inbox-file', async (req: Request, res: Response
     }
     const { data: inboxRow, error: inboxError } = await client
       .from('line_inbox')
-      .select('drive_file_id')
+      .select('drive_file_id,extracted_data')
       .eq('id', inboxId)
       .maybeSingle();
     if (inboxError) throw new Error(`ตรวจสอบรายการ LINE ไม่สำเร็จ: ${inboxError.message}`);
     if (!inboxRow) return res.status(404).json({ success: false, error: 'ไม่พบรายการในกล่องพัก LINE' });
-    const fileId = inboxRow.drive_file_id;
+    const fileId = getLineInboxDriveFileId(inboxRow);
     if (!fileId) return res.json({ success: true, deleted: false, message: 'รายการนี้ไม่มีไฟล์ Drive ที่ต้องลบ' });
-
-    const linkedOrderIds = await getDriveLinkedFileIds(client, ['orders', 'purchase_orders']);
-    if (linkedOrderIds.has(fileId)) {
-      return res.json({ success: true, deleted: false, retained: true, message: 'เก็บไฟล์ไว้เพราะยังเชื่อมโยงกับเอกสารในระบบ' });
-    }
-
-    const { data: otherInboxRows, error: inboxReferenceError } = await client
-      .from('line_inbox')
-      .select('id')
-      .eq('drive_file_id', fileId)
-      .neq('id', inboxId)
-      .limit(1);
-    if (inboxReferenceError) throw new Error(`ตรวจสอบรายการ LINE ที่ใช้ไฟล์เดียวกันไม่สำเร็จ: ${inboxReferenceError.message}`);
-    if (otherInboxRows?.length) {
-      return res.json({ success: true, deleted: false, retained: true, message: 'เก็บไฟล์ไว้เพราะยังมีรายการ LINE อื่นใช้งานไฟล์นี้' });
-    }
 
     const cfg = getStoredDriveConfig();
     if (!cfg.isEnabled) {

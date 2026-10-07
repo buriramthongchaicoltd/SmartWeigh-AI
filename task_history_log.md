@@ -4,6 +4,28 @@
 
 ---
 
+## [2026-10-07] Delete LINE Inbox Item and Its Image
+
+### การเปลี่ยนแปลง
+- ยกเลิกเงื่อนไขเก็บรูป LINE Inbox เมื่อพบว่า Order/PO หรือ LINE Inbox อื่นอ้าง Drive file เดียวกัน; การลบรายการจะนำไฟล์ไปถังขยะเสมอเมื่อมี Drive ID แล้วจึงลบแถวข้อมูล
+- ยกเลิก timer ซิงก์ `line_inbox` ที่รออยู่ และรอคำขอบันทึกชุดที่กำลังทำงานก่อนลบ เพื่อป้องกัน batch เก่า upsert รายการที่ลบแล้วกลับมา
+- ปรับข้อความสำเร็จให้ไม่แสดงกรณี “ลบรายการแล้วแต่เก็บรูปไว้”
+- อัปเดต Handover ตามพฤติกรรมใหม่
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
+## [2026-10-07] Fix LINE Inbox Image Cleanup and Reply Persistence Order
+
+### การเปลี่ยนแปลง
+- ตอนลบ LINE Inbox ให้อ่าน Drive ID จากทั้งคอลัมน์ `drive_file_id` และ `extracted_data` (camel/snake case), และตรวจการอ้างอิงซ้ำในรูปแบบเดียวกันก่อนนำไฟล์ไปถังขยะ
+- ปรับการส่งข้อความตอบรับให้เกิดหลังบันทึกผล OCR/สถานะ/Drive ID ลง Supabase; ผลการตอบกลับยังถูกบันทึกแยกหลังส่ง
+- กรณีดาวน์โหลดภาพจาก LINE ไม่สำเร็จ บันทึกสถานะ `scan_failed` ก่อนส่งข้อความแจ้งความล้มเหลว
+- อัปเดต Handover อธิบายการลบภาพและลำดับตอบรับใหม่
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Add Skippable First-Login Password Change
 
 ### การเปลี่ยนแปลง
