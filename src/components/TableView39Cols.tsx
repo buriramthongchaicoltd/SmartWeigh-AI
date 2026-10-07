@@ -260,6 +260,52 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     return orders.filter(o => o.docType === 'tax_invoice');
   }, [orders]);
 
+  const pairedOriginWeighbridgesByDoId = useMemo(() => {
+    const eligibleDeliveryOrderIds = new Set(
+      orders
+        .filter(order =>
+          order.docType !== 'weighbridge' &&
+          order.docType !== 'dest_weighbridge' &&
+          order.docType !== 'tax_invoice'
+        )
+        .map(order => order.id)
+    );
+    const ticketsByDoId = new Map<string, OrderRecord[]>();
+
+    orders.forEach(order => {
+      if (
+        order.docType !== 'weighbridge' ||
+        !order.matchedOriginDoId ||
+        !eligibleDeliveryOrderIds.has(order.matchedOriginDoId)
+      ) {
+        return;
+      }
+      const tickets = ticketsByDoId.get(order.matchedOriginDoId) || [];
+      tickets.push(order);
+      ticketsByDoId.set(order.matchedOriginDoId, tickets);
+    });
+
+    return ticketsByDoId;
+  }, [orders]);
+
+  const groupedOriginWeighbridgeIds = useMemo(
+    () => new Set(Array.from(pairedOriginWeighbridgesByDoId.values()).flat().map(ticket => ticket.id)),
+    [pairedOriginWeighbridgesByDoId]
+  );
+
+  const getLinkedDestTicketsForOrder = (row: OrderRecord) => allDestTickets.filter(
+    ticket =>
+      ticket.id !== row.id &&
+      ((row.matchedDestTicketId && ticket.id === row.matchedDestTicketId) ||
+        (ticket.linkedViaDocNo &&
+          ((row.col6 && isDocNumberMatch(ticket.linkedViaDocNo, row.col6)) ||
+            (row.col1 && isDocNumberMatch(ticket.linkedViaDocNo, row.col1)))) ||
+        (row.col17 &&
+          ((ticket.col17 && isDocNumberMatch(ticket.col17, row.col17)) ||
+            (ticket.col6 && isDocNumberMatch(ticket.col6, row.col17)) ||
+            (ticket.col1 && isDocNumberMatch(ticket.col1, row.col17)))))
+  );
+
   const unmatchedTaxInvoices = useMemo(() => {
     return allTaxInvoices.filter(o => !o.linkedViaDocNo);
   }, [allTaxInvoices]);
@@ -609,7 +655,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         Number(row.col20) > 0 ||
         Boolean(row.col17) ||
         Boolean(row.matchedDestTicketId) ||
-        row.docType === 'weighbridge'
+        row.docType === 'weighbridge' ||
+        pairedOriginWeighbridgesByDoId.has(row.id)
       ) {
         return true;
       }
@@ -622,12 +669,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
             (row.col1 && isDocNumberMatch(t.linkedViaDocNo, row.col1)))
       );
     },
-    [allDestTickets]
+    [allDestTickets, pairedOriginWeighbridgesByDoId]
   );
 
   // Counts for the 3 main view modes
   const doModeCounts = useMemo(() => {
-    const baseDOs = orders.filter(o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice');
+    const baseDOs = orders.filter(o =>
+      o.docType !== 'dest_weighbridge' &&
+      o.docType !== 'tax_invoice' &&
+      !groupedOriginWeighbridgeIds.has(o.id)
+    );
     const weighed = baseDOs.filter(o => isWeighedOrderRow(o)).length;
     const general = baseDOs.length - weighed;
     return {
@@ -635,16 +686,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       general,
       weighed
     };
-  }, [orders, isWeighedOrderRow]);
+  }, [orders, isWeighedOrderRow, groupedOriginWeighbridgeIds]);
 
-  // Filtering logic for the Main 39-Column DO / Origin Weighbridge Table
+  // Keep matched origin tickets in their DO group; unmatched tickets remain standalone rows.
   const filteredOrders = useMemo(() => {
     return orders.filter(row => {
-      // Keep the 39-column table strictly for DO records by default
-      // (dest_weighbridge and tax_invoice have their own separate menus)
+      // Destination weighbridge tickets and tax invoices have dedicated menus.
       if (row.docType === 'dest_weighbridge' || row.docType === 'tax_invoice') {
         return false;
       }
+      if (groupedOriginWeighbridgeIds.has(row.id)) return false;
       const hasWeighing = isWeighedOrderRow(row);
       if (selectedDocTypeFilter === 'delivery_order' && hasWeighing) return false;
       if (selectedDocTypeFilter === 'weighbridge' && !hasWeighing) return false;
@@ -659,13 +710,31 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
       if (searchTerm.trim()) {
         const term = searchTerm.toLowerCase();
-        const searchStr = `${row.col1} ${row.col2} ${row.col3} ${row.col4} ${row.col6} ${row.col8} ${row.col9} ${row.col10} ${row.col11} ${row.col37} ${row.col38}`.toLowerCase();
+        const linkedOriginTickets = pairedOriginWeighbridgesByDoId.get(row.id) || [];
+        const linkedDestinationTickets = getLinkedDestTicketsForOrder(row);
+        const linkedDocumentSearch = [
+          ...linkedOriginTickets.flatMap(ticket => [ticket.col1, ticket.col6, ticket.col8, ticket.col10]),
+          ...linkedDestinationTickets.flatMap(ticket => [ticket.col1, ticket.col17, ticket.col6, ticket.col8, ticket.col10])
+        ].join(' ');
+        const searchStr = `${row.col1} ${row.col2} ${row.col3} ${row.col4} ${row.col6} ${row.col8} ${row.col9} ${row.col10} ${row.col11} ${row.col37} ${row.col38} ${linkedDocumentSearch}`.toLowerCase();
         if (!searchStr.includes(term)) return false;
       }
 
       return true;
     });
-  }, [orders, selectedDocTypeFilter, selectedProject, selectedStore, selectedCategory, selectedStatus, searchTerm, isWeighedOrderRow]);
+  }, [
+    orders,
+    selectedDocTypeFilter,
+    selectedProject,
+    selectedStore,
+    selectedCategory,
+    selectedStatus,
+    searchTerm,
+    isWeighedOrderRow,
+    groupedOriginWeighbridgeIds,
+    pairedOriginWeighbridgesByDoId,
+    allDestTickets
+  ]);
 
   // Handle Preset Switching (Syncs both visible column zones and DO type filter)
   const applyPreset = (preset: ViewPreset, syncDocFilter = true) => {
@@ -729,6 +798,11 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       setSelectedIds(filteredOrders.map(o => o.id));
     }
   };
+
+  React.useEffect(() => {
+    const visibleIds = new Set(filteredOrders.map(order => order.id));
+    setSelectedIds(previous => previous.filter(id => visibleIds.has(id)));
+  }, [filteredOrders]);
 
   const handleBatchMarkAsPaid = () => {
     if (selectedIds.length === 0) return;
@@ -1913,18 +1987,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                     : undefined;
                   const poNeedsReview = Boolean(row.col4 && row.poMatchStatus !== 'verified');
 
-                  const linkedDestTicket = allDestTickets.find(
-                    t =>
-                      t.id !== row.id &&
-                      ((row.matchedDestTicketId && t.id === row.matchedDestTicketId) ||
-                        (t.linkedViaDocNo &&
-                          ((row.col6 && isDocNumberMatch(t.linkedViaDocNo, row.col6)) ||
-                            (row.col1 && isDocNumberMatch(t.linkedViaDocNo, row.col1)))) ||
-                        (row.col17 &&
-                          ((t.col17 && isDocNumberMatch(t.col17, row.col17)) ||
-                            (t.col6 && isDocNumberMatch(t.col6, row.col17)) ||
-                            (t.col1 && isDocNumberMatch(t.col1, row.col17)))))
-                  );
+                  const linkedDestTickets = getLinkedDestTicketsForOrder(row);
+                  const linkedDestTicket = linkedDestTickets[0];
+                  const linkedOriginWeighbridges = pairedOriginWeighbridgesByDoId.get(row.id) || [];
 
                   const linkedTaxInvoice = allTaxInvoices.find(
                     inv =>
@@ -1979,7 +2044,10 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const hasZone4Doc = Boolean(effectiveCol17 || effectiveCol18 > 0 || effectiveCol20 > 0 || linkedDestTicket);
                   const hasOriginWeighbridge =
                     row.docType !== 'dest_weighbridge' &&
-                    (Number(row.col13) > 0 || Number(row.col15) > 0 || row.docType === 'weighbridge');
+                    (Number(row.col13) > 0 ||
+                      Number(row.col15) > 0 ||
+                      row.docType === 'weighbridge' ||
+                      linkedOriginWeighbridges.length > 0);
                   const poPreviewSrc = getPreloadableDocPreviewImageUrl(matchedPO?.driveFileId, matchedPO?.image);
                   const poPreviewFallback = getDocPreviewFallbackImageUrl(matchedPO?.driveFileId, matchedPO?.image);
                   const doPreviewSrc = getPreloadableDocPreviewImageUrl(row.driveFileId, row.image);
@@ -2457,6 +2525,19 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   🔗 {row.referenceDocNo}
                                 </span>
                               )}
+                              {linkedOriginWeighbridges.map(ticket => (
+                                <button
+                                  key={ticket.id}
+                                  type="button"
+                                  onClick={() => onInspectOrder(ticket)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-[10px] cursor-pointer"
+                                  title={`เปิดตั๋วชั่งต้นทาง ${ticket.col6 || '-'} · TR ${ticket.col1 || '-'} · จับคู่กับ DO นี้แล้ว`}
+                                  aria-label={`เปิดตั๋วชั่งต้นทาง ${ticket.col6 || ''} ที่จับคู่กับ DO ${row.col6 || ''}`}
+                                >
+                                  <Scale className="w-3 h-3 shrink-0" />
+                                  <span>{ticket.col6 || 'ตั๋วชั่งต้นทาง'}</span>
+                                </button>
+                              ))}
                             </div>
                           </td>
                         </>
@@ -2530,6 +2611,18 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   <FileImage className="w-3 h-3 text-teal-600 shrink-0" />
                                   <span>{effectiveCol17 || 'ตั๋วปลายทาง'}</span>
                                 </span>
+                                {linkedDestTickets.slice(1).map(ticket => (
+                                  <button
+                                    key={ticket.id}
+                                    type="button"
+                                    onClick={() => onInspectOrder(ticket)}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-900 text-[10px] cursor-pointer"
+                                    title={`เปิดตั๋วชั่งปลายทาง ${ticket.col17 || ticket.col6 || ticket.col1 || '-'} ที่จับคู่กับ DO นี้แล้ว`}
+                                  >
+                                    <Scale className="w-3 h-3 shrink-0" />
+                                    <span>{ticket.col17 || ticket.col6 || ticket.col1 || 'ตั๋วปลายทาง'}</span>
+                                  </button>
+                                ))}
                                 {row.destMatchStatus === 'auto_flagged' && (
                                   <span className="inline-flex items-center gap-0.5 font-sans">
                                     <span className="text-[9px] bg-amber-100 text-amber-900 border border-amber-300 px-1 py-0.2 rounded font-bold" title="ชนตั๋วปลายทางอัตโนมัติ (รอตรวจสอบ)">
@@ -2703,7 +2796,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         {/* Footer Summary / Count Bar */}
         <div className="p-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between text-xs text-slate-500 gap-2">
           <div>
-            แสดง <span className="font-semibold text-slate-800 tabular-nums">{filteredOrders.length}</span> รายการใบส่งของ / ตั๋วต้นทาง (DO)
+            แสดง <span className="font-semibold text-slate-800 tabular-nums">{filteredOrders.length}</span> ชุดเอกสาร DO (เอกสารที่จับคู่แสดงรวมในแถวเดียว)
           </div>
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 text-slate-600">
