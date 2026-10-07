@@ -932,7 +932,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     if (isSaving) return;
     if (isLoadingTrNumber) return;
     if (!form.col1?.trim()) {
-      setSaveError('ยังไม่มีเลข TR จากฐานข้อมูลจริง กรุณาลองอ่านเลขใหม่ก่อนบันทึก');
+      setSaveError(currentError =>
+        trLookupFailed && currentError
+          ? currentError
+          : 'ยังไม่มีเลข TR จากฐานข้อมูลจริง กรุณาลองอ่านเลขใหม่ก่อนบันทึก'
+      );
       setTrLookupFailed(true);
       return;
     }
