@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-07] Separate Existing Document Edits from New Document Verification
+
+### การเปลี่ยนแปลง
+- ปรับหัว modal, ปุ่มบันทึก และสถานะกำลังบันทึกให้แยกชัดระหว่างรายการใหม่กับรายการที่มีอยู่แล้ว; รายการเดิมใช้คำว่า “แก้ไขข้อมูลเอกสาร” และ “บันทึกการแก้ไข”
+- จำกัดการย้าย/ผูกตั๋วจาก LINE และการอัปเดตสถานะ verified ของ LINE Inbox ให้ทำเฉพาะการบันทึกรายการใหม่ ไม่ทำซ้ำเมื่อแก้ไข Order ที่มีอยู่
+- อัปเดต Handover ให้ระบุความแตกต่างระหว่างการตรวจรับเอกสารใหม่กับการแก้ไขรายการเดิม
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-07] Use Company Settings as Supporting OCR Classification Evidence
 
 ### การเปลี่ยนแปลง

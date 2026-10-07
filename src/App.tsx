@@ -1707,7 +1707,7 @@ export default function App() {
     let verifiedLineFileId: string | undefined;
     let pairedWeighbridgeInboxItem: LineBillInboxItem | undefined;
     let pairedWeighbridgeDriveLocation: OrderRecord['driveFileLocation'];
-    if (order.pairedWeighbridgeInboxId) {
+    if (!isExistingRecord && order.pairedWeighbridgeInboxId) {
       pairedWeighbridgeInboxItem = lineInbox.find(item => item.id === order.pairedWeighbridgeInboxId);
       if (
         !pairedWeighbridgeInboxItem ||
@@ -1755,7 +1755,7 @@ export default function App() {
         return false;
       }
     }
-    if (order.lineInboxId) {
+    if (!isExistingRecord && order.lineInboxId) {
       verifiedLineItem = lineInbox.find(item => item.id === order.lineInboxId);
       if (!verifiedLineItem?.driveFileId) {
         if (pairedWeighbridgeInboxItem && pairedWeighbridgeDriveLocation === 'zone_02') {
@@ -2180,7 +2180,7 @@ export default function App() {
       });
     }
 
-    if (order.lineInboxId) {
+    if (!isExistingRecord && order.lineInboxId) {
       const sourceInboxItem = lineInbox.find(item => item.id === order.lineInboxId);
       if (sourceInboxItem) {
         const verifiedAt = new Date().toISOString();
@@ -2227,7 +2227,7 @@ export default function App() {
     }
 
     // If this order was verified from the LINE OA Bot Inbox, mark the inbox item as verified
-    if (order.lineInboxId) {
+    if (!isExistingRecord && order.lineInboxId) {
       setLineInbox(prev => {
         const updatedInbox = prev.map(item => {
           if (item.id !== order.lineInboxId) return item;

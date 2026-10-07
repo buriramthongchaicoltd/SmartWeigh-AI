@@ -992,7 +992,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-sm text-white flex items-center gap-2">
-                <span>ตรวจสอบข้อมูลและจัดเก็บ (Split-Screen Verification)</span>
+                <span>{isExistingOrder ? 'แก้ไขข้อมูลเอกสาร' : 'ตรวจสอบและบันทึกเอกสารใหม่'}</span>
                 <span className="bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] px-2 py-0.5 rounded-full font-semibold">
                   เลือกประเภทบิลเพื่อกรองฟิลด์ที่จำเป็น
                 </span>
@@ -1083,7 +1083,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 font-mono text-sm font-semibold text-slate-900 focus:border-amber-500 focus:outline-none disabled:bg-slate-100"
                 />
                 <p className="text-[11px] text-amber-900">
-                  เปลี่ยนเลขแล้วกด “ยืนยันบันทึกข้อมูลเอกสาร” เพื่อบันทึกลงฐานข้อมูล
+                  เปลี่ยนเลขแล้วกด “บันทึกการแก้ไข” เพื่อบันทึกลงฐานข้อมูล
                 </p>
               </div>
             )}
@@ -1306,7 +1306,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
                     <div>
                       <div className="font-bold text-xs sm:text-sm">
-                        กรุณาระบุหรือเลือก "2. ชื่อโครงการ / หน้างาน" ก่อนกดยืนยันบันทึก
+                        กรุณาระบุหรือเลือก "2. ชื่อโครงการ / หน้างาน" ก่อน{isExistingOrder ? 'บันทึกการแก้ไข' : 'ยืนยันบันทึก'}
                       </div>
                       <p className="text-[11px] text-rose-800">
                         ระบบกำหนดให้ช่องที่ 2 (ชื่อโครงการ) ต้องมีข้อมูลเสมอ และแยกอิสระจากชื่อกลุ่ม LINE เพื่อป้องกันข้อมูลโครงการคลาดเคลื่อนภายหลัง
@@ -3678,7 +3678,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {!form.col2?.trim() && (
                     <span className="text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
                       <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                      <span>ต้องระบุ "2. ชื่อโครงการ (ช่อง 2)" ก่อนกดยืนยันบันทึก</span>
+                      <span>ต้องระบุ "2. ชื่อโครงการ (ช่อง 2)" ก่อน{isExistingOrder ? 'บันทึกการแก้ไข' : 'ยืนยันบันทึก'}</span>
                     </span>
                   )}
                   <button
@@ -3689,10 +3689,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     <Save className="w-4 h-4" />
                     <span>
                       {isSaving
-                        ? 'กำลังย้ายรูปและบันทึก...'
+                        ? isExistingOrder
+                          ? 'กำลังบันทึกการแก้ไข...'
+                          : form.lineInboxId
+                            ? 'กำลังย้ายรูปและบันทึก...'
+                            : 'กำลังบันทึกเอกสาร...'
                         : isLoadingTrNumber
                           ? 'กำลังอ่านเลข TR จากฐานข้อมูล...'
-                          : 'ยืนยันบันทึกข้อมูลเอกสาร'}
+                          : isExistingOrder
+                            ? 'บันทึกการแก้ไข'
+                            : form.lineInboxId
+                              ? 'ยืนยันตรวจรับและบันทึกเอกสาร'
+                              : 'บันทึกเอกสาร'}
                     </span>
                   </button>
                 </div>
