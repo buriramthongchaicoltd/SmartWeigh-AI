@@ -21,7 +21,7 @@ import {
   Upload,
   Download
 } from 'lucide-react';
-import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem } from '../types';
+import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem, OrderItemDetail } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
 import { isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
@@ -262,6 +262,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isWeighbridge = selectedDocType === 'weighbridge';
   const isDestWeighbridge = selectedDocType === 'dest_weighbridge';
   const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete';
+  const isContractorChargeOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
+  const contractorChargeItems: OrderItemDetail[] = form.lineItems?.length
+    ? form.lineItems
+    : [{
+        id: 'main',
+        itemDescription: form.col11 || '',
+        specCode: form.col12 || '',
+        qty: Number(form.col22) || 0,
+        unit: form.col23 || '',
+        unitPrice: Number(form.col24) || undefined,
+        totalAmount: Number(form.col25) || undefined
+      }];
   const isTaxInvoice = selectedDocType === 'tax_invoice';
   const isPO = selectedDocType === 'purchase_order';
   const isFullLogistics = selectedDocType === 'full_logistics';
@@ -443,6 +455,32 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     setForm(prev => ({ ...prev, [field]: value }));
   };
 
+  const updateContractorChargeDecision = (
+    itemIndex: number,
+    decision: OrderItemDetail['contractorChargeDecision']
+  ) => {
+    const nextItems = [...contractorChargeItems];
+    const currentItem = nextItems[itemIndex];
+    if (!currentItem) return;
+    nextItems[itemIndex] = {
+      ...currentItem,
+      id: currentItem.id || crypto.randomUUID(),
+      contractorChargeDecision: decision
+    };
+    setForm(previous => ({ ...previous, lineItems: nextItems }));
+  };
+
+  const applyContractorChargeDecisionToAll = (decision: OrderItemDetail['contractorChargeDecision']) => {
+    setForm(previous => ({
+      ...previous,
+      lineItems: contractorChargeItems.map(item => ({
+        ...item,
+        id: item.id || crypto.randomUUID(),
+        contractorChargeDecision: decision
+      }))
+    }));
+  };
+
   const handleDocTypeSelect = (docType: DocumentType) => {
     if (docType === 'delivery_order' && selectedDocType === 'weighbridge') {
       setRemappedNotice('ใบส่งของจากร้านค้าและตั๋วชั่งต้นทางใช้แบบฟอร์มรับของกลุ่มเดียวกัน ระบบคงชนิดเอกสาร “ตั๋วชั่งต้นทาง” จาก OCR และเก็บน้ำหนักช่อง 13–15');
@@ -610,7 +648,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       matchedDestTicketId: form.matchedDestTicketId,
       autoActionFlags: form.autoActionFlags,
       autoFlagsVerified: Boolean(form.id) ? true : form.autoFlagsVerified,
-      lineItems: form.lineItems,
+      lineItems: isContractorChargeOrder
+        ? contractorChargeItems.map(item => ({ ...item, id: item.id || crypto.randomUUID() }))
+        : form.lineItems,
       image: currentImage || billImage || form.image || overrideExistingOrder?.image || null,
       aiExtracted: true,
       status: 'verified',
@@ -680,6 +720,13 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     if (!form.col2 || !form.col2.trim()) {
       setProjectMissingError(true);
       return;
+    }
+
+    if (isContractorChargeOrder) {
+      if (contractorChargeItems.some(item => item.contractorChargeDecision === 'chargeable') && !form.col9?.trim()) {
+        setSaveError('กรุณาระบุผู้รับเหมาที่ช่อง 9 ก่อนกำหนดเรียกเก็บค่าวัสดุ');
+        return;
+      }
     }
 
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
@@ -1654,6 +1701,61 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       </div>
                     )}
                   </div>
+
+                  {isContractorChargeOrder && (
+                    <section className="mt-3 space-y-2 rounded-xl border border-violet-200 bg-violet-50/60 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h4 className="text-xs font-bold text-violet-950">รายการวัสดุที่นำไปหักผู้รับเหมา</h4>
+                          <p className="mt-0.5 text-[10px] text-violet-800">เลือกเฉพาะรายการที่ต้องการทำเอกสารแนบ รายการที่ยังไม่เลือกจะไม่ถูกนำมาแสดง</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => applyContractorChargeDecisionToAll('chargeable')}
+                            className="rounded-lg bg-violet-700 px-2.5 py-1.5 text-[10px] font-bold text-white disabled:opacity-50"
+                          >
+                            เลือกทั้งหมดเพื่อหัก
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => applyContractorChargeDecisionToAll('not_chargeable')}
+                            className="rounded-lg border border-violet-200 bg-white px-2.5 py-1.5 text-[10px] font-semibold text-violet-900"
+                          >
+                            ไม่หักทุกรายการ
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="rounded-lg border border-violet-100 bg-white px-2 py-1.5 text-[10px] text-violet-900">
+                        ผู้รับเหมาอ้างอิงจากช่อง 9: <strong>{form.col9?.trim() || 'ยังไม่ได้ระบุ'}</strong>
+                      </p>
+
+                      <div className="divide-y divide-violet-100 rounded-lg border border-violet-100 bg-white">
+                        {contractorChargeItems.map((item, index) => (
+                          <div key={item.id || index} className="grid gap-2 p-2 md:grid-cols-[minmax(0,1fr)_180px] md:items-center">
+                            <div className="min-w-0 text-[11px]">
+                              <div className="truncate font-semibold text-slate-800">{item.itemDescription || form.col11 || `รายการ ${index + 1}`}</div>
+                              <div className="text-[10px] text-slate-500">{item.qty || form.col22 || 0} {item.unit || form.col23}</div>
+                            </div>
+                            <select
+                              aria-label={`สถานะเรียกเก็บรายการ ${item.itemDescription || form.col11 || index + 1}`}
+                              value={item.contractorChargeDecision || ''}
+                              onChange={event => updateContractorChargeDecision(
+                                index,
+                                event.target.value as OrderItemDetail['contractorChargeDecision']
+                              )}
+                              className="rounded-lg border border-slate-300 px-2 py-2 text-[11px]"
+                            >
+                              <option value="">ไม่รวมในเอกสารแนบ</option>
+                              <option value="chargeable">เรียกเก็บจากผู้รับเหมา</option>
+                              <option value="not_chargeable">ไม่เรียกเก็บ</option>
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
 
                   {/* Card 2.5: Optional/Auto-detected Truck Weighing for Delivery Orders that have scale weights */}
                   <div className="border border-emerald-200 rounded-xl p-3 bg-emerald-50/20 space-y-2">

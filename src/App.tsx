@@ -19,7 +19,8 @@ import {
   RolePermissions,
   SystemSettings,
   SystemBackupPayload,
-  BillingNoteRecord
+  BillingNoteRecord,
+  ContractorChargeDocument
 } from './types';
 import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
@@ -46,6 +47,7 @@ const loadAnalyticsView = () => import('./components/AnalyticsView');
 const loadLineInboxView = () => import('./components/LineInboxView');
 const loadReportsExportView = () => import('./components/ReportsExportView');
 const loadPurchasingBillingView = () => import('./components/PurchasingBillingView');
+const loadContractorBillingView = () => import('./components/ContractorBillingView');
 const loadUsersRolesView = () => import('./components/UsersRolesView');
 const loadSystemSettingsView = () => import('./components/SystemSettingsView');
 const loadScanModal = () => import('./components/ScanModal');
@@ -62,6 +64,7 @@ const AnalyticsView = React.lazy(() => loadAnalyticsView().then(module => ({ def
 const LineInboxView = React.lazy(() => loadLineInboxView().then(module => ({ default: module.LineInboxView })));
 const ReportsExportView = React.lazy(() => loadReportsExportView().then(module => ({ default: module.ReportsExportView })));
 const PurchasingBillingView = React.lazy(() => loadPurchasingBillingView().then(module => ({ default: module.PurchasingBillingView })));
+const ContractorBillingView = React.lazy(() => loadContractorBillingView().then(module => ({ default: module.ContractorBillingView })));
 const UsersRolesView = React.lazy(() => loadUsersRolesView().then(module => ({ default: module.UsersRolesView })));
 const SystemSettingsView = React.lazy(() => loadSystemSettingsView().then(module => ({ default: module.SystemSettingsView })));
 const ScanModal = React.lazy(() => loadScanModal().then(module => ({ default: module.ScanModal })));
@@ -292,6 +295,9 @@ export default function App() {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [rolePermissions, setRolePermissions] = useState<Record<UserRole, RolePermissions>>(DEFAULT_ROLE_PERMISSIONS);
   const [billingNotes, setBillingNotes] = useState<BillingNoteRecord[]>([]);
+  const [contractorChargeDocuments, setContractorChargeDocuments] = useState<ContractorChargeDocument[]>([]);
+  const [contractorBillingLoading, setContractorBillingLoading] = useState(false);
+  const [contractorBillingError, setContractorBillingError] = useState('');
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(DEFAULT_SYSTEM_SETTINGS);
   const [currentUserId, setCurrentUserId] = useState<string>('');
   const [authenticatedUser, setAuthenticatedUser] = useState<AppUser | null>(null);
@@ -311,6 +317,55 @@ export default function App() {
           toastTimeoutRef.current = null;
         }, 5000);
   }, []);
+
+  const loadContractorBillingData = React.useCallback(async () => {
+    setContractorBillingLoading(true);
+    setContractorBillingError('');
+    try {
+      const response = await fetch('/api/contractor-billing/data');
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `โหลดข้อมูลเรียกเก็บผู้รับเหมาไม่สำเร็จ (HTTP ${response.status})`);
+      }
+      if (!Array.isArray(result.documents)) {
+        throw new Error('เซิร์ฟเวอร์ไม่ส่งรายการเอกสารแนบหักผู้รับเหมากลับมา');
+      }
+      setContractorChargeDocuments(result.documents);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setContractorBillingError(message);
+      throw error;
+    } finally {
+      setContractorBillingLoading(false);
+    }
+  }, []);
+
+  const postContractorBilling = React.useCallback(async (path: string, body: unknown) => {
+    const response = await fetch(`/api/contractor-billing/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || `ทำรายการเรียกเก็บผู้รับเหมาไม่สำเร็จ (HTTP ${response.status})`);
+    }
+    return result;
+  }, []);
+
+  const issueContractorChargeDocument = React.useCallback(async (document: ContractorChargeDocument) => {
+    await postContractorBilling('issue', { document, lines: document.lines });
+    setContractorChargeDocuments(previous => [document, ...previous]);
+    void loadContractorBillingData().catch(() => undefined);
+  }, [loadContractorBillingData, postContractorBilling]);
+
+  const cancelContractorChargeDocument = React.useCallback(async (id: string) => {
+    await postContractorBilling('cancel', { id });
+    setContractorChargeDocuments(previous => previous.map(document =>
+      document.id === id ? { ...document, status: 'cancelled', updatedAt: new Date().toISOString() } : document
+    ));
+    void loadContractorBillingData().catch(() => undefined);
+  }, [loadContractorBillingData, postContractorBilling]);
 
   // Database Connection & Synchronization Status (100% Real Database Mode)
   const [isDbLoaded, setIsDbLoaded] = useState<boolean>(false);
@@ -527,6 +582,11 @@ export default function App() {
   const [verifyOrderData, setVerifyOrderData] = useState<Partial<OrderRecord> | null>(null);
   const [verifyImage, setVerifyImage] = useState<string | null>(null);
   const [verifyStoreSuggestion, setVerifyStoreSuggestion] = useState<Partial<StoreMerchant> | undefined>(undefined);
+
+  useEffect(() => {
+    if (!authenticatedUser || activeTab !== 'contractor_billing') return;
+    void loadContractorBillingData().catch(() => undefined);
+  }, [authenticatedUser, activeTab, loadContractorBillingData]);
 
   // PO Modals
   const [selectedPOForDetail, setSelectedPOForDetail] = useState<PurchaseOrder | null>(null);
@@ -2866,6 +2926,7 @@ export default function App() {
       loadLineInboxView,
       loadPOManagementView,
       loadPurchasingBillingView,
+      loadContractorBillingView,
       loadAnalyticsView,
       loadStoresManagement,
       loadReportsExportView,
@@ -3099,6 +3160,23 @@ export default function App() {
               onUnbillBillingNote={handleUnbillBillingNote}
               onDeleteBillingNote={handleDeleteBillingNote}
               onInspectOrder={handleInspectOrder}
+              showToast={showToast}
+            />
+          )}
+
+          {activeTab === 'contractor_billing' && (
+            <ContractorBillingView
+              orders={orders}
+              pos={pos}
+              documents={contractorChargeDocuments}
+              isLoading={contractorBillingLoading}
+              loadError={contractorBillingError}
+              currentUserName={currentUser.fullName}
+              companyName={systemSettings.companyName}
+              companyAddress={systemSettings.companyAddress}
+              onReload={() => void loadContractorBillingData().catch(() => undefined)}
+              onIssueDocument={issueContractorChargeDocument}
+              onCancelDocument={cancelContractorChargeDocument}
               showToast={showToast}
             />
           )}

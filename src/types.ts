@@ -21,6 +21,7 @@ export interface OrderItemDetail {
   unit: string;
   unitPrice?: number;
   totalAmount?: number;
+  contractorChargeDecision?: 'chargeable' | 'not_chargeable';
 }
 
 export interface OrderRecord {
@@ -214,6 +215,38 @@ export interface StoreMerchant {
   lastOrderDate?: string;
   primaryGoods: string[];
   notes?: string;
+}
+
+export interface ContractorChargeLine {
+  id: string;
+  sourceOrderId: string;
+  sourceItemId: string;
+  sourcePoId: string;
+  sourcePoNumber: string;
+  sourceDoNumber: string;
+  projectName: string;
+  itemDescription: string;
+  specCode?: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  totalAmount: number;
+}
+
+export interface ContractorChargeDocument {
+  id: string;
+  documentNumber: string;
+  contractorName: string;
+  issueDate: string;
+  projectName: string;
+  deductFromContractor: boolean;
+  status: 'issued' | 'cancelled';
+  subtotalAmount: number;
+  lines: ContractorChargeLine[];
+  notes?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ProjectRecord {

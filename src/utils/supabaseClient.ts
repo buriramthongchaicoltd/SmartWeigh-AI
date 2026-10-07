@@ -9,15 +9,16 @@ import {
   StoreMerchant,
   ProjectRecord,
   BillingNoteRecord,
-  LineBillInboxItem
+  LineBillInboxItem,
+  ContractorChargeDocument
 } from '../types';
 
 /**
- * 8-Table PostgreSQL DDL Schema from DATABASE_STORAGE_BLUEPRINT.md
+ * PostgreSQL DDL Schema from DATABASE_STORAGE_BLUEPRINT.md
  * Ready for 1-click execution or copy-pasting into Supabase SQL Editor.
  */
 export const SUPABASE_SQL_DDL_SCHEMA = `-- ============================================================================
--- AUTOSTORE & 39-COLUMN ERP — SUPABASE POSTGRESQL SCHEMA (8 TABLES)
+-- AUTOSTORE & 39-COLUMN ERP — SUPABASE POSTGRESQL SCHEMA (10 TABLES)
 -- Reference: /DATABASE_STORAGE_BLUEPRINT.md
 -- ============================================================================
 
@@ -308,6 +309,165 @@ ALTER TABLE public.line_inbox ADD COLUMN IF NOT EXISTS is_bill_document BOOLEAN 
 CREATE INDEX IF NOT EXISTS idx_line_inbox_doc_number ON public.line_inbox (doc_number);
 CREATE INDEX IF NOT EXISTS idx_line_inbox_status ON public.line_inbox (status);
 CREATE INDEX IF NOT EXISTS idx_line_inbox_received_at ON public.line_inbox (received_at DESC);
+
+-- เอกสารแนบหักค่าวัสดุผู้รับเหมา; ชื่ออ้างอิงจาก orders.col9
+CREATE TABLE IF NOT EXISTS public.contractor_charge_notes (
+  id TEXT PRIMARY KEY,
+  document_number TEXT NOT NULL UNIQUE,
+  contractor_name TEXT NOT NULL,
+  issue_date TEXT NOT NULL,
+  project_name TEXT NOT NULL,
+  deduct_from_contractor BOOLEAN NOT NULL DEFAULT FALSE,
+  status TEXT NOT NULL DEFAULT 'issued' CHECK (status IN ('issued', 'cancelled')),
+  subtotal_amount NUMERIC NOT NULL CHECK (subtotal_amount >= 0),
+  notes TEXT,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.contractor_charge_lines (
+  id TEXT PRIMARY KEY,
+  note_id TEXT NOT NULL REFERENCES public.contractor_charge_notes(id),
+  source_order_id TEXT NOT NULL REFERENCES public.orders(id),
+  source_item_id TEXT NOT NULL,
+  source_po_id TEXT NOT NULL REFERENCES public.purchase_orders(id),
+  source_po_number TEXT NOT NULL,
+  source_do_number TEXT NOT NULL,
+  project_name TEXT NOT NULL,
+  item_description TEXT NOT NULL,
+  spec_code TEXT,
+  quantity NUMERIC NOT NULL CHECK (quantity > 0),
+  unit TEXT NOT NULL,
+  unit_price NUMERIC NOT NULL CHECK (unit_price > 0),
+  total_amount NUMERIC NOT NULL CHECK (total_amount > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_contractor_charge_lines_source
+  ON public.contractor_charge_lines (source_order_id, source_item_id);
+CREATE INDEX IF NOT EXISTS idx_contractor_charge_notes_contractor
+  ON public.contractor_charge_notes (contractor_name, issue_date DESC);
+
+ALTER TABLE public.contractor_charge_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.contractor_charge_lines ENABLE ROW LEVEL SECURITY;
+REVOKE ALL PRIVILEGES ON TABLE public.contractor_charge_notes, public.contractor_charge_lines
+FROM PUBLIC, anon, authenticated;
+GRANT ALL PRIVILEGES ON TABLE
+  public.contractor_charge_notes, public.contractor_charge_lines
+TO service_role;
+
+-- Atomic issue-and-reserve: locks source DO rows and prevents overcharging the same item.
+CREATE OR REPLACE FUNCTION public.create_contractor_charge_note(
+  p_note JSONB,
+  p_lines JSONB
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+  source_line JSONB;
+  order_row public.orders%ROWTYPE;
+  po_row public.purchase_orders%ROWTYPE;
+  item_row JSONB;
+  item_qty NUMERIC;
+  already_charged NUMERIC;
+  requested_qty NUMERIC;
+  amount NUMERIC;
+  computed_total NUMERIC := 0;
+  seen_source_keys TEXT[] := ARRAY[]::TEXT[];
+  note_id TEXT := p_note->>'id';
+  contractor_name TEXT := BTRIM(p_note->>'contractor_name');
+BEGIN
+  IF note_id IS NULL OR contractor_name IS NULL OR contractor_name = ''
+     OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines) = 0 THEN
+    RAISE EXCEPTION 'เอกสารเรียกเก็บหรือรายการวัสดุไม่ครบ';
+  END IF;
+
+  FOR source_line IN SELECT value FROM jsonb_array_elements(p_lines)
+  LOOP
+    IF ((source_line->>'source_order_id') || '::' || (source_line->>'source_item_id')) = ANY(seen_source_keys) THEN
+      RAISE EXCEPTION 'พบรายการ DO ซ้ำในเอกสารเดียวกัน';
+    END IF;
+    seen_source_keys := array_append(
+      seen_source_keys,
+      (source_line->>'source_order_id') || '::' || (source_line->>'source_item_id')
+    );
+
+    SELECT * INTO order_row
+    FROM public.orders
+    WHERE id = source_line->>'source_order_id'
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'ไม่พบ DO ต้นทาง: %', source_line->>'source_order_id'; END IF;
+    IF order_row.doc_type NOT IN ('delivery_order', 'concrete', 'full_logistics') THEN
+      RAISE EXCEPTION 'เอกสารต้นทางไม่ใช่ DO ที่อนุญาตให้เรียกเก็บ';
+    END IF;
+
+    SELECT * INTO po_row
+    FROM public.purchase_orders
+    WHERE id = source_line->>'source_po_id';
+    IF NOT FOUND OR regexp_replace(upper(COALESCE(order_row.col4, '')), '[^A-Z0-9ก-๙]', '', 'g')
+      <> regexp_replace(upper(COALESCE(po_row.po_number, '')), '[^A-Z0-9ก-๙]', '', 'g') THEN
+      RAISE EXCEPTION 'เลข PO ใน DO ไม่ตรงกับใบสั่งซื้อที่เลือก';
+    END IF;
+
+    SELECT value INTO item_row
+    FROM jsonb_array_elements(COALESCE(order_row.items, '[]'::jsonb))
+    WHERE value->>'id' = source_line->>'source_item_id'
+    LIMIT 1;
+    IF item_row IS NULL THEN RAISE EXCEPTION 'ไม่พบรายการวัสดุใน DO ต้นทาง'; END IF;
+    IF item_row->>'contractorChargeDecision' <> 'chargeable'
+       OR LOWER(BTRIM(COALESCE(order_row.col9, ''))) <> LOWER(contractor_name) THEN
+      RAISE EXCEPTION 'รายการวัสดุไม่ได้กำหนดให้เรียกเก็บผู้รับเหมารายนี้';
+    END IF;
+
+    item_qty := COALESCE(NULLIF(item_row->>'qty', '')::NUMERIC, 0);
+    requested_qty := COALESCE(NULLIF(source_line->>'quantity', '')::NUMERIC, 0);
+    IF item_qty <= 0 OR requested_qty <= 0 THEN RAISE EXCEPTION 'จำนวนวัสดุต้องมากกว่าศูนย์'; END IF;
+
+    SELECT COALESCE(SUM(cl.quantity), 0) INTO already_charged
+    FROM public.contractor_charge_lines cl
+    JOIN public.contractor_charge_notes cn ON cn.id = cl.note_id
+    WHERE cl.source_order_id = order_row.id
+      AND cl.source_item_id = source_line->>'source_item_id'
+      AND cn.status = 'issued';
+    IF requested_qty > item_qty - already_charged THEN
+      RAISE EXCEPTION 'จำนวนเรียกเก็บเกินยอดคงเหลือของรายการ DO';
+    END IF;
+
+    amount := requested_qty * COALESCE(NULLIF(source_line->>'unit_price', '')::NUMERIC, 0);
+    IF amount <= 0 THEN RAISE EXCEPTION 'ราคาต่อหน่วยต้องมากกว่าศูนย์'; END IF;
+    computed_total := computed_total + ROUND(amount, 2);
+  END LOOP;
+
+  IF computed_total <> COALESCE(NULLIF(p_note->>'subtotal_amount', '')::NUMERIC, -1) THEN
+    RAISE EXCEPTION 'ยอดรวมเอกสารไม่ตรงกับผลคำนวณรายการ';
+  END IF;
+
+  INSERT INTO public.contractor_charge_notes (
+    id, document_number, contractor_name, issue_date, project_name,
+    deduct_from_contractor, status, subtotal_amount, notes, created_by
+  ) VALUES (
+    note_id, p_note->>'document_number', contractor_name, p_note->>'issue_date',
+    p_note->>'project_name', COALESCE((p_note->>'deduct_from_contractor')::BOOLEAN, FALSE),
+    'issued', computed_total, NULLIF(p_note->>'notes', ''), p_note->>'created_by'
+  );
+
+  INSERT INTO public.contractor_charge_lines (
+    id, note_id, source_order_id, source_item_id, source_po_id, source_po_number,
+    source_do_number, project_name, item_description, spec_code, quantity, unit,
+    unit_price, total_amount
+  )
+  SELECT
+    value->>'id', note_id, value->>'source_order_id', value->>'source_item_id',
+    value->>'source_po_id', value->>'source_po_number', value->>'source_do_number',
+    value->>'project_name', value->>'item_description', NULLIF(value->>'spec_code', ''),
+    (value->>'quantity')::NUMERIC, value->>'unit', (value->>'unit_price')::NUMERIC,
+    ROUND((value->>'quantity')::NUMERIC * (value->>'unit_price')::NUMERIC, 2)
+  FROM jsonb_array_elements(p_lines);
+
+  RETURN note_id;
+END;
+$$;
 `;
 
 /**
@@ -655,6 +815,57 @@ export function mapSupabaseToBillingNote(row: any): BillingNoteRecord {
     createdBy: row.created_by || '',
     createdAt: row.created_at || new Date().toISOString(),
     updatedAt: row.updated_at || new Date().toISOString()
+  };
+}
+
+type ContractorChargeLineRow = {
+  id: string;
+  source_order_id: string;
+  source_item_id: string;
+  source_po_id: string;
+  source_po_number: string;
+  source_do_number: string;
+  project_name: string;
+  item_description: string;
+  spec_code?: string | null;
+  quantity: number | string;
+  unit: string;
+  unit_price: number | string;
+  total_amount: number | string;
+};
+
+export function mapContractorChargeDocument(
+  noteRow: any,
+  lineRows: ContractorChargeLineRow[]
+): ContractorChargeDocument {
+  return {
+    id: noteRow.id,
+    documentNumber: noteRow.document_number,
+    contractorName: noteRow.contractor_name || '',
+    issueDate: noteRow.issue_date,
+    projectName: noteRow.project_name || '',
+    deductFromContractor: Boolean(noteRow.deduct_from_contractor),
+    status: noteRow.status === 'cancelled' ? 'cancelled' : 'issued',
+    subtotalAmount: Number(noteRow.subtotal_amount) || 0,
+    lines: lineRows.map(line => ({
+      id: line.id,
+      sourceOrderId: line.source_order_id,
+      sourceItemId: line.source_item_id,
+      sourcePoId: line.source_po_id,
+      sourcePoNumber: line.source_po_number,
+      sourceDoNumber: line.source_do_number,
+      projectName: line.project_name,
+      itemDescription: line.item_description,
+      specCode: line.spec_code || undefined,
+      quantity: Number(line.quantity) || 0,
+      unit: line.unit || '',
+      unitPrice: Number(line.unit_price) || 0,
+      totalAmount: Number(line.total_amount) || 0
+    })),
+    notes: noteRow.notes || undefined,
+    createdBy: noteRow.created_by || '',
+    createdAt: noteRow.created_at || new Date().toISOString(),
+    updatedAt: noteRow.updated_at || noteRow.created_at || new Date().toISOString()
   };
 }
 

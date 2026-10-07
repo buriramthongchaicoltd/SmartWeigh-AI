@@ -19,6 +19,7 @@ import {
   mapSupabaseToProject,
   mapBillingNoteToSupabase,
   mapSupabaseToBillingNote,
+  mapContractorChargeDocument,
   mapLineInboxToSupabase,
   mapSupabaseToLineInbox
 } from './src/utils/supabaseClient';
@@ -290,6 +291,9 @@ app.use('/api', (req: Request, res: Response, next) => {
     '/drive/quarantine-line-inbox-orphan',
     '/drive/delete-line-inbox-file'
   ]);
+  if (req.path.startsWith('/contractor-billing/') && user.role === 'user') {
+    return res.status(403).json({ success: false, error: 'ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อจัดการเอกสารแนบหักผู้รับเหมา' });
+  }
   if (managerOnlyPaths.has(req.path) && user.role === 'user') {
     return res.status(403).json({ success: false, error: 'ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อทำรายการนี้' });
   }
@@ -3323,7 +3327,9 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
     projects: false,
     app_users: false,
     system_config: false,
-    billing_notes: false
+    billing_notes: false,
+    contractor_charge_notes: false,
+    contractor_charge_lines: false
   };
 
   // Option A: Direct PostgreSQL Connection
@@ -3484,7 +3490,7 @@ app.post('/api/database/init-schema', async (req: Request, res: Response) => {
             success: true,
             executedDirectly: true,
             ddl: SUPABASE_SQL_DDL_SCHEMA,
-            message: 'สร้างตาราง PostgreSQL ทั้ง 8 ตารางบน Supabase Cloud สำเร็จเรียบร้อยแล้ว!'
+            message: 'สร้างตาราง PostgreSQL บน Supabase Cloud สำเร็จเรียบร้อยแล้ว!'
           });
         } catch (execErr: any) {
           client.release();
@@ -3597,6 +3603,139 @@ app.post('/api/database/migrate-local-to-cloud', async (req: Request, res: Respo
   } catch (err: any) {
     console.error('Migrate error:', err);
     return res.status(500).json({ success: false, error: err?.message || 'เกิดข้อผิดพลาดในการย้ายข้อมูล' });
+  }
+});
+
+app.get('/api/contractor-billing/data', async (_req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล' });
+    const [notesResult, linesResult] = await Promise.all([
+      client.from('contractor_charge_notes').select('*').order('created_at', { ascending: false }),
+      client.from('contractor_charge_lines').select('*').order('created_at', { ascending: true })
+    ]);
+    const queryError = notesResult.error || linesResult.error;
+    if (queryError) throw queryError;
+
+    const linesByNoteId = new Map<string, any[]>();
+    for (const line of linesResult.data || []) {
+      const noteLines = linesByNoteId.get(line.note_id) || [];
+      noteLines.push(line);
+      linesByNoteId.set(line.note_id, noteLines);
+    }
+    return res.json({
+      success: true,
+      documents: (notesResult.data || []).map(note =>
+        mapContractorChargeDocument(note, linesByNoteId.get(note.id) || [])
+      )
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Contractor Billing] Load data failed:', message);
+    return res.status(503).json({
+      success: false,
+      error: 'โหลดเอกสารแนบหักผู้รับเหมาไม่สำเร็จ กรุณาตรวจว่ารัน DDL เพิ่มเติมแล้ว',
+      details: message
+    });
+  }
+});
+
+app.post('/api/contractor-billing/issue', async (req: Request, res: Response) => {
+  const user = getAuthenticatedUser(req);
+  const { document, lines } = req.body || {};
+  if (!user || user.role === 'user') {
+    return res.status(403).json({ success: false, error: 'ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อออกเอกสารเรียกเก็บ' });
+  }
+  if (!document || !Array.isArray(lines) || lines.length === 0) {
+    return res.status(400).json({ success: false, error: 'เอกสารและรายการวัสดุต้องไม่ว่าง' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล' });
+    const notePayload = {
+      id: String(document.id || crypto.randomUUID()),
+      document_number: String(document.documentNumber || '').trim(),
+      contractor_name: String(document.contractorName || '').trim(),
+      issue_date: String(document.issueDate || ''),
+      project_name: String(document.projectName || '').trim(),
+      deduct_from_contractor: Boolean(document.deductFromContractor),
+      subtotal_amount: Number(document.subtotalAmount),
+      notes: String(document.notes || ''),
+      created_by: user.fullName
+    };
+    if (!notePayload.document_number || !notePayload.contractor_name || !notePayload.project_name ||
+        !notePayload.issue_date || !Number.isFinite(notePayload.subtotal_amount)) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลหัวเอกสารเรียกเก็บไม่ครบหรือไม่ถูกต้อง' });
+    }
+
+    const linePayload = lines.map((line: any) => ({
+      id: String(line.id || crypto.randomUUID()),
+      source_order_id: String(line.sourceOrderId || ''),
+      source_item_id: String(line.sourceItemId || ''),
+      source_po_id: String(line.sourcePoId || ''),
+      source_po_number: String(line.sourcePoNumber || ''),
+      source_do_number: String(line.sourceDoNumber || ''),
+      project_name: String(line.projectName || ''),
+      item_description: String(line.itemDescription || ''),
+      spec_code: String(line.specCode || ''),
+      quantity: Number(line.quantity),
+      unit: String(line.unit || ''),
+      unit_price: Number(line.unitPrice)
+    }));
+    const sourceKeys = new Set<string>();
+    if (linePayload.some(line => {
+      const sourceKey = `${line.source_order_id}::${line.source_item_id}`;
+      if (sourceKeys.has(sourceKey)) return true;
+      sourceKeys.add(sourceKey);
+      return (
+      !line.source_order_id || !line.source_item_id || !line.source_po_id ||
+      !line.source_po_number || !line.source_do_number || !line.item_description ||
+      !line.unit || !Number.isFinite(line.quantity) || line.quantity <= 0 ||
+      !Number.isFinite(line.unit_price) || line.unit_price <= 0
+      );
+    })) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลอ้างอิง PO/DO จำนวน หรือราคาต่อหน่วยไม่ครบ' });
+    }
+
+    const { data, error } = await client.rpc('create_contractor_charge_note', {
+      p_note: notePayload,
+      p_lines: linePayload
+    });
+    if (error) throw error;
+    return res.json({ success: true, id: data, documentNumber: notePayload.document_number });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Contractor Billing] Issue document failed:', message);
+    return res.status(400).json({
+      success: false,
+      error: message.includes('duplicate key')
+        ? 'เลขที่เอกสารนี้ถูกใช้งานแล้ว กรุณาลองออกเอกสารอีกครั้ง'
+        : `ออกเอกสารเรียกเก็บไม่สำเร็จ: ${message}`
+    });
+  }
+});
+
+app.post('/api/contractor-billing/cancel', async (req: Request, res: Response) => {
+  const id = String(req.body?.id || '');
+  if (!id) return res.status(400).json({ success: false, error: 'ไม่พบรหัสเอกสาร' });
+  try {
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล' });
+    const { data, error } = await client
+      .from('contractor_charge_notes')
+      .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('status', 'issued')
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(409).json({ success: false, error: 'เอกสารไม่พบหรือถูกยกเลิกไปแล้ว' });
+    return res.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Contractor Billing] Cancel document failed:', message);
+    return res.status(400).json({ success: false, error: `ยกเลิกเอกสารไม่สำเร็จ: ${message}` });
   }
 });
 
@@ -6180,7 +6319,7 @@ async function runStartupSelfTest() {
       startupStatus.supabaseMessage = dbTest.isSchemaReady
         ? 'เชื่อมต่อฐานข้อมูลสำเร็จ และตรวจครบทุกตาราง ✅'
         : 'เชื่อมต่อฐานข้อมูลสำเร็จ แต่พบตารางที่ยังไม่มีหรืออ่านไม่ได้';
-      console.log('[Startup] ✅ Database: เชื่อมต่อแล้ว ตรวจ schema 8 ตารางเสร็จ');
+      console.log('[Startup] ✅ Database: เชื่อมต่อแล้ว ตรวจ schema tables เสร็จ');
       saveStoredDbConfig({ lastTestedAt: new Date().toISOString() });
       // Restore all cloud-persisted configs (Drive, LINE OA, Gemini) from Supabase system_config
       await restoreConfigsFromSupabase();

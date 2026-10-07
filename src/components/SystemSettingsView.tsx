@@ -764,7 +764,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
       });
       const data = await res.json();
       if (data.success && data.executedDirectly) {
-        showToast('รันสคริปต์สร้างตารางทั้ง 8 ตารางบน PostgreSQL สำเร็จเรียบร้อยแล้ว!');
+        showToast('รันสคริปต์สร้างตาราง PostgreSQL สำเร็จเรียบร้อยแล้ว!');
         handleTestDbConnection();
       } else if (data.success) {
         setShowSqlDdlModal(true);
@@ -843,7 +843,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const handleCopySqlDdl = () => {
     navigator.clipboard.writeText(SUPABASE_SQL_DDL_SCHEMA);
     setCopiedSql(true);
-    showToast('คัดลอกคำสั่ง SQL DDL 8 ตารางเรียบร้อยแล้ว');
+    showToast('คัดลอกคำสั่ง SQL DDL เรียบร้อยแล้ว');
     setTimeout(() => setCopiedSql(false), 3000);
   };
 
@@ -1159,7 +1159,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 )}
               </div>
               <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                ระบบเริ่มตรวจฐานข้อมูล 8 ตาราง, Google Drive, Gemini API และ LINE Token ตั้งแต่เปิดหน้าเข้าสู่ระบบ
+                ระบบเริ่มตรวจฐานข้อมูล 10 ตาราง, Google Drive, Gemini API และ LINE Token ตั้งแต่เปิดหน้าเข้าสู่ระบบ
               </p>
             </div>
           </div>
@@ -1215,13 +1215,13 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               ) : startupStatus?.supabase === 'error' ? (
                 <span className="text-rose-300">❌ {startupStatus.supabaseMessage}</span>
               ) : dbStatus?.isConfigured ? (
-                <span className="text-amber-300">⏳ กำลังตรวจสอบฐานข้อมูลและ 8 ตารางอัตโนมัติ...</span>
+                <span className="text-amber-300">⏳ กำลังตรวจสอบฐานข้อมูลและ 10 ตารางอัตโนมัติ...</span>
               ) : (
                 <span className="text-slate-400">ยังไม่ได้ตั้งค่า</span>
               )}
             </div>
             <div className="text-[10px] text-slate-400 mt-1 truncate">
-              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 8 ตาราง'}
+              {dbConfig.supabaseUrl ? dbConfig.supabaseUrl.replace(/^https?:\/\//, '') : 'PostgreSQL 10 ตาราง'}
             </div>
           </div>
 
@@ -2158,7 +2158,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
                 >
                   {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-sky-400" />}
-                  <span>{copiedSql ? 'คัดลอก SQL แล้ว!' : 'คัดลอก SQL DDL 8 ตาราง'}</span>
+                  <span>{copiedSql ? 'คัดลอก SQL แล้ว!' : 'คัดลอก SQL DDL'}</span>
                 </button>
                 <a
                   href="https://supabase.com/dashboard"
@@ -2284,7 +2284,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   <div className="flex items-center gap-2">
                     <Server className="w-4 h-4 text-emerald-600" />
                     <h4 className="text-sm font-bold text-slate-900">
-                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 8 ตาราง
+                      2. ตรวจสอบตาราง PostgreSQL ทั้ง 10 ตาราง
                     </h4>
                   </div>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">
@@ -2301,7 +2301,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     { key: 'projects', name: '5. projects', desc: 'ทะเบียนโครงการก่อสร้าง' },
                     { key: 'app_users', name: '6. app_users', desc: 'บัญชีผู้ใช้และสิทธิ์การใช้งาน' },
                     { key: 'system_config', name: '7. system_config', desc: 'ค่าตั้งค่าระบบที่บันทึกบน Cloud' },
-                    { key: 'billing_notes', name: '8. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' }
+                    { key: 'billing_notes', name: '8. billing_notes', desc: 'ชุดรับวางบิลฝ่ายจัดซื้อ & RR' },
+                    { key: 'contractor_charge_notes', name: '9. contractor_charge_notes', desc: 'เอกสารแนบหักค่าวัสดุผู้รับเหมา' },
+                    { key: 'contractor_charge_lines', name: '10. contractor_charge_lines', desc: 'รายการ PO/DO ในเอกสารแนบ' }
                   ].map(t => {
                     const isFound = dbStatus?.tables ? dbStatus.tables[t.key] : false;
                     const rowCount = dbStatus?.tableCounts ? dbStatus.tableCounts[t.key] : undefined;
@@ -3021,7 +3023,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
             <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-sky-400" />
-                <h4 className="text-sm font-bold">ชุดคำสั่ง SQL DDL สำหรับสร้าง 8 ตารางบน Supabase</h4>
+                <h4 className="text-sm font-bold">ชุดคำสั่ง SQL DDL สำหรับสร้างตารางบน Supabase</h4>
               </div>
               <button
                 type="button"

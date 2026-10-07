@@ -44,6 +44,7 @@ const ALL_MENU_TABS: { id: string; label: string; group: string }[] = [
   { id: 'dest_wb', label: '⚖️ ตั๋วชั่งปลายทาง', group: 'เอกสาร & ชนบิล' },
   { id: 'tax_inv', label: '🧾 ใบเสร็จ/กำกับภาษี', group: 'เอกสาร & ชนบิล' },
   { id: 'billing', label: '📋 รับวางบิล (Express RR)', group: 'เอกสาร & ชนบิล' },
+  { id: 'contractor_billing', label: '🧾 เอกสารแนบหักผู้รับเหมา', group: 'เอกสาร & ชนบิล' },
   { id: 'analytics', label: '📊 วิเคราะห์ & การเงิน', group: 'รายงาน & การเงิน' },
   { id: 'reports', label: '🖨️ ออกรายงาน Excel / PDF', group: 'รายงาน & การเงิน' },
   { id: 'stores', label: '🏪 ทะเบียนร้านค้า', group: 'ข้อมูลหลัก (Master)' },

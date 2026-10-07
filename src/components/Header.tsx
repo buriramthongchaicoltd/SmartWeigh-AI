@@ -41,6 +41,7 @@ export type MainTabType =
   | 'dest_wb'
   | 'tax_inv'
   | 'billing'
+  | 'contractor_billing'
   | 'line_inbox'
   | 'analytics'
   | 'reports'
@@ -108,6 +109,12 @@ const TAB_META: Record<MainTabType, { label: string; subtitle: string; badgeText
     subtitle: 'ชนข้อมูล DO กับใบวางบิลร้านค้า ส่งออกไฟล์เข้าโปรแกรม Express และ Auto-Stamp เลขที่ RR ลงช่อง 5',
     badgeText: '4-Step Express RR',
     badgeColor: 'bg-sky-50 text-sky-800 border-sky-200'
+  },
+  contractor_billing: {
+    label: 'เอกสารแนบหักผู้รับเหมา',
+    subtitle: 'เลือก DO ที่กำหนดให้หักไว้ เพื่อจัดทำเอกสารแนบตอนเบิกค่างาน',
+    badgeText: 'เอกสารภายใน • ไม่ใช่ใบกำกับภาษี',
+    badgeColor: 'bg-violet-50 text-violet-800 border-violet-200'
   },
   line_inbox: {
     label: 'กล่องพักบิลจาก LINE',
@@ -787,6 +794,24 @@ export const SidebarNav: React.FC<{
               ) : collapsed && pendingBillingRR > 0 ? (
                 <span className="w-2 h-2 rounded-full bg-amber-400 absolute top-1.5 right-1.5 animate-ping" />
               ) : null}
+            </button>
+          )}
+
+          {isTabAllowed('contractor_billing') && (
+            <button
+              type="button"
+              onClick={() => handleSelect('contractor_billing')}
+              title="เรียกเก็บค่าวัสดุจากผู้รับเหมา"
+              className={`w-full flex items-center ${collapsed ? 'justify-center px-2 py-2' : 'justify-between px-3 py-2'} rounded-xl text-xs font-semibold transition cursor-pointer ${
+                activeTab === 'contractor_billing'
+                  ? 'bg-violet-600 text-white shadow-sm'
+                  : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 truncate">
+                <Receipt className={`w-4 h-4 shrink-0 ${activeTab === 'contractor_billing' ? 'text-white' : 'text-violet-400'}`} />
+                {!collapsed && <span className="truncate">เรียกเก็บค่าวัสดุผู้รับเหมา</span>}
+              </div>
             </button>
           )}
         </div>

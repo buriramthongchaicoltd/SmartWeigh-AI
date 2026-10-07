@@ -13,13 +13,13 @@
 
 | ส่วนประกอบ | เทคโนโลยีที่ใช้ | หน้าที่หลัก |
 | :--- | :--- | :--- |
-| **1. Core Transactional Database** | **Supabase Cloud (PostgreSQL)** | จัดเก็บข้อมูลตาราง 39 คอลัมน์, ใบสั่งซื้อ (PO), ตั๋วชั่งปลายทาง, ใบกำกับภาษี, ทะเบียนร้านค้า, โครงการ, กล่องพัก LINE, สิทธิ์ผู้ใช้งาน และรหัสอ้างอิงไฟล์ (`drive_file_id`, `drive_folder_id`); วิธี refresh/sync หน้าจอแตกต่างตาม feature โดย LINE Inbox ใช้ API polling ทุก 8 วินาที ไม่ใช่ Supabase Realtime subscription |
+| **1. Core Transactional Database** | **Supabase Cloud (PostgreSQL)** | จัดเก็บข้อมูลตาราง 39 คอลัมน์, ใบสั่งซื้อ (PO), ตั๋วชั่งปลายทาง, ใบกำกับภาษี, ทะเบียนร้านค้า, โครงการ, กล่องพัก LINE, สิทธิ์ผู้ใช้งาน, เอกสารแนบหักผู้รับเหมา และรหัสอ้างอิงไฟล์ (`drive_file_id`, `drive_folder_id`); วิธี refresh/sync หน้าจอแตกต่างตาม feature โดย LINE Inbox ใช้ API polling ทุก 8 วินาที ไม่ใช่ Supabase Realtime subscription |
 | **2. File Storage & Zero-Junk Engine** | **Google Drive API (Apps Script Web App / Service Account)** | จัดเก็บรูปถ่ายบิลและเอกสารแนบ แยกโฟลเดอร์ตามประเภทและเลขที่เอกสารอัตโนมัติ และย้ายไฟล์ตามสถานะการตรวจรับ/จับคู่; การนำไฟล์ไปถังขยะและการบันทึกฐานข้อมูลเป็นคนละขั้นตอน ไม่ใช่ transaction เดียว |
 
 ### สถานะและข้อจำกัดด้านความปลอดภัยหลังทวนโค้ด
 - `.supabase_config.json` ที่เคยถูก track ถูกนำออกแล้ว; service-role credential และ `DATABASE_URL` อ่านจาก runtime environment เท่านั้น. เนื่องจาก credential เดิมยังอยู่ใน Git history ให้ถือว่า compromised และเพิกถอน/หมุนก่อนใช้งานต่อ; อย่าคัดลอก secret ลงเอกสารหรือ log
-- `getSupabaseClient()` ใช้ `SUPABASE_SERVICE_ROLE_KEY` จาก runtime environment เท่านั้น; ไม่ใช้ anon key สำหรับ backend เพราะ DDL ถอนสิทธิ์ `PUBLIC`, `anon`, `authenticated` และให้ `service_role` เท่านั้น. ตั้ง Project URL และ service-role key ใน Render Environment; ห้ามใส่ secret ใน browser/Git. ต้องนำ DDL ไป execute ใน Supabase SQL Editor ด้วยตนเอง; source change ไม่ปรับ cloud database อัตโนมัติ. หน้าตั้งค่าตรวจ 8 ตาราง รวม `system_config` ซึ่งใช้ `config_key` เป็น key
-- เมื่อเปิดเว็บไซต์ การตรวจบริการเริ่มทำงานตั้งแต่หน้าเข้าสู่ระบบ โดยเช็คฐานข้อมูลและ 8 ตาราง, Google Drive, Gemini API และ LINE Token; ระบบแชร์ผลตรวจล่าสุดภายใน 60 วินาทีเพื่อลดการเรียกบริการซ้ำ. การตรวจ LINE ยืนยัน Token เท่านั้น ไม่ได้ยืนยัน webhook delivery หรือการรับบิลจริง
+- `getSupabaseClient()` ใช้ `SUPABASE_SERVICE_ROLE_KEY` จาก runtime environment เท่านั้น; ไม่ใช้ anon key สำหรับ backend เพราะ DDL ถอนสิทธิ์ `PUBLIC`, `anon`, `authenticated` และให้ `service_role` เท่านั้น. ตั้ง Project URL และ service-role key ใน Render Environment; ห้ามใส่ secret ใน browser/Git. ต้องนำ DDL ไป execute ใน Supabase SQL Editor ด้วยตนเอง; source change ไม่ปรับ cloud database อัตโนมัติ. หน้าตั้งค่าตรวจ 10 ตาราง รวม `system_config` ซึ่งใช้ `config_key` เป็น key และตารางเอกสารแนบหักผู้รับเหมาอีก 2 ตาราง
+- เมื่อเปิดเว็บไซต์ การตรวจบริการเริ่มทำงานตั้งแต่หน้าเข้าสู่ระบบ โดยเช็คฐานข้อมูลและ 10 ตาราง, Google Drive, Gemini API และ LINE Token; ระบบแชร์ผลตรวจล่าสุดภายใน 60 วินาทีเพื่อลดการเรียกบริการซ้ำ. การตรวจ LINE ยืนยัน Token เท่านั้น ไม่ได้ยืนยัน webhook delivery หรือการรับบิลจริง
 - API ที่ไม่ใช่ health/login/LINE webhook บังคับ server session. การเขียน/ลบข้อมูลและไฟล์ถูกจำกัดตาม role ที่ backend; role `user` จำกัดตารางที่เขียนได้และไม่สามารถแก้ไขฟิลด์ราคา/การเงิน/การชำระเงินที่ถูกป้องกันผ่าน API. UI ไม่ใช่ security boundary
 - Login ใช้บัญชี `app_users`, password hash scrypt และ HttpOnly/SameSite session cookie อายุ 8 ชั่วโมง; session เก็บใน memory และหมดเมื่อ process restart/deploy. Master Admin ใหม่ต้อง bootstrap ด้วย `SYSTEM_MASTER_ADMIN_PASSWORD` ความยาวอย่างน้อย 16 ตัวอักษร; บัญชีเดิมที่ยังใช้ `@Admin` สามารถล็อกอินได้ ส่วน `123456` ถูกปฏิเสธ และ runtime secret ใช้หมุนรหัส Master เดิมได้
 - GAS ต้องมี secret อย่างน้อย 32 ตัวอักษรตรงกับ Script Property `SMARTWEIGH_SHARED_SECRET`; Admin สร้างและคัดลอก secret จากหน้าตั้งค่าได้ โดยระบบเก็บค่าเข้ารหัสใน `system_config` และใช้ service-role key/`DATABASE_URL` ที่ server เพื่อเข้ารหัส. หากหมุน database credential ต้องสร้าง GAS secret ใหม่และอัปเดต Script Property เพราะค่าเดิมถอดรหัสไม่ได้. รองรับ `GOOGLE_APPS_SCRIPT_SHARED_SECRET` ใน Environment เป็น override เดิม แต่ไม่จำเป็นสำหรับการตั้งค่าใหม่. ต้อง deploy `google_apps_script_drive.gs` รุ่นล่าสุดเพื่อให้ endpoint ปฏิเสธ request ที่ไม่มี secret
@@ -351,6 +351,15 @@ CREATE TABLE IF NOT EXISTS public.billing_notes (
 ```
 
 > สำหรับฐานข้อมูลที่สร้างไว้แล้ว ให้รัน DDL นี้ซ้ำเพื่อเพิ่มคอลัมน์สถานะการชนแบบ additive; PO เก่าที่ยังมีเลขใน `col4` แต่ไม่มีสถานะจะถูกทำเครื่องหมาย `auto_flagged` เพื่อให้ผู้ใช้ตรวจสอบ แทนการถือว่ายืนยันแล้ว
+
+## 4.1 เอกสารแนบหักค่าวัสดุผู้รับเหมา
+
+- แยกจาก Express RR และยอดหนี้ร้านค้า; เอกสารเป็นเอกสารภายในสำหรับแนบประกอบการเบิกค่างาน ไม่ใช่ใบแจ้งหนี้/ใบกำกับภาษี และไม่มีผลกับ 39 คอลัมน์
+- DO ใช้ค่า `col9` เป็นชื่อผู้รับเหมา ไม่สร้างทะเบียนผู้รับเหมาซ้ำ. Metadata ใน `orders.items` ทำเครื่องหมายรายการที่เลือกเป็น `chargeable`; รายการอื่นไม่เข้ารายการเอกสาร และไม่เพิ่มคอลัมน์หลัก
+- หน้าจอแสดงเฉพาะรายการที่กำหนดให้หักและยังมีจำนวนคงเหลือ. ผู้ใช้เลือกรายการ/จำนวน ใส่ราคาในขั้นออกเอกสาร (รองรับ PO ที่ไม่มีราคา) และเลือกว่าเอกสารฉบับนี้นำไปหักหรือเป็นเอกสารประกอบอย่างเดียว
+- `contractor_charge_notes` เก็บหัวเอกสารและสถานะยกเลิก; `contractor_charge_lines` เก็บ snapshot ของราคา/จำนวนและการอ้างอิง DO + PO. RPC `create_contractor_charge_note` ตรวจชื่อผู้รับเหมาจาก `col9`, PO/DO, สถานะรายการและจำนวนคงเหลือ พร้อมล็อก DO ขณะจองจำนวนเพื่อกันออกเอกสารซ้ำ/เกิน
+- ทั้งสองตารางเปิด RLS และให้ backend `service_role` เท่านั้น; API ฝั่ง server จำกัดการอ่าน/เขียนเอกสารแก่ Manager/Admin. สคริปต์สร้าง/ตรวจ schema รุ่นปัจจุบันอยู่ใน `src/utils/supabaseClient.ts`; ต้องรัน DDL ใน Supabase เองก่อนเปิดเมนู และการแก้ source ไม่ได้เปลี่ยนฐานข้อมูล production อัตโนมัติ
+- ข้อจำกัดปัจจุบัน: JSON backup/restore ในหน้า Settings ยังไม่รวมสองตารางเอกสารแนบนี้; ต้องสำรอง/กู้คืนระดับฐานข้อมูลก่อนใช้จริงจนกว่าจะเพิ่ม support ใน backup ของแอป
 
 ---
 
