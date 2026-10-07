@@ -623,28 +623,27 @@ export const SidebarNav: React.FC<{
               title={pendingLineInbox > 0
                 ? `กล่องพักบิล LINE — ต้องตรวจหรือสแกนซ้ำ ${pendingLineInbox.toLocaleString('th-TH')} รายการ`
                 : 'กล่องพักบิลจาก LINE OA'}
+              aria-label={pendingLineInbox > 0
+                ? `กล่องพักบิลจาก LINE มีรายการต้องตรวจหรือสแกนซ้ำ ${pendingLineInbox.toLocaleString('th-TH')} รายการ`
+                : 'กล่องพักบิลจาก LINE OA'}
               className={`w-full flex items-center ${collapsed ? 'justify-center px-2 py-2' : 'justify-between px-3 py-2'} rounded-xl text-xs font-semibold transition cursor-pointer relative ${
                 activeTab === 'line_inbox'
                   ? 'bg-emerald-600 text-white shadow-sm'
                   : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
               }`}
             >
-              <div className="flex items-center gap-2.5 truncate">
+              <div className="flex min-w-0 flex-1 items-center gap-2.5 truncate">
                 <MessageSquare className={`w-4 h-4 shrink-0 ${activeTab === 'line_inbox' ? 'text-white' : 'text-emerald-400'}`} />
                 {!collapsed && <span className="truncate">กล่องพักบิลจาก LINE</span>}
               </div>
-              {!collapsed ? (
-                <div className="flex items-center gap-1">
-                  {pendingLineInbox > 0 && (
-                    <span
-                      className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-400 text-slate-950"
-                      title={`รายการ LINE ที่ต้องตรวจหรือสแกนซ้ำ ${pendingLineInbox.toLocaleString('th-TH')} รายการ`}
-                    >
-                      ต้องตรวจ {formatActionBadgeCount(pendingLineInbox)}
-                    </span>
-                  )}
-                </div>
-              ) : pendingLineInbox > 0 ? (
+              {!collapsed && pendingLineInbox > 0 ? (
+                <span
+                  className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-bold tabular-nums text-slate-950"
+                  title={`รายการ LINE ที่ต้องตรวจหรือสแกนซ้ำ ${pendingLineInbox.toLocaleString('th-TH')} รายการ`}
+                >
+                  {formatActionBadgeCount(pendingLineInbox)}
+                </span>
+              ) : collapsed && pendingLineInbox > 0 ? (
                 <span className="w-2 h-2 rounded-full bg-amber-400 absolute top-1.5 right-1.5 animate-ping" />
               ) : null}
             </button>
@@ -658,25 +657,26 @@ export const SidebarNav: React.FC<{
               title={pendingOrderReview > 0
                 ? `ใบส่งของ / ใบส่งสินค้า (DO) — รอตรวจยืนยัน ${pendingOrderReview.toLocaleString('th-TH')} รายการ`
                 : 'ใบส่งของ / ใบส่งสินค้า (DO)'}
+              aria-label={pendingOrderReview > 0
+                ? `ใบส่งของ / ใบส่งสินค้า (DO) มีรายการรอตรวจยืนยัน ${pendingOrderReview.toLocaleString('th-TH')} รายการ`
+                : 'ใบส่งของ / ใบส่งสินค้า (DO)'}
               className={`w-full flex items-center ${collapsed ? 'justify-center px-2 py-2' : 'justify-between px-3 py-2'} rounded-xl text-xs font-semibold transition cursor-pointer ${
                 activeTab === 'orders'
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
               }`}
             >
-              <div className="flex items-center gap-2.5 truncate">
+              <div className="flex min-w-0 flex-1 items-center gap-2.5 truncate">
                 <FileText className={`w-4 h-4 shrink-0 ${activeTab === 'orders' ? 'text-white' : 'text-sky-400'}`} />
                 {!collapsed && <span className="truncate">ใบส่งของ / ใบส่งสินค้า (DO)</span>}
               </div>
-              {!collapsed && (
-                pendingOrderReview > 0 && (
-                  <span
-                    className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-400 text-slate-950"
-                    title={`รายการ DO ที่ยังรอตรวจยืนยันการทำงานอัตโนมัติ ${pendingOrderReview.toLocaleString('th-TH')} รายการ`}
-                  >
-                    รอตรวจ {formatActionBadgeCount(pendingOrderReview)}
-                  </span>
-                )
+              {!collapsed && pendingOrderReview > 0 && (
+                <span
+                  className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-bold tabular-nums text-slate-950"
+                  title={`รายการ DO ที่ยังรอตรวจยืนยันการทำงานอัตโนมัติ ${pendingOrderReview.toLocaleString('th-TH')} รายการ`}
+                >
+                  {formatActionBadgeCount(pendingOrderReview)}
+                </span>
               )}
               {collapsed && pendingOrderReview > 0 && (
                 <span className="w-2 h-2 rounded-full bg-amber-400 absolute top-1.5 right-1.5" />
@@ -711,28 +711,27 @@ export const SidebarNav: React.FC<{
               title={unmatchedDestWB > 0
                 ? `ตั๋วชั่งปลายทาง — รอจับคู่ ${unmatchedDestWB.toLocaleString('th-TH')} รายการ`
                 : 'ตั๋วชั่งปลายทาง'}
+              aria-label={unmatchedDestWB > 0
+                ? `ตั๋วชั่งปลายทาง มีรายการรอจับคู่ ${unmatchedDestWB.toLocaleString('th-TH')} รายการ`
+                : 'ตั๋วชั่งปลายทาง'}
               className={`w-full flex items-center ${collapsed ? 'justify-center px-2 py-2' : 'justify-between px-3 py-2'} rounded-xl text-xs font-semibold transition cursor-pointer relative ${
                 activeTab === 'dest_wb'
                   ? 'bg-teal-600 text-white shadow-sm'
                   : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
               }`}
             >
-              <div className="flex items-center gap-2.5 truncate">
+              <div className="flex min-w-0 flex-1 items-center gap-2.5 truncate">
                 <Scale className={`w-4 h-4 shrink-0 ${activeTab === 'dest_wb' ? 'text-white' : 'text-teal-400'}`} />
                 {!collapsed && <span className="truncate">ตั๋วชั่งปลายทาง</span>}
               </div>
-              {!collapsed ? (
-                <div className="flex items-center gap-1">
-                  {unmatchedDestWB > 0 && (
-                    <span
-                      className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-400 text-slate-950"
-                      title={`ตั๋วชั่งปลายทางที่ยังรอจับคู่ ${unmatchedDestWB.toLocaleString('th-TH')} รายการ`}
-                    >
-                      รอชน {formatActionBadgeCount(unmatchedDestWB)}
-                    </span>
-                  )}
-                </div>
-              ) : unmatchedDestWB > 0 ? (
+              {!collapsed && unmatchedDestWB > 0 ? (
+                <span
+                  className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-bold tabular-nums text-slate-950"
+                  title={`ตั๋วชั่งปลายทางที่ยังรอจับคู่ ${unmatchedDestWB.toLocaleString('th-TH')} รายการ`}
+                >
+                  {formatActionBadgeCount(unmatchedDestWB)}
+                </span>
+              ) : collapsed && unmatchedDestWB > 0 ? (
                 <span className="w-2 h-2 rounded-full bg-amber-400 absolute top-1.5 right-1.5 animate-ping" />
               ) : null}
             </button>
@@ -765,28 +764,27 @@ export const SidebarNav: React.FC<{
               title={pendingBillingRR > 0
                 ? `ระบบรับวางบิลฝ่ายจัดซื้อ — รอเลข RR ${pendingBillingRR.toLocaleString('th-TH')} ชุด`
                 : 'ระบบรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อโปรแกรม Express (4 Steps)'}
+              aria-label={pendingBillingRR > 0
+                ? `ระบบรับวางบิล มีชุดรอเลข RR ${pendingBillingRR.toLocaleString('th-TH')} ชุด`
+                : 'ระบบรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อโปรแกรม Express'}
               className={`w-full flex items-center ${collapsed ? 'justify-center px-2 py-2' : 'justify-between px-3 py-2'} rounded-xl text-xs font-semibold transition cursor-pointer relative ${
                 activeTab === 'billing'
                   ? 'bg-sky-600 text-white shadow-sm'
                   : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
               }`}
             >
-              <div className="flex items-center gap-2.5 truncate">
+              <div className="flex min-w-0 flex-1 items-center gap-2.5 truncate">
                 <FileCheck2 className={`w-4 h-4 shrink-0 ${activeTab === 'billing' ? 'text-white' : 'text-sky-400'}`} />
                 {!collapsed && <span className="truncate">รับวางบิล (Express RR)</span>}
               </div>
-              {!collapsed ? (
-                <div className="flex items-center gap-1">
-                  {pendingBillingRR > 0 && (
-                    <span
-                      className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-400 text-slate-950"
-                      title={`ชุดวางบิลที่ยังรอเลข RR จาก Express ${pendingBillingRR.toLocaleString('th-TH')} ชุด`}
-                    >
-                      รอ RR {formatActionBadgeCount(pendingBillingRR)}
-                    </span>
-                  )}
-                </div>
-              ) : pendingBillingRR > 0 ? (
+              {!collapsed && pendingBillingRR > 0 ? (
+                <span
+                  className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-bold tabular-nums text-slate-950"
+                  title={`ชุดวางบิลที่ยังรอเลข RR จาก Express ${pendingBillingRR.toLocaleString('th-TH')} ชุด`}
+                >
+                  {formatActionBadgeCount(pendingBillingRR)}
+                </span>
+              ) : collapsed && pendingBillingRR > 0 ? (
                 <span className="w-2 h-2 rounded-full bg-amber-400 absolute top-1.5 right-1.5 animate-ping" />
               ) : null}
             </button>

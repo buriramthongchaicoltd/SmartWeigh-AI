@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-07] Compact Sidebar Outstanding Badges
+
+### การเปลี่ยนแปลง
+- ย่อ badge งานค้างในเมนู LINE, DO, ตั๋วปลายทาง และรับวางบิลให้เหลือเฉพาะตัวเลข เพื่อลดการเบียดและตัดข้อความชื่อเมนู
+- กำหนด badge ไม่ให้หดหรือ wrap และให้ชื่อเมนูใช้พื้นที่ยืดหยุ่นพร้อม truncate เมื่อพื้นที่จำกัด
+- คง tooltip และ accessible label ที่บอกประเภทงานกับจำนวนเต็ม; badge ยังย่อเป็น `99+` และซ่อนเมื่อไม่มีงานค้าง
+- อัปเดต Handover ให้ระบุการแสดงผลแบบ badge ตัวเลข
+
+### การตรวจสอบ
+- ผ่าน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`; build ยังเตือนตามเกณฑ์เดิมเพราะ initial chunk เกิน 500 kB เล็กน้อย
+
 ## [2026-10-07] Prioritize Initial View and Preload Remaining Modules
 
 ### การเปลี่ยนแปลง
