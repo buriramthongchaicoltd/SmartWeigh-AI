@@ -1786,12 +1786,33 @@ export default function App() {
               docDate: (order.docType === 'dest_weighbridge' && order.col16)
                 ? order.col16
                 : order.col7 || new Date().toISOString().slice(0, 10),
-              docNumber: order.col6 || order.col4 || order.col17 || order.col1 || ''
-            })
+              docNumber: order.docType === 'dest_weighbridge'
+                ? order.col17 || order.col6 || ''
+                : order.col6 || order.col4 || order.col17 || order.col1 || ''
+            }),
+            signal: AbortSignal.timeout(55_000)
           });
-          const driveResult = await driveResponse.json();
+          const responseText = await driveResponse.text();
+          let driveResult: { success?: boolean; error?: string; targetZone?: string } = {};
+          try {
+            const parsedResult: unknown = JSON.parse(responseText);
+            if (parsedResult && typeof parsedResult === 'object') {
+              const resultFields = parsedResult as Record<string, unknown>;
+              driveResult = {
+                success: resultFields.success === true,
+                error: typeof resultFields.error === 'string' ? resultFields.error : undefined,
+                targetZone: typeof resultFields.targetZone === 'string' ? resultFields.targetZone : undefined
+              };
+            }
+          } catch {
+            // Non-JSON gateway responses are reported below with their HTTP status.
+          }
           if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== targetZone) {
-            throw new Error(driveResult?.error || `Google Drive ไม่ยืนยันการย้ายรูปไป ${targetZone}`);
+            const responseDetail = responseText ? `: ${responseText.slice(0, 180)}` : '';
+            throw new Error(
+              driveResult.error ||
+              `Google Drive ตอบ HTTP ${driveResponse.status} และไม่ยืนยันการย้ายรูปไป ${targetZone}${responseDetail}`
+            );
           }
           verifiedLineItem = {
             ...verifiedLineItem,

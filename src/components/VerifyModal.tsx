@@ -3711,7 +3711,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         ? isExistingOrder
                           ? 'กำลังบันทึกการแก้ไข...'
                           : form.lineInboxId
-                            ? 'กำลังย้ายรูปและบันทึก...'
+                            ? selectedDocType === 'dest_weighbridge'
+                              ? 'กำลังย้ายรูปตั๋วชั่งปลายทางและบันทึก...'
+                              : 'กำลังย้ายรูปและบันทึก...'
                             : 'กำลังบันทึกเอกสาร...'
                         : isLoadingTrNumber
                           ? 'กำลังอ่านเลข TR จากฐานข้อมูล...'
