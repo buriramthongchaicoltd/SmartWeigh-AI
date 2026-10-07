@@ -875,6 +875,27 @@ export default function App() {
       if (!resp.ok || !data?.success) {
         throw new Error(data?.error || `HTTP ${resp.status}`);
       }
+      if (!data.targetFolderId || !data.driveFileLocation) {
+        throw new Error('Google Drive ไม่ส่งรหัสโฟลเดอร์ปลายทางกลับมายืนยันตำแหน่งไฟล์');
+      }
+      setOrders(previous => previous.map(order =>
+        order.driveFileId === params.destTicketFileId
+          ? {
+              ...order,
+              driveFolderId: data.targetFolderId,
+              driveFileLocation: data.driveFileLocation
+            }
+          : order
+      ));
+      setLineInbox(previous => previous.map(item =>
+        item.driveFileId === params.destTicketFileId
+          ? {
+              ...item,
+              driveFolderId: data.targetFolderId,
+              driveFileLocation: data.driveFileLocation
+            }
+          : item
+      ));
       console.log('[Google Drive Move Success]:', data.message);
     } catch (err) {
       console.error('[Google Drive Move Error]:', err);
@@ -1704,9 +1725,11 @@ export default function App() {
 
     let verifiedLineItem: LineBillInboxItem | undefined;
     let verifiedLineTargetZone: OrderRecord['driveFileLocation'];
+    let verifiedLineTargetFolderId: string | undefined;
     let verifiedLineFileId: string | undefined;
     let pairedWeighbridgeInboxItem: LineBillInboxItem | undefined;
     let pairedWeighbridgeDriveLocation: OrderRecord['driveFileLocation'];
+    let pairedWeighbridgeDriveFolderId: string | undefined;
     if (!isExistingRecord && order.pairedWeighbridgeInboxId) {
       pairedWeighbridgeInboxItem = lineInbox.find(item => item.id === order.pairedWeighbridgeInboxId);
       if (
@@ -1737,17 +1760,26 @@ export default function App() {
             fileId: pairedWeighbridgeInboxItem.driveFileId,
             docType: 'weighbridge',
             docDate: pairedWeighbridgeInboxItem.extractedData.col7 || order.col7,
-            docNumber: pairedTicketNumber
+            docNumber: pairedTicketNumber,
+            bundleTrNumber: order.col1,
+            bundleDoNumber: order.col6
           })
         });
-        const driveResult = await driveResponse.json();
-        if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== 'zone_02') {
+        const driveResult = await driveResponse.json() as {
+          success?: boolean;
+          targetZone?: string;
+          targetFolderId?: string;
+          error?: string;
+        };
+        if (!driveResponse.ok || !driveResult.success || driveResult.targetZone !== 'zone_02' || !driveResult.targetFolderId) {
           throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปตั๋วชั่งไปโซนใบส่งของ');
         }
         pairedWeighbridgeDriveLocation = 'zone_02';
+        pairedWeighbridgeDriveFolderId = driveResult.targetFolderId;
         pairedWeighbridgeInboxItem = {
           ...pairedWeighbridgeInboxItem,
-          driveFileLocation: 'zone_02'
+          driveFileLocation: 'zone_02',
+          driveFolderId: driveResult.targetFolderId
         };
       } catch (error) {
         const reason = error instanceof Error ? `: ${error.message}` : '';
@@ -1788,12 +1820,18 @@ export default function App() {
                 : order.col7 || new Date().toISOString().slice(0, 10),
               docNumber: order.docType === 'dest_weighbridge'
                 ? order.col17 || order.col6 || ''
-                : order.col6 || order.col4 || order.col17 || order.col1 || ''
+                : order.col6 || order.col4 || order.col17 || order.col1 || '',
+              bundleTrNumber: ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || 'delivery_order')
+                ? order.col1
+                : undefined,
+              bundleDoNumber: ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || 'delivery_order')
+                ? order.col6
+                : undefined
             }),
             signal: AbortSignal.timeout(55_000)
           });
           const responseText = await driveResponse.text();
-          let driveResult: { success?: boolean; error?: string; targetZone?: string } = {};
+          let driveResult: { success?: boolean; error?: string; targetZone?: string; targetFolderId?: string } = {};
           try {
             const parsedResult: unknown = JSON.parse(responseText);
             if (parsedResult && typeof parsedResult === 'object') {
@@ -1801,13 +1839,14 @@ export default function App() {
               driveResult = {
                 success: resultFields.success === true,
                 error: typeof resultFields.error === 'string' ? resultFields.error : undefined,
-                targetZone: typeof resultFields.targetZone === 'string' ? resultFields.targetZone : undefined
+                targetZone: typeof resultFields.targetZone === 'string' ? resultFields.targetZone : undefined,
+                targetFolderId: typeof resultFields.targetFolderId === 'string' ? resultFields.targetFolderId : undefined
               };
             }
           } catch {
             // Non-JSON gateway responses are reported below with their HTTP status.
           }
-          if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== targetZone) {
+          if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== targetZone || !driveResult.targetFolderId) {
             const responseDetail = responseText ? `: ${responseText.slice(0, 180)}` : '';
             throw new Error(
               driveResult.error ||
@@ -1816,8 +1855,10 @@ export default function App() {
           }
           verifiedLineItem = {
             ...verifiedLineItem,
-            driveFileLocation: targetZone
+            driveFileLocation: targetZone,
+            driveFolderId: driveResult.targetFolderId
           };
+          verifiedLineTargetFolderId = driveResult.targetFolderId;
         } catch (err: any) {
           console.error('[LINE Inbox] Could not move image before saving order:', err);
           if (pairedWeighbridgeInboxItem && pairedWeighbridgeDriveLocation === 'zone_02') {
@@ -1858,6 +1899,7 @@ export default function App() {
           ((previousOrder?.image !== order.image && order.driveFileId === previousOrder?.driveFileId)
             ? undefined
             : order.driveFileId),
+        driveFolderId: verifiedLineTargetFolderId || order.driveFolderId,
         driveFileLocation: verifiedLineTargetZone || order.driveFileLocation,
         createdBy: order.createdBy || currentUser.fullName,
         updatedBy: currentUser.fullName
@@ -1920,6 +1962,7 @@ export default function App() {
           image: pairedWeighbridgeInboxItem.driveWebViewLink ||
             `https://drive.google.com/uc?export=view&id=${encodeURIComponent(pairedWeighbridgeInboxItem.driveFileId || '')}`,
           driveFileId: pairedWeighbridgeInboxItem.driveFileId,
+          driveFolderId: pairedWeighbridgeDriveFolderId || pairedWeighbridgeInboxItem.driveFolderId,
           driveFileLocation: pairedWeighbridgeDriveLocation || 'zone_02',
           lineInboxId: pairedWeighbridgeInboxItem.id,
           lineMessageId: pairedWeighbridgeInboxItem.lineMessageId,
@@ -2249,6 +2292,7 @@ export default function App() {
           verifiedBy: currentUser.fullName,
           verifiedAt,
           driveFileLocation: verifiedLineItem?.driveFileLocation || sourceInboxItem.driveFileLocation,
+          driveFolderId: verifiedLineItem?.driveFolderId || sourceInboxItem.driveFolderId,
           extractedData: {
             ...sourceInboxItem.extractedData,
             ...order
@@ -2270,6 +2314,7 @@ export default function App() {
           verifiedBy: currentUser.fullName,
           verifiedAt: new Date().toISOString(),
           driveFileLocation: pairedWeighbridgeDriveLocation || sourceInboxItem.driveFileLocation,
+          driveFolderId: pairedWeighbridgeDriveFolderId || sourceInboxItem.driveFolderId,
           extractedData: {
             ...sourceInboxItem.extractedData,
             linkedViaDocNo: order.col6,
@@ -2420,7 +2465,11 @@ export default function App() {
         // Auto-rename + Auto-move Drive file: {prefix}_{วันที่เอกสาร}_{เลขที่เอกสาร}.jpg → Zone ที่ถูก
         return updatedInbox.map(item => {
           if (item.id === order.lineInboxId && verifiedLineItem) {
-            return { ...item, driveFileLocation: verifiedLineItem.driveFileLocation };
+            return {
+              ...item,
+              driveFileLocation: verifiedLineItem.driveFileLocation,
+              driveFolderId: verifiedLineItem.driveFolderId
+            };
           }
           if (pairedWeighbridgeInboxItem && item.id === pairedWeighbridgeInboxItem.id) {
             return {
@@ -2431,6 +2480,7 @@ export default function App() {
               verifiedBy: currentUser.fullName,
               verifiedAt: new Date().toISOString(),
               driveFileLocation: pairedWeighbridgeDriveLocation || item.driveFileLocation,
+              driveFolderId: pairedWeighbridgeDriveFolderId || item.driveFolderId,
               extractedData: {
                 ...item.extractedData,
                 linkedViaDocNo: order.col6,

@@ -5117,17 +5117,24 @@ async function trashDriveFile(accessToken: string, fileId: string, currentFolder
 // Find or create subfolder under a parent zone (e.g. TR-2026-001_DO-02-0045)
 async function getOrCreateSubfolder(accessToken: string, parentFolderId: string, subfolderName: string): Promise<string> {
   const safeName = sanitizeDriveName(subfolderName);
-  const query = encodeURIComponent(`'${parentFolderId}' in parents and name = '${safeName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  const escapeQueryValue = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const query = `'${escapeQueryValue(parentFolderId)}' in parents and name = '${escapeQueryValue(safeName)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const params = new URLSearchParams({ q: query, pageSize: '100', fields: 'files(id,name)' });
 
-  const searchResp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`, {
+  const searchResp = await fetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
 
-  if (searchResp.ok) {
-    const searchData: any = await searchResp.json();
-    if (searchData.files && searchData.files.length > 0) {
-      return searchData.files[0].id;
-    }
+  if (!searchResp.ok) {
+    throw new Error(`ค้นหาโฟลเดอร์ใบงานบน Google Drive ไม่สำเร็จ (${searchResp.status}): ${await searchResp.text()}`);
+  }
+  const searchData: { files?: Array<{ id?: string }> } = await searchResp.json();
+  const matchingFolders = searchData.files || [];
+  if (matchingFolders.length > 1) {
+    throw new Error(`พบโฟลเดอร์ "${safeName}" ซ้ำกันใต้โซนเดียวกัน จึงหยุดเพื่อไม่ให้ย้ายไฟล์ผิดชุด`);
+  }
+  if (matchingFolders[0]?.id) {
+    return matchingFolders[0].id;
   }
 
   const createResp = await fetch('https://www.googleapis.com/drive/v3/files', {
@@ -5792,11 +5799,12 @@ app.post('/api/drive/recover-order-line-image', async (req: Request, res: Respon
 // 5. Verified-Only File Move Rule (POST /api/drive/sync-verified-move)
 app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) => {
   try {
-    const token = await getDriveAccessToken();
     const cfg = getStoredDriveConfig();
-    const isGasMode = Boolean(cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl) || (cfg.isEnabled && cfg.gasWebAppUrl && !token));
+    const isGasMode = cfg.connectionMode === 'gas';
+    const token = isGasMode ? null : await getDriveAccessToken();
+    const shouldUseGasFallback = !token && Boolean(cfg.gasWebAppUrl);
 
-    if (!token && !isGasMode) {
+    if (!token && !isGasMode && !shouldUseGasFallback) {
       return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
     }
 
@@ -5817,7 +5825,7 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
     const subfolderName = `${safeTrNo}_DO-${safeDoNo}`;
 
     // A) If GAS Mode
-    if (isGasMode && cfg.gasWebAppUrl) {
+    if ((isGasMode || shouldUseGasFallback) && cfg.gasWebAppUrl) {
       const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
         action: 'sync_verified_move',
         rootFolderId: cfg.rootFolderId,
@@ -5896,7 +5904,9 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       fileId,
       docType = 'delivery_order',
       docDate = '',  // วันที่ในเอกสาร (YYYY-MM-DD)
-      docNumber = '' // เลขที่เอกสาร เช่น DO-01-0045, WB-0012
+      docNumber = '', // เลขที่เอกสาร เช่น DO-01-0045, WB-0012
+      bundleTrNumber = '',
+      bundleDoNumber = ''
     } = req.body;
 
     if (!fileId) {
@@ -5933,6 +5943,22 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     }
 
     const newFileName = `${prefix}_${safeDate}_${safeDocNo}.jpg`;
+    const needsDoBundle = ['delivery_order', 'concrete', 'full_logistics'].includes(docType);
+    if (needsDoBundle && (!String(bundleTrNumber).trim() || !String(bundleDoNumber).trim())) {
+      return res.status(400).json({
+        success: false,
+        error: 'ต้องมีเลข TR และเลข DO เพื่อสร้างโฟลเดอร์ใบงานในโซน 02'
+      });
+    }
+    if (Boolean(String(bundleTrNumber).trim()) !== Boolean(String(bundleDoNumber).trim())) {
+      return res.status(400).json({
+        success: false,
+        error: 'ข้อมูลโฟลเดอร์ใบงานต้องระบุเลข TR และเลข DO ให้ครบทั้งคู่'
+      });
+    }
+    const bundleFolderName = String(bundleTrNumber).trim() && String(bundleDoNumber).trim()
+      ? `${sanitizeDriveName(String(bundleTrNumber))}_DO-${sanitizeDriveName(String(bundleDoNumber))}`
+      : '';
 
     // A) GAS Mode
     if ((isGasMode || shouldUseGasFallback) && cfg.gasWebAppUrl) {
@@ -5941,7 +5967,8 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         rootFolderId: cfg.rootFolderId,
         fileId,
         newFileName,
-        targetZone
+        targetZone,
+        subfolderName: targetZone === 'zone_02' ? bundleFolderName || undefined : undefined
       });
 
       if (!gasResult || !gasResult.success) {
@@ -5953,6 +5980,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         fileId: gasResult.fileId || fileId,
         newFileName,
         targetZone,
+        targetFolderId: gasResult.targetFolderId,
         message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ (GAS)`
       });
     }
@@ -5973,6 +6001,9 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     if (!toFolderId) {
       throw new Error(`ไม่พบโฟลเดอร์ Google Drive สำหรับ ${targetZone}`);
     }
+    const targetFolderId = targetZone === 'zone_02' && bundleFolderName
+      ? await getOrCreateSubfolder(token, toFolderId, bundleFolderName)
+      : toFolderId;
 
     const inboxFolderId = zones.ZONE_00;
     const fileUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`;
@@ -5984,7 +6015,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     }
     const currentFile: { id: string; name: string; parents?: string[] } = await currentResponse.json();
     const currentParents = currentFile.parents || [];
-    if (currentParents.includes(toFolderId)) {
+    if (currentParents.includes(targetFolderId)) {
       return res.json({
         success: true,
         fileId,
@@ -5993,7 +6024,12 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         message: `ไฟล์อยู่ใน ${targetZone} แล้ว`
       });
     }
-    if (!currentParents.includes(inboxFolderId)) {
+    const sourceFolderId = currentParents.includes(inboxFolderId)
+      ? inboxFolderId
+      : bundleFolderName && currentParents.includes(toFolderId)
+        ? toFolderId
+        : '';
+    if (!sourceFolderId) {
       throw new Error(`ไม่พบไฟล์ใน LINE Inbox หรือโฟลเดอร์ ${targetZone}; หยุดก่อนบันทึกข้อมูล`);
     }
 
@@ -6012,9 +6048,9 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     }
     const renamedData: any = await renameResp.json();
 
-    // 2. Move: remove from zone_00, add to target zone
-    const movedFile = await moveDriveFile(token, fileId, inboxFolderId, toFolderId);
-    if (!(movedFile.parents || []).includes(toFolderId)) {
+    // Move from LINE Inbox, or move an existing zone-02 file into its TR bundle.
+    const movedFile = await moveDriveFile(token, fileId, sourceFolderId, targetFolderId);
+    if (!(movedFile.parents || []).includes(targetFolderId)) {
       throw new Error(`Google Drive ยังไม่ยืนยันว่าไฟล์อยู่ใน ${targetZone}`);
     }
 
@@ -6023,6 +6059,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       fileId,
       newFileName: renamedData.name,
       targetZone,
+      targetFolderId,
       message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ`
     });
 
