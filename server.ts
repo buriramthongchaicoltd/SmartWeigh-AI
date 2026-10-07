@@ -97,9 +97,24 @@ function hashSessionToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function isMissingAuthSessionsTable(error: unknown): boolean {
-  if (!error || typeof error !== 'object' || !('code' in error)) return false;
-  return error.code === '42P01' || error.code === 'PGRST205';
+function getSessionConfigKey(token: string): string {
+  return `auth_session:${hashSessionToken(token)}`;
+}
+
+async function getPersistedAuthSessionRows(client: NonNullable<ReturnType<typeof getSupabaseClient>>) {
+  const rows: { config_key: string; config_value: Record<string, unknown> }[] = [];
+  const pageSize = 500;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await client.from('system_config')
+      .select('config_key,config_value')
+      .like('config_key', 'auth_session:%')
+      .order('config_key', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw error;
+    const page = data || [];
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
 }
 
 async function getAuthenticatedSession(req: Request) {
@@ -108,14 +123,21 @@ async function getAuthenticatedSession(req: Request) {
   const client = getSupabaseClient();
   if (!client) throw new Error('ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับตรวจสอบ session');
 
-  const { data, error } = await client
-    .from('auth_sessions')
-    .select('user_id,expires_at,first_password_change_pending')
-    .eq('token_hash', hashSessionToken(token))
-    .gt('expires_at', new Date().toISOString())
+  const { data, error } = await client.from('system_config')
+    .select('config_value')
+    .eq('config_key', getSessionConfigKey(token))
     .maybeSingle();
   if (error) throw error;
-  if (!data) {
+  const sessionData = data?.config_value;
+  const expiresAt = typeof sessionData?.expiresAt === 'string'
+    ? new Date(sessionData.expiresAt).getTime()
+    : Number.NaN;
+  if (
+    !sessionData ||
+    typeof sessionData.userId !== 'string' ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now()
+  ) {
     authSessions.delete(token);
     return null;
   }
@@ -123,13 +145,13 @@ async function getAuthenticatedSession(req: Request) {
   const { data: userRow, error: userError } = await client
     .from('app_users')
     .select('*')
-    .eq('id', data.user_id)
+    .eq('id', sessionData.userId)
     .maybeSingle();
   if (userError) throw userError;
   if (!userRow || userRow.status === 'suspended') {
-    const { error: revokeError } = await client.from('auth_sessions')
+    const { error: revokeError } = await client.from('system_config')
       .delete()
-      .eq('token_hash', hashSessionToken(token));
+      .eq('config_key', getSessionConfigKey(token));
     if (revokeError) throw revokeError;
     authSessions.delete(token);
     return null;
@@ -137,8 +159,8 @@ async function getAuthenticatedSession(req: Request) {
 
   const session: AuthSession = {
     user: publicAppUser(userRow),
-    expiresAt: new Date(data.expires_at).getTime(),
-    firstPasswordChangePending: Boolean(data.first_password_change_pending)
+    expiresAt,
+    firstPasswordChangePending: Boolean(sessionData.firstPasswordChangePending)
   };
   authSessions.set(token, session);
   return { token, session };
@@ -184,11 +206,20 @@ function verifyPassword(password: string, stored: string): { valid: boolean; nee
   };
 }
 
-async function invalidateUserSessions(userId: string) {
+async function invalidateUserSessions(userId: string, exceptToken?: string) {
   const client = getSupabaseClient();
   if (!client) throw new Error('ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับเพิกถอน session');
-  const { error } = await client.from('auth_sessions').delete().eq('user_id', userId);
-  if (error) throw error;
+  const data = await getPersistedAuthSessionRows(client);
+  const exceptKey = exceptToken ? getSessionConfigKey(exceptToken) : null;
+  const keys = (data || [])
+    .filter(row => row.config_value?.userId === userId && row.config_key !== exceptKey)
+    .map(row => row.config_key);
+  if (keys.length > 0) {
+    const { error: deleteError } = await client.from('system_config')
+      .delete()
+      .in('config_key', keys);
+    if (deleteError) throw deleteError;
+  }
   for (const [token, session] of authSessions) {
     if (session.user.id === userId) authSessions.delete(token);
   }
@@ -283,12 +314,15 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
       expiresAt: now + AUTH_SESSION_TTL_MS,
       firstPasswordChangePending
     };
-    const { error: sessionError } = await client.from('auth_sessions').insert({
-      token_hash: hashSessionToken(token),
-      user_id: user.id,
-      expires_at: new Date(session.expiresAt).toISOString(),
-      first_password_change_pending: firstPasswordChangePending
-    });
+    const { error: sessionError } = await client.from('system_config').upsert({
+      config_key: getSessionConfigKey(token),
+      config_value: {
+        userId: user.id,
+        expiresAt: new Date(session.expiresAt).toISOString(),
+        firstPasswordChangePending
+      },
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' });
     if (sessionError) throw sessionError;
     authSessions.set(token, session);
     loginRateLimits.delete(ip);
@@ -296,9 +330,6 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
     return res.json({ success: true, user, mustChangePassword: firstPasswordChangePending });
   } catch (err: any) {
     console.error('[Auth] Login failed:', err?.message || err);
-    if (isMissingAuthSessionsTable(err)) {
-      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนเข้าสู่ระบบ' });
-    }
     return res.status(500).json({ success: false, error: 'เข้าสู่ระบบไม่สำเร็จเนื่องจากระบบยืนยันตัวตนขัดข้อง' });
   }
 });
@@ -316,10 +347,7 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
       : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
   } catch (error) {
     console.error('[Auth] Session lookup failed:', error);
-    const message = isMissingAuthSessionsTable(error)
-      ? 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนเข้าสู่ระบบ'
-      : 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง';
-    return res.status(503).json({ success: false, error: message });
+    return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
   }
 });
 
@@ -328,7 +356,8 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
   if (token) {
     const client = getSupabaseClient();
     if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับออกจากระบบ' });
-    const { error } = await client.from('auth_sessions').delete().eq('token_hash', hashSessionToken(token));
+    const { error } = await client.from('system_config').delete()
+      .eq('config_key', getSessionConfigKey(token));
     if (error) {
       console.error('[Auth] Session revocation failed:', error);
       return res.status(503).json({ success: false, error: 'เพิกถอน session ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' });
@@ -354,10 +383,7 @@ app.use('/api', async (req: Request, res: Response, next) => {
     user = authenticated?.session.user || null;
   } catch (error) {
     console.error('[Auth] Protected API session lookup failed:', error);
-    const message = isMissingAuthSessionsTable(error)
-      ? 'ฐานข้อมูลยังไม่มีตาราง auth_sessions กรุณารัน DDL รุ่นล่าสุดก่อนใช้งาน'
-      : 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง';
-    return res.status(503).json({ success: false, error: message });
+    return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
   }
   if (!user) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
 
@@ -421,9 +447,15 @@ app.post('/api/auth/password/skip-first-change', async (req: Request, res: Respo
   if (!authenticated) return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
   const client = getSupabaseClient();
   if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งาน' });
-  const { error } = await client.from('auth_sessions')
-    .update({ first_password_change_pending: false })
-    .eq('token_hash', hashSessionToken(authenticated.token));
+  const { error } = await client.from('system_config').upsert({
+    config_key: getSessionConfigKey(authenticated.token),
+    config_value: {
+      userId: authenticated.session.user.id,
+      expiresAt: new Date(authenticated.session.expiresAt).toISOString(),
+      firstPasswordChangePending: false
+    },
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'config_key' });
   if (error) {
     console.error('[Auth] Could not persist first-password-change choice:', error);
     return res.status(503).json({ success: false, error: 'บันทึกสถานะ session ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' });
@@ -493,15 +525,16 @@ app.post('/api/auth/password/change', async (req: Request, res: Response) => {
       return res.status(409).json({ success: false, error: 'รหัสผ่านบัญชีเปลี่ยนไปแล้ว กรุณาเข้าสู่ระบบใหม่' });
     }
 
-    const currentTokenHash = hashSessionToken(authenticated.token);
-    const { error: revokeError } = await client.from('auth_sessions')
-      .delete()
-      .eq('user_id', account.id)
-      .neq('token_hash', currentTokenHash);
-    if (revokeError) throw revokeError;
-    const { error: refreshSessionError } = await client.from('auth_sessions')
-      .update({ first_password_change_pending: false })
-      .eq('token_hash', currentTokenHash);
+    await invalidateUserSessions(account.id, authenticated.token);
+    const { error: refreshSessionError } = await client.from('system_config').upsert({
+      config_key: getSessionConfigKey(authenticated.token),
+      config_value: {
+        userId: account.id,
+        expiresAt: new Date(authenticated.session.expiresAt).toISOString(),
+        firstPasswordChangePending: false
+      },
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' });
     if (refreshSessionError) throw refreshSessionError;
     for (const [token, session] of authSessions) {
       if (session.user.id === account.id && token !== authenticated.token) authSessions.delete(token);
@@ -578,10 +611,17 @@ setInterval(() => {
   if (client) {
     void (async () => {
       try {
-        const { error } = await client.from('auth_sessions')
-          .delete()
-          .lt('expires_at', new Date(now).toISOString());
-        if (error) console.error('[Auth] Failed to purge expired sessions:', error);
+        const data = await getPersistedAuthSessionRows(client);
+        const expiredKeys = data
+          .filter(row => typeof row.config_value?.expiresAt === 'string' &&
+            new Date(row.config_value.expiresAt).getTime() <= now)
+          .map(row => row.config_key);
+        if (expiredKeys.length > 0) {
+          const { error: deleteError } = await client.from('system_config')
+            .delete()
+            .in('config_key', expiredKeys);
+          if (deleteError) console.error('[Auth] Failed to purge expired sessions:', deleteError);
+        }
       } catch (error) {
         console.error('[Auth] Failed to purge expired sessions:', error);
       }
@@ -719,7 +759,6 @@ const startupStatus: {
     stores: false,
     projects: false,
     app_users: false,
-    auth_sessions: false,
     system_config: false,
     billing_notes: false
   },
@@ -3574,7 +3613,9 @@ async function restoreConfigsFromSupabase() {
   try {
     const client = getSupabaseClient();
     if (!client) return;
-    const { data, error } = await client.from('system_config').select('*');
+    const { data, error } = await client.from('system_config')
+      .select('*')
+      .in('config_key', ['gemini_config', 'drive_shared_secret', 'drive_config', 'line_bot_config']);
     if (error || !Array.isArray(data)) return;
 
     for (const row of data) {
@@ -3728,7 +3769,6 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
     stores: false,
     projects: false,
     app_users: false,
-    auth_sessions: false,
     system_config: false,
     billing_notes: false,
     contractor_charge_notes: false,
@@ -3808,11 +3848,7 @@ app.post('/api/database/test', async (req: Request, res: Response) => {
 
     const checkTable = async (tableName: string) => {
       try {
-        const primaryKey = tableName === 'system_config'
-          ? 'config_key'
-          : tableName === 'auth_sessions'
-            ? 'token_hash'
-            : 'id';
+        const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
         const { count, error } = await client.from(tableName).select(primaryKey, { count: 'exact', head: true });
         if (!error) {
           tablesCounts[tableName] = count ?? 0;
@@ -4182,7 +4218,7 @@ app.all('/api/database/sync-all', async (req: Request, res: Response) => {
       client.from('billing_notes').select('*').order('created_at', { ascending: false }),
       client.from('line_inbox').select(LINE_INBOX_COLUMNS).order('received_at', { ascending: false }).limit(500),
       client.from('app_users').select('id,username,full_name,department,phone,role,status,created_at').order('created_at', { ascending: true }),
-      client.from('system_config').select('*')
+      client.from('system_config').select('*').eq('config_key', 'system_settings')
     ]);
 
     // Check and log errors for each table (e.g. RLS blocking, missing column)
@@ -6814,11 +6850,7 @@ async function testStartupDatabase() {
   }
 
   await Promise.all(Object.keys(tables).map(async tableName => {
-    const primaryKey = tableName === 'system_config'
-      ? 'config_key'
-      : tableName === 'auth_sessions'
-        ? 'token_hash'
-        : 'id';
+    const primaryKey = tableName === 'system_config' ? 'config_key' : 'id';
     const { count, error } = await client
       .from(tableName)
       .select(primaryKey, { count: 'exact', head: true });
