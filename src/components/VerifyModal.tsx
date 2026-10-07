@@ -139,6 +139,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const trLookupGeneration = useRef(0);
   const zoneRescanGeneration = useRef(0);
   const isExistingOrder = Boolean(orderData?.id && existingOrders.some(order => order.id === orderData.id));
+  const requiresTrNumber = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
 
   useEffect(() => {
     zoneRescanGeneration.current += 1;
@@ -238,6 +239,14 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       return;
     }
 
+    if (!requiresTrNumber) {
+      setIsLoadingTrNumber(false);
+      setTrLookupFailed(false);
+      setSaveError('');
+      setForm(current => ({ ...current, col1: '' }));
+      return;
+    }
+
     const generation = ++trLookupGeneration.current;
     const controller = new AbortController();
     setIsLoadingTrNumber(true);
@@ -270,7 +279,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       controller.abort();
       if (generation === trLookupGeneration.current) trLookupGeneration.current += 1;
     };
-  }, [isOpen, orderData, isExistingOrder, trPrefix, billImage, trRetryCount]);
+  }, [isOpen, orderData, isExistingOrder, requiresTrNumber, trPrefix, billImage, trRetryCount]);
 
   // Sync billImage into currentImage when it arrives async (e.g. fetched from LINE API after modal opens)
   useEffect(() => {
@@ -829,7 +838,11 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       documentTitle: form.documentTitle || overrideExistingOrder?.documentTitle,
       docTypeEvidence: form.docTypeEvidence || overrideExistingOrder?.docTypeEvidence,
       docTypeConfidence: form.docTypeConfidence ?? overrideExistingOrder?.docTypeConfidence,
-      col1: overrideExistingOrder ? overrideExistingOrder.col1 : (form.col1 || '').trim(),
+      col1: overrideExistingOrder
+        ? overrideExistingOrder.col1
+        : requiresTrNumber
+          ? (form.col1 || '').trim()
+          : '',
       col2: (form.col2 || '').trim(),
       col3: form.col3 || (selectedDocType === 'concrete' ? 'คอนกรีต' : 'ทั่วไป'),
       col4: form.col4 || '',
@@ -931,7 +944,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     e.preventDefault();
     if (isSaving) return;
     if (isLoadingTrNumber) return;
-    if (!form.col1?.trim()) {
+    if (requiresTrNumber && !form.col1?.trim()) {
       setSaveError(currentError =>
         trLookupFailed && currentError
           ? currentError
@@ -960,16 +973,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     setIsSaving(true);
     setSaveError('');
     try {
-      const trCheckParams = new URLSearchParams({ trNumber: form.col1.trim() });
-      if (isExistingOrder && form.id) trCheckParams.set('excludeId', form.id);
-      const trCheckResponse = await fetch(`/api/orders/check-tr-number?${trCheckParams.toString()}`);
-      const trCheckResult = await trCheckResponse.json();
-      if (!trCheckResponse.ok || !trCheckResult.success) {
-        throw new Error(trCheckResult.error || `ตรวจเลข TR ไม่สำเร็จ (HTTP ${trCheckResponse.status})`);
-      }
-      if (trCheckResult.isDuplicate) {
-        setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นในฐานข้อมูลแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
-        return;
+      if (requiresTrNumber) {
+        const trCheckParams = new URLSearchParams({ trNumber: form.col1?.trim() || '' });
+        if (isExistingOrder && form.id) trCheckParams.set('excludeId', form.id);
+        const trCheckResponse = await fetch(`/api/orders/check-tr-number?${trCheckParams.toString()}`);
+        const trCheckResult = await trCheckResponse.json();
+        if (!trCheckResponse.ok || !trCheckResult.success) {
+          throw new Error(trCheckResult.error || `ตรวจเลข TR ไม่สำเร็จ (HTTP ${trCheckResponse.status})`);
+        }
+        if (trCheckResult.isDuplicate) {
+          setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นในฐานข้อมูลแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
+          return;
+        }
       }
 
       if (await onSaveOrder(finalizedOrder, storeToSave, true)) {
