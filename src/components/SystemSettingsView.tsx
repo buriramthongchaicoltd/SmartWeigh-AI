@@ -2956,6 +2956,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
                     className="w-full px-3 py-2 rounded-xl border border-emerald-300 font-mono text-xs text-slate-900 focus:outline-none focus:border-emerald-600 bg-white"
                   />
+                  <p className="text-[11px] text-emerald-900">
+                    หากพบ HTTP 404 ให้เปิด Apps Script → Deploy → Manage deployments แล้วแก้ Web App เป็น New version หรือคัดลอก URL ของ deployment ใหม่มาวางช่องนี้ (ต้องลงท้ายด้วย <code>/exec</code>) จากนั้นบันทึกและกดทดสอบ Google Drive
+                  </p>
                   <div className="rounded-lg bg-white/80 border border-emerald-200 p-3 space-y-2">
                     <p className="text-[11px] text-emerald-900 font-semibold">
                       ไม่ต้องเปิด PowerShell หรือไปตั้งรหัสใน Render ครับ เว็บจะสร้างรหัสและเก็บไว้ให้เอง

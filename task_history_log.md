@@ -4,6 +4,16 @@
 
 ---
 
+## [2026-10-08] แจ้งแนวทางแก้ GAS Web App ตอบ HTTP 404
+
+### การเปลี่ยนแปลง
+- ปรับ error เมื่อ Google Apps Script ตอบ HTTP 404 ให้ระบุว่า endpoint/deployment ไม่พบ และแนะนำให้ตรวจ URL `/exec` จาก deployment ที่ active
+- เพิ่มคำแนะนำใน Settings → Google Drive สำหรับอัปเดต deployment เป็น New version หรือคัดลอก URL ของ deployment ใหม่แล้วบันทึกและทดสอบ
+- เพิ่ม troubleshooting note ใน Handover แยก HTTP 404 ของ Web App ออกจากข้อผิดพลาดหาไฟล์/โฟลเดอร์ใน Drive
+
+### การตรวจสอบ
+- รัน `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check`
+
 ## [2026-10-08] จัดคิวกำหนดเลข TR แบบ atomic ที่ฐานข้อมูล
 
 ### การเปลี่ยนแปลง

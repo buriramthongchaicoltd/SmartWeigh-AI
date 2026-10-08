@@ -4914,6 +4914,11 @@ async function callGasDriveApi(
       : AbortSignal.timeout(45000)
   });
   if (!resp.ok) {
+    if (resp.status === 404) {
+      throw new Error(
+        'ไม่พบ Google Apps Script Web App deployment (HTTP 404) กรุณาตรวจ URL ใน Settings → Google Drive ให้เป็น URL ของ deployment ที่ยังใช้งานอยู่และลงท้ายด้วย /exec จากนั้นบันทึกและกดทดสอบ Google Drive'
+      );
+    }
     throw new Error(`Google Apps Script ตอบกลับด้วยรหัส HTTP ${resp.status}`);
   }
   const text = await resp.text();
