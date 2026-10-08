@@ -627,6 +627,7 @@ export default function App() {
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
   const dbSyncGenerationRef = React.useRef<Record<string, number>>({});
   const dbSyncInFlightRef = React.useRef<Record<string, Set<Promise<void>> | undefined>>({});
+  const protectedPreparedOrderIdsRef = React.useRef(new Set<string>());
   const lineInboxSyncRevisionRef = React.useRef(0);
   const lineInboxDeleteCountRef = React.useRef(0);
   const lineInboxVerifiedCleanupPendingRef = React.useRef(true);
@@ -640,10 +641,14 @@ export default function App() {
       const saveBatch = async (attempt: number): Promise<void> => {
         if ((dbSyncGenerationRef.current[table] || 0) !== generation) return;
         try {
+          const recordsToSync = table === 'orders'
+            ? records.filter(record => !protectedPreparedOrderIdsRef.current.has(String(record.id || '')))
+            : records;
+          if (recordsToSync.length === 0) return;
           const request = fetch('/api/database/save-batch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ table, records })
+            body: JSON.stringify({ table, records: recordsToSync })
           }).then(async response => {
             const result = await response.json();
             if (!response.ok || !result?.success) {
@@ -2208,7 +2213,8 @@ export default function App() {
     const order = { ...inputOrder };
     const persistVerifiedInboxItem = async (
       item: LineBillInboxItem,
-      errorPrefix: string
+      errorPrefix: string,
+      deferCompletion = false
     ): Promise<boolean> => {
       try {
         const response = await fetch('/api/database/save-record', {
@@ -2220,7 +2226,7 @@ export default function App() {
         if (!response.ok || !result?.success) {
           throw new Error(result?.error || `HTTP ${response.status}`);
         }
-        await removeVerifiedLineInboxItem(item.id);
+        if (!deferCompletion) await removeVerifiedLineInboxItem(item.id);
         return true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -2418,16 +2424,13 @@ export default function App() {
         ));
         return undefined;
       }
-      if (!order.lineInboxId) {
-        return 'ไม่มี LINE Inbox ID สำหรับยกเลิก reservation อย่างปลอดภัย; กรุณาแจ้งผู้ดูแลระบบ';
-      }
       try {
         const response = await fetch('/api/orders/cancel-prepared-do', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ...preparedDoReservation,
-            inboxId: order.lineInboxId,
+            inboxId: order.lineInboxId || '',
             docType: order.docType
           })
         });
@@ -2436,6 +2439,13 @@ export default function App() {
           throw new Error(result?.error || `HTTP ${response.status}`);
         }
         preparedDoReservation = undefined;
+        protectedPreparedOrderIdsRef.current.delete(order.id);
+        if (pairedWeighbridgeInboxItem) {
+          protectedPreparedOrderIdsRef.current.delete(
+            orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+            `line-wb-${pairedWeighbridgeInboxItem.id}`
+          );
+        }
         setOrders(previous => previous.filter(item =>
           item.id !== order.id &&
           (!pairedWeighbridgeInboxItem || item.lineInboxId !== pairedWeighbridgeInboxItem.id)
@@ -2463,6 +2473,13 @@ export default function App() {
         }
         order.col1 = result.trNumber;
         preparedDoReservation = { orderId: order.id, trNumber: result.trNumber };
+        protectedPreparedOrderIdsRef.current.add(order.id);
+        if (pairedWeighbridgeInboxItem) {
+          protectedPreparedOrderIdsRef.current.add(
+            orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+            `line-wb-${pairedWeighbridgeInboxItem.id}`
+          );
+        }
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
         showToast(`ยังไม่ได้ดำเนินการต่อ เพราะจัดคิวใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${reason}`, 'error');
@@ -2641,6 +2658,86 @@ export default function App() {
     }
 
     let autoMatchedNote = '';
+    const buildPairedWeighbridgeOrder = (deliveryOrder: OrderRecord): OrderRecord | undefined => {
+      if (!pairedWeighbridgeInboxItem) return undefined;
+      const ticketData = pairedWeighbridgeInboxItem.extractedData;
+      const ticketNumber = ticketData.col6?.trim() || '';
+      const ticketGross = Number(ticketData.col13) || 0;
+      const ticketTare = Number(ticketData.col14) || 0;
+      const ticketNet = Number(ticketData.col15) || Math.max(0, ticketGross - ticketTare);
+      const existingTicketOrder = orders.find(
+        existing => existing.lineInboxId === pairedWeighbridgeInboxItem.id
+      );
+      const pairedTicketFlags = new Set<string>(existingTicketOrder?.autoActionFlags || []);
+      pairedTicketFlags.add(`⚖️ ผู้ใช้จับคู่ตั๋วชั่งกับใบส่งของ ${deliveryOrder.col6}`);
+      return normalizeOrderWeights({
+        ...(existingTicketOrder || {}),
+        ...ticketData,
+        id: existingTicketOrder?.id || `line-wb-${pairedWeighbridgeInboxItem.id}`,
+        docType: 'weighbridge',
+        col1: '',
+        col2: deliveryOrder.col2,
+        col3: ticketData.col3 || 'งานหิน/ดิน/ทราย',
+        col4: ticketData.col4 || deliveryOrder.col4,
+        col5: ticketData.col5 || '',
+        col6: ticketNumber,
+        col7: ticketData.col7 || deliveryOrder.col7,
+        col8: ticketData.col8 || deliveryOrder.col8,
+        col9: ticketData.col9 || deliveryOrder.col9,
+        col10: ticketData.col10 || '',
+        col11: ticketData.col11 || deliveryOrder.col11,
+        col12: ticketData.col12 || '',
+        col13: ticketGross,
+        col14: ticketTare,
+        col15: ticketNet,
+        col16: '',
+        col17: '',
+        col18: 0,
+        col19: 0,
+        col20: 0,
+        col21: 0,
+        col22: Number(ticketData.col22) || 0,
+        col23: ticketData.col23 || 'ตัน',
+        col24: Number(ticketData.col24) || 0,
+        col25: Number(ticketData.col25) || 0,
+        col26: ticketData.col26 || '',
+        col27: Number(ticketData.col27) || 0,
+        col28: Number(ticketData.col28) || 0,
+        col29: Number(ticketData.col29) || 0,
+        col30: ticketData.col30 || '',
+        col31: Number(ticketData.col31) || 0,
+        col32: Number(ticketData.col32) || 0,
+        col33: Number(ticketData.col33) || 0,
+        col34: Number(ticketData.col34) || 0,
+        col35: Number(ticketData.col35) || 0,
+        col36: Number(ticketData.col36) || 0,
+        col37: ticketData.col37 || '',
+        col38: ticketData.col38 || '',
+        image: pairedWeighbridgeInboxItem.driveWebViewLink ||
+          `https://drive.google.com/uc?export=view&id=${encodeURIComponent(pairedWeighbridgeInboxItem.driveFileId || '')}`,
+        driveFileId: pairedWeighbridgeInboxItem.driveFileId,
+        driveFolderId: pairedWeighbridgeDriveFolderId || pairedWeighbridgeInboxItem.driveFolderId,
+        driveFileLocation: pairedWeighbridgeDriveLocation || 'zone_02',
+        lineInboxId: pairedWeighbridgeInboxItem.id,
+        lineMessageId: pairedWeighbridgeInboxItem.lineMessageId,
+        lineSenderName: pairedWeighbridgeInboxItem.lineSenderName,
+        lineGroupName: pairedWeighbridgeInboxItem.lineGroupName,
+        lineReceivedAt: pairedWeighbridgeInboxItem.receivedAt,
+        referenceDocNo: deliveryOrder.col6,
+        referenceSource: 'form_field',
+        linkedViaDocNo: deliveryOrder.col6,
+        matchedOriginDoId: deliveryOrder.id,
+        status: 'verified',
+        autoActionFlags: Array.from(pairedTicketFlags),
+        autoFlagsVerified: true,
+        autoFlagsVerifiedBy: currentUser.fullName,
+        autoFlagsVerifiedAt: new Date().toISOString(),
+        createdBy: currentUser.fullName,
+        createdAt: existingTicketOrder?.createdAt || new Date().toISOString(),
+        updatedBy: currentUser.fullName
+      });
+    };
+    const pairedOrderForConfirm = buildPairedWeighbridgeOrder(order);
 
     // Zero-Junk Cleanup: Detect if image was replaced or deleted, and trash the old Google Drive file
     if (isExistingRecord) {
@@ -2670,85 +2767,7 @@ export default function App() {
         createdBy: order.createdBy || currentUser.fullName,
         updatedBy: currentUser.fullName
       });
-      let pairedWeighbridgeOrder: OrderRecord | undefined;
-      if (pairedWeighbridgeInboxItem) {
-        const ticketData = pairedWeighbridgeInboxItem.extractedData;
-        const ticketNumber = ticketData.col6?.trim() || '';
-        const ticketGross = Number(ticketData.col13) || 0;
-        const ticketTare = Number(ticketData.col14) || 0;
-        const ticketNet = Number(ticketData.col15) || Math.max(0, ticketGross - ticketTare);
-        const existingTicketOrder = workingList.find(
-          existing => existing.lineInboxId === pairedWeighbridgeInboxItem!.id
-        );
-        const pairedTicketFlags = new Set<string>(existingTicketOrder?.autoActionFlags || []);
-        pairedTicketFlags.add(`⚖️ ผู้ใช้จับคู่ตั๋วชั่งกับใบส่งของ ${orderToSave.col6}`);
-        pairedWeighbridgeOrder = normalizeOrderWeights({
-          ...(existingTicketOrder || {}),
-          ...ticketData,
-          id: existingTicketOrder?.id || `line-wb-${pairedWeighbridgeInboxItem.id}`,
-          docType: 'weighbridge',
-          col1: '',
-          col2: orderToSave.col2,
-          col3: ticketData.col3 || 'งานหิน/ดิน/ทราย',
-          col4: ticketData.col4 || orderToSave.col4,
-          col5: ticketData.col5 || '',
-          col6: ticketNumber,
-          col7: ticketData.col7 || orderToSave.col7,
-          col8: ticketData.col8 || orderToSave.col8,
-          col9: ticketData.col9 || orderToSave.col9,
-          col10: ticketData.col10 || '',
-          col11: ticketData.col11 || orderToSave.col11,
-          col12: ticketData.col12 || '',
-          col13: ticketGross,
-          col14: ticketTare,
-          col15: ticketNet,
-          col16: '',
-          col17: '',
-          col18: 0,
-          col19: 0,
-          col20: 0,
-          col21: 0,
-          col22: Number(ticketData.col22) || 0,
-          col23: ticketData.col23 || 'ตัน',
-          col24: Number(ticketData.col24) || 0,
-          col25: Number(ticketData.col25) || 0,
-          col26: ticketData.col26 || '',
-          col27: Number(ticketData.col27) || 0,
-          col28: Number(ticketData.col28) || 0,
-          col29: Number(ticketData.col29) || 0,
-          col30: ticketData.col30 || '',
-          col31: Number(ticketData.col31) || 0,
-          col32: Number(ticketData.col32) || 0,
-          col33: Number(ticketData.col33) || 0,
-          col34: Number(ticketData.col34) || 0,
-          col35: Number(ticketData.col35) || 0,
-          col36: Number(ticketData.col36) || 0,
-          col37: ticketData.col37 || '',
-          col38: ticketData.col38 || '',
-          image: pairedWeighbridgeInboxItem.driveWebViewLink ||
-            `https://drive.google.com/uc?export=view&id=${encodeURIComponent(pairedWeighbridgeInboxItem.driveFileId || '')}`,
-          driveFileId: pairedWeighbridgeInboxItem.driveFileId,
-          driveFolderId: pairedWeighbridgeDriveFolderId || pairedWeighbridgeInboxItem.driveFolderId,
-          driveFileLocation: pairedWeighbridgeDriveLocation || 'zone_02',
-          lineInboxId: pairedWeighbridgeInboxItem.id,
-          lineMessageId: pairedWeighbridgeInboxItem.lineMessageId,
-          lineSenderName: pairedWeighbridgeInboxItem.lineSenderName,
-          lineGroupName: pairedWeighbridgeInboxItem.lineGroupName,
-          lineReceivedAt: pairedWeighbridgeInboxItem.receivedAt,
-          referenceDocNo: orderToSave.col6,
-          referenceSource: 'form_field',
-          linkedViaDocNo: orderToSave.col6,
-          matchedOriginDoId: orderToSave.id,
-          status: 'verified',
-          autoActionFlags: Array.from(pairedTicketFlags),
-          autoFlagsVerified: true,
-          autoFlagsVerifiedBy: currentUser.fullName,
-          autoFlagsVerifiedAt: new Date().toISOString(),
-          createdBy: currentUser.fullName,
-          createdAt: existingTicketOrder?.createdAt || new Date().toISOString(),
-          updatedBy: currentUser.fullName
-        });
-      }
+      const pairedWeighbridgeOrder = pairedOrderForConfirm;
 
       // =========================================================================
       // STRICT REFERENCE-NUMBER-ONLY AUTO-MATCHING (ZONES 1-4) + VERIFICATION FLAGS
@@ -3071,7 +3090,11 @@ export default function App() {
             ...order
           }
         };
-        if (!await persistVerifiedInboxItem(verifiedInboxItem, 'ยืนยันสถานะรายการในกล่องพัก LINE ไม่สำเร็จ')) {
+        if (!await persistVerifiedInboxItem(
+          verifiedInboxItem,
+          'ยืนยันสถานะรายการในกล่องพัก LINE ไม่สำเร็จ',
+          Boolean(preparedDoReservation)
+        )) {
           const rollbackWarning = await rollbackPreparedDoReservation();
           if (rollbackWarning) showToast(rollbackWarning, 'error');
           return false;
@@ -3099,11 +3122,114 @@ export default function App() {
             matchedOriginDoId: order.id
           }
         };
-        if (!await persistVerifiedInboxItem(verifiedInboxItem, 'ยืนยันสถานะตั๋วชั่งต้นทางในกล่องพัก LINE ไม่สำเร็จ')) {
+        if (!await persistVerifiedInboxItem(
+          verifiedInboxItem,
+          'ยืนยันสถานะตั๋วชั่งต้นทางในกล่องพัก LINE ไม่สำเร็จ',
+          Boolean(preparedDoReservation)
+        )) {
           const rollbackWarning = await rollbackPreparedDoReservation();
           if (rollbackWarning) showToast(rollbackWarning, 'error');
           return false;
         }
+      }
+    }
+    if (preparedDoReservation) {
+      const confirmPreparedDo = async () => {
+        const response = await fetch('/api/orders/confirm-prepared-do', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...preparedDoReservation,
+            inboxId: order.lineInboxId || '',
+            pairedOrder: pairedOrderForConfirm
+          })
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.success || result.status !== 'verified') {
+          throw new Error(result?.error || `ยืนยัน DO ในฐานข้อมูลไม่สำเร็จ (HTTP ${response.status})`);
+        }
+      };
+      let confirmationError: unknown;
+      try {
+        await confirmPreparedDo();
+      } catch (error) {
+        confirmationError = error;
+      }
+      if (confirmationError) {
+        let retryConfirmationError: unknown;
+        try {
+          await confirmPreparedDo();
+        } catch (error) {
+          retryConfirmationError = error;
+        }
+        if (retryConfirmationError) {
+          let reservationStatus: string | undefined;
+          let statusCheckError: unknown;
+          try {
+            const statusResponse = await fetch('/api/orders/prepared-do-status', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...preparedDoReservation,
+                inboxId: order.lineInboxId || ''
+              })
+            });
+            const statusResult = await statusResponse.json();
+            if (statusResponse.status === 404) {
+              reservationStatus = 'not_found';
+            } else if (!statusResponse.ok || !statusResult?.success) {
+              throw new Error(statusResult?.error || `ตรวจสถานะ reservation ไม่สำเร็จ (HTTP ${statusResponse.status})`);
+            } else {
+              reservationStatus = statusResult.status;
+            }
+          } catch (error) {
+            statusCheckError = error;
+          }
+
+          if (reservationStatus === 'verified') {
+            retryConfirmationError = undefined;
+          } else if (reservationStatus !== 'pending' && reservationStatus !== 'not_found') {
+            const reason = statusCheckError instanceof Error
+              ? statusCheckError.message
+              : retryConfirmationError instanceof Error
+                ? retryConfirmationError.message
+                : 'ไม่ทราบสถานะ reservation';
+            showToast(
+              `ผลยืนยัน DO ยังไม่ชัดเจน; ไม่ได้คืนหรือยกเลิกรายการอัตโนมัติเพื่อป้องกันข้อมูลขัดแย้ง: ${reason} กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง`,
+              'error'
+            );
+            return false;
+          }
+        }
+        if (retryConfirmationError) {
+          const rollbackWarning = await rollbackPreparedDoReservation();
+          const firstReason = confirmationError instanceof Error
+            ? confirmationError.message
+            : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+          const retryReason = retryConfirmationError instanceof Error
+            ? retryConfirmationError.message
+            : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+          showToast(
+            `ยังไม่ยืนยันใบส่งของในฐานข้อมูล: ${firstReason}; ตรวจซ้ำอีกครั้งไม่สำเร็จ: ${retryReason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
+            'error'
+          );
+          return false;
+        }
+      }
+      protectedPreparedOrderIdsRef.current.delete(order.id);
+      if (pairedWeighbridgeInboxItem) {
+        protectedPreparedOrderIdsRef.current.delete(
+          orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+          `line-wb-${pairedWeighbridgeInboxItem.id}`
+        );
+      }
+      preparedDoReservation = undefined;
+      setOrders(previous => previous.map(item =>
+        item.id === order.id ? { ...item, status: 'verified' } : item
+      ));
+      if (order.lineInboxId) await removeVerifiedLineInboxItem(order.lineInboxId);
+      if (pairedWeighbridgeInboxItem) {
+        await removeVerifiedLineInboxItem(pairedWeighbridgeInboxItem.id);
       }
     }
 

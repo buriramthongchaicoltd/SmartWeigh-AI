@@ -8,12 +8,16 @@
 
 ### การเปลี่ยนแปลง
 - เพิ่มคืนไฟล์ที่อาจย้ายแล้วจากโฟลเดอร์ชุด DO กลับ LINE Inbox ทั้ง Service Account และ Google Apps Script; ตรวจความสัมพันธ์ Inbox ID/Drive ID และ parent จริงก่อนย้าย พร้อมทำซ้ำได้เมื่อไฟล์กลับ zone 00 แล้ว.
-- คืนสถานะแถว LINE จาก snapshot ต้นทาง และยกเลิก reservation เฉพาะระเบียน `pending` ที่ตรง ID, TR, ประเภท DO และ LINE Inbox ID; รองรับ `delivery_order`, `concrete` และ `full_logistics`.
+- คืนสถานะแถว LINE จาก snapshot ต้นทาง และยกเลิก reservation เฉพาะระเบียน `pending` ที่ตรง ID, TR และประเภท DO; ตรวจ LINE Inbox ID เมื่อมี และรองรับเอกสาร DO ที่ไม่ได้มาจาก LINE.
+- เพิ่ม `/api/orders/confirm-prepared-do` ให้ตรวจ LINE Inbox และตำแหน่งไฟล์จริง; `confirm_prepared_do_order` บันทึกตั๋วชั่งต้นทางที่จับคู่และเปลี่ยน DO `pending` เป็น `verified` ใน transaction เดียวกัน; ระหว่างนั้น exclude IDs จาก autosave/batch และปล่อยกลับให้ sync หลัง commit เท่านั้น.
+- เมื่อคำตอบยืนยันหาย ให้ลอง RPC ซ้ำแบบ idempotent และตรวจสถานะ reservation ก่อนชดเชย; หากตรวจสถานะไม่ได้จะไม่ย้ายรูป/ยกเลิก TR โดยอาศัยการคาดเดา.
+- เพิ่ม duplicate guard ของ DO/ตั๋วชั่งใน SQL `prepare_do_order` ภายใต้ advisory lock เดียวกับการจอง TR เพื่อป้องกันคำขอพร้อมกันผ่าน duplicate check; อัปเดตทั้ง SQL definition ใน client และ DDL ใน Blueprint.
 - หากคืนไฟล์/คืนสถานะ/ยกเลิก reservation ไม่สำเร็จ ระบบแจ้งข้อผิดพลาดและไม่รายงานว่า rollback ครบ; อัปเดต Handover/Blueprint ตามข้อจำกัด transaction ข้ามบริการ.
 
 ### การตรวจสอบ
-- `npm.cmd run lint`, `npm.cmd run build`, `git diff --check` และ `node --check` สำหรับ Google Apps Script ผ่าน
-- ยังไม่ทดสอบกับ Supabase/Google Drive จริง; ต้อง deploy server/frontend และ GAS รุ่นล่าสุด แล้วทดสอบเคส move ล้มเหลว/restore ซ้ำกับบริการจริงก่อนเปิดใช้งาน.
+- `npm.cmd run lint`, `npm.cmd run build`, `git diff --check` และ `node --check` สำหรับ Google Apps Script ผ่านหลังแก้ flow และ RPC; SQL definitions ใน client/Blueprint ตรงกันหลัง normalize whitespace
+- ยังไม่ทดสอบกับ Supabase/Google Drive จริง และ SQL functions ยังไม่ได้รันกับ PostgreSQL instance
+- ต้องนำ SQL `prepare_do_order` และ `confirm_prepared_do_order` รุ่นนี้ไป deploy ที่ Supabase และ deploy GAS รุ่นล่าสุดก่อนทดสอบ end-to-end; source code push ไม่ได้ deploy DDL/GAS โดยอัตโนมัติ.
 
 ## [2026-10-08] ป้องกันการจอง TR ก่อนรูป LINE อยู่ใน Google Drive
 

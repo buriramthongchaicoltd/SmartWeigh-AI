@@ -37,6 +37,7 @@
 - สำหรับ PO ให้แยกชื่อผู้ขาย (Vendor) ออกจากผู้ซื้อ/บริษัทผู้ออกเอกสาร (Buyer/Issuer); ถ้าหลักฐานผู้ขายไม่ชัดให้เว้นชื่อผู้ขาย ไม่ใช้ชื่อบริษัทบนหัวกระดาษแทน
 - การผูก PO/DO/ตั๋วชั่งอาศัยเลขอ้างอิงตรงจากช่องเอกสารหรือหมายเหตุเท่านั้น ไม่ใช้ชื่อร้าน วันที่ รถ น้ำหนัก เลข TR ภายในระบบ หรือข้อมูลอื่นเป็นเกณฑ์จับคู่ ตัวตรวจยอมรับช่องว่างและ prefix ที่ไม่มี/ตรงกัน แต่คงตัวคั่น เลขศูนย์นำหน้า และปฏิเสธ prefix ประเภทเอกสารที่ระบุชัดแต่ขัดกัน
 - ระบบตรวจเอกสารซ้ำจากเมนูเอกสาร + เลขที่ + ชื่อร้าน โดยจัด `delivery_order`, `weighbridge`, `concrete` และ `full_logistics` อยู่ในเมนู DO; ตรวจ `purchase_order`, `dest_weighbridge` และ `tax_invoice` แยกตามเมนูของตน. ใช้ชื่อผู้ขายจาก `purchase_orders.supplier_name`. ตรวจฐานข้อมูลจริงก่อนตรวจรับและตรวจซ้ำที่ API ก่อนเขียน Order/PO. เมื่อพบ duplicate ระหว่างตรวจรับ LINE ให้เอารายการ LINE ปัจจุบันและรูปแนบออกจากคิว/ย้ายรูปไปถังขยะ แล้วต้องไม่สร้างเอกสารซ้ำ; หากขั้นตอนลบไม่สำเร็จให้คงรายการและไม่บันทึก. คำขอ API/batch ที่พบซ้ำถูกปฏิเสธด้วย HTTP 409
+- การยืนยัน DO ที่จอง TR ใช้ `confirm_prepared_do_order` ให้บันทึก DO เป็น `verified` และตั๋วชั่งต้นทางที่จับคู่ (ถ้ามี) ใน PostgreSQL transaction เดียวกัน หลัง API ตรวจ Inbox และตำแหน่งไฟล์ใน zone 02; RPC นี้ idempotent สำหรับการลองยืนยันซ้ำหลัง response ขาดหาย. หาก client ยืนยันผลไม่ได้ จะตรวจสถานะ reservation ก่อนชดเชย และไม่ย้ายรูป/ลบข้อมูลเมื่อสถานะปลายทางยังไม่ทราบ
 - การค้นหาผู้สมัครซ้ำต้องอ่านผลแบบแบ่งหน้าให้ครบ ไม่จำกัดแค่ 50 แถวแรก; จับคู่ใบกำกับจากเลขอ้างอิงอัตโนมัติเฉพาะเมื่อพบ DO ที่ตรงเพียงหนึ่งรายการและเป็นประเภท DO เท่านั้น. หากเลขอ้างอิงตรงหลาย DO ให้คงใบกำกับไว้รอผู้ใช้เลือกด้วยมือ ห้ามเลือกแถวแรกเอง
 - กล่องพัก LINE แสดงชื่อเมนูที่พบเลขซ้ำ พร้อมปุ่มลบรายการซ้ำที่ลบเฉพาะ LINE ปัจจุบัน (มีคำยืนยันและไม่ลบเอกสารเดิม). รายการรอตรวจสอบ, รอสแกนซ้ำ และบันทึกแล้วจะตรวจเลขซ้ำกับเอกสาร/รายการอื่นในฐานข้อมูลสำหรับแถวที่มองเห็น. แถวที่สร้างเอกสารของตัวเองจะถูกยกเว้นจากผลตรวจ; หากข้อมูลเลขที่/ร้านไม่ครบหรือ API ตรวจไม่ได้ ต้องแสดงสถานะที่ชัดเจน ไม่ตีความว่าไม่ซ้ำ
 - สำหรับ `orders` ที่มีเลข TR อยู่แล้ว batch upsert ต้องใช้ค่า `col1` แบบตรงตัวจากฐานข้อมูล ไม่เปรียบเทียบเฉพาะค่าหลัง trim; หาก client ส่งค่าต่าง เซิร์ฟเวอร์คืนค่า authoritative ไปซ่อม state โดยไม่แก้เลข TR ในฐานข้อมูล. รายการ DO ใหม่ยังสร้าง TR ผ่าน `prepare_do_order` เท่านั้น
@@ -93,6 +94,8 @@
 | :---: | :--- | :--- | :--- |
 | **1** | **บอท LINE รับรูปบิลใหม่จากกลุ่ม** | ตรวจ signature และบันทึกแถวสถานะ `queued` ใน `line_inbox` ก่อนตอบ HTTP 200; หลัง ACK จึงทำ OCR และอัปโหลดไฟล์ โดยบันทึก `drive_file_id` เมื่อ upload สำเร็จ. ตรวจบิลซ้ำด้วยประเภทเอกสาร + เลขที่เอกสาร + ชื่อร้าน; ถ้าตรงกันให้เก็บแถวไว้และบันทึกเหตุผลเพื่อแสดงป้าย “อาจซ้ำ” | พยายามอัปโหลดรูปเข้าโฟลเดอร์ `00_กล่องพักบิล_LINE_รอตรวจรับ`; หาก process หยุดหรือ upload ล้มเหลว แถวคิวยังคงอยู่เพื่อ manual/daily recovery |
 | **1.1** | **จัดสรรและตรวจเลข TR สำหรับ DO เท่านั้น** | เฉพาะ `delivery_order`, `concrete`, `full_logistics` เท่านั้นที่ใช้ TR. เมื่อตรวจรับจาก LINE ต้องมี `drive_file_id` ของรูปก่อนเรียก `prepare_do_order`; หากไม่มี ให้ซิงก์เฉพาะรายการและอ่านสถานะล่าสุดจากฐานข้อมูล หากซิงก์ไม่สำเร็จ/ยังไม่มี Drive ID ต้องหยุดก่อนสร้างระเบียน pending หรือจอง TR. หลังกรอกข้อมูลบังคับครบและผู้ใช้กดยืนยัน ระบบเรียก `prepare_do_order` ซึ่ง serialize คำขอด้วย transaction advisory lock, อ่าน prefix จาก `system_config.system_settings` และเลขสูงสุดจาก `orders.col1`, กำหนด TR และสร้าง/อัปเดตระเบียน pending ใน transaction เดียวกัน. การ retry ด้วย ID เดิมคืน TR เดิมและไม่เพิ่มเลข; หากขั้นย้าย/บันทึกล้มเหลว ระบบสั่งคืนไฟล์ที่เกี่ยวข้องเข้า LINE Inbox และตรวจตำแหน่งจริงก่อนยกเลิกเฉพาะ reservation `pending` ที่ตรง ID/TR/ประเภท/Inbox ID. หากคืนไฟล์หรือยกเลิกไม่สำเร็จให้คง reservation เพื่อ retry/ตรวจสอบ ห้ามรายงานว่ากลับจุดเริ่มต้นแล้ว. `pending` ไม่ใช่การตรวจรับสำเร็จ. ฐานข้อมูลกับ Google Drive ไม่สามารถ commit เป็น transaction เดียวกันได้. Trigger ใช้ transaction-local marker ที่ RPC ตั้งไว้เพื่อออกเลขเฉพาะคำขอที่ยืนยันแล้ว; autosave/batch ปกติไม่จองเลข และ trigger ปฏิเสธการแก้ `col1` ที่กำหนดไว้แล้วหรือค่าที่พยายามใส่โดยไม่ผ่าน RPC. UI แสดงเลขแบบอ่านอย่างเดียว. ต้องรัน DDL function/trigger รุ่นล่าสุดก่อนเปิดใช้. เอกสารประเภทอื่นไม่ขอเลข TR และใช้เลขเอกสารเฉพาะ เช่น ตั๋วชั่งต้นทาง `col6`, ตั๋วชั่งปลายทาง `col17`. การลบ `orders` หยุด timer และรอ batch upsert ที่เริ่มไปแล้วก่อนลบ เพื่อป้องกัน snapshot เก่าเขียนแถวกลับ | ไม่เกี่ยวข้อง |
+| **1.2** | **ยืนยัน DO และตรวจซ้ำแบบ serialize** | UI เก็บรายการ DO ที่มี reservation ออกจาก autosave/batch ชั่วคราว. หลังตรวจ Drive จริงและบันทึก LINE Inbox สำเร็จ `/api/orders/confirm-prepared-do` จึงเปลี่ยน row จาก `pending` เป็น `verified`; การล้มเหลวก่อน confirm เรียกคืนรูป, คืน LINE row และยกเลิก reservation แบบมี guard. `prepare_do_order` ตรวจ DO/ตั๋วชั่งซ้ำด้วยเลขเอกสารและชื่อร้านอีกครั้งภายใต้ advisory lock เดียวกับการสร้าง TR เพื่อ serialize การจองพร้อมกัน. ต้องนำ SQL `prepare_do_order` รุ่นนี้ไปอัปเดตฐานข้อมูลก่อนเปิดใช้; การ push source code ไม่ได้ deploy DDL ให้ Supabase อัตโนมัติ | ตรวจตำแหน่ง Drive จริงก่อน commit; rollback ย้ายรูปกลับ zone 00 ก่อนลบ pending |
+
 | **2** | **ตรวจรับหรือลบรายการซ้ำในกล่องพักบิล LINE** | ก่อนตรวจรับต้องตรวจฐานข้อมูลซ้ำด้วยประเภทเอกสาร + เลขเอกสาร + ชื่อร้าน ทั้งใน `line_inbox` และเอกสารที่บันทึกแล้วใน `orders`/`purchase_orders`. หากพบว่ารายการ LINE ปัจจุบันซ้ำ ระบบไม่สร้างเอกสาร แต่เรียกขั้นตอนลบรายการปัจจุบันและไฟล์แนบออกจากคิว; จะรายงานว่าดำเนินการสำเร็จต่อเมื่อย้ายรูปไปถังขยะและลบ row สำเร็จเท่านั้น. ถ้าลบไม่ได้ ระบบคงรายการไว้และไม่บันทึกเอกสาร. API ตรวจซ้ำอีกครั้งก่อนสร้าง DO หรือบันทึก Order/PO; batch เขียนข้อมูลใหม่ก็ตรวจซ้ำก่อน upsert และคืน HTTP 409. คำขอที่ส่งตรงหรือกดยกเลิกข้อความใดๆ ไม่สามารถข้ามการบล็อกได้ | เมื่อยืนยัน DO ให้สร้าง/ใช้ `<TR>_DO-<col6>` ใน zone 02 และย้ายรูป DO ไปไว้ที่นั่น; PO ย้ายเข้า zone 01; ตั๋วปลายทางเข้า zone 03; ใบกำกับเข้า zone 04; ตั๋วต้นทางที่ยังไม่จับคู่เข้ารอจับคู่ใน zone 02. ย้ายตั๋ว/สร้างทางลัดใบกำกับเข้าโฟลเดอร์ TR เฉพาะหลังยืนยันการจับคู่; PO ไม่ย้ายจาก zone 01 |
 | **2.1** | **จัดชุดตั๋วชั่งต้นทางที่แนบกับ DO จาก LINE ก่อนตรวจรับ** | เมื่อมีตั๋วชั่งต้นทางรอตรวจ ผู้ใช้กด “จัดชุด/ตรวจรับ” ที่แถว DO ในกล่องพัก LINE; หน้าต่างจัดชุดแสดงภาพ DO และเปิดภาพตั๋วแต่ละใบให้เทียบ ก่อนให้เลือกตั๋วที่จะเข้าชุดเดียวกัน หรือยืนยันชัดเจนว่าไม่มีตั๋วของ DO นี้ในรายการรอตรวจ. ระบบไม่เดาคู่จากชื่อร้าน/เวลา. เมื่อเลือกตั๋ว ระบบเปิด VerifyModal ของ DO พร้อมข้อมูลคู่ที่เลือก; เมื่อยืนยันแล้วบันทึกตั๋วชั่งเป็น `orders` แยกและผูกด้วย `orders.matched_origin_do_id`, ไม่สร้าง DO แถวซ้ำและไม่คัดลอก TR ลงเลขเอกสารตั๋วชั่ง. ค่าปริมาณ/สินค้าตามใบส่งของคงเดิม; ค่า Gross/Tare/Net ใน DO คงเดิมถ้ามี และใช้ค่าตั๋วชั่งเติมเฉพาะช่องน้ำหนักที่ว่าง. ตั๋วชั่งปลายทาง (`dest_weighbridge`) ไม่ใช่ผู้สมัครสำหรับชุดนี้และยังดำเนินการตาม flow โซน 03 แยกต่างหาก | รูป DO และตั๋วชั่งที่จับคู่ย้ายเข้าชุดโฟลเดอร์เดียวกัน `<TR>_DO-<DO>` ในโซน 02; ต้นฉบับและระเบียนของตั๋วยังคงแยกกันเพื่อ audit แต่รายการตั๋วไม่แสดงเป็น DO แถวซ้ำในตารางหลัก |
 | **2.2** | **แก้ประเภทและจับคู่ตั๋วชั่งต้นทางย้อนหลัง** | สำหรับระเบียน `orders` ที่ตรวจรับแล้วเป็น `delivery_order`, `concrete`, `full_logistics` หรือ `tax_invoice` แต่ผู้ใช้ตรวจภาพแล้วพบว่าเป็นตั๋วชั่งต้นทาง: เปิดแก้ไข เปลี่ยนประเภทเป็น “ตั๋วชั่งต้นทาง”, ตรวจเลขตั๋ว/น้ำหนัก, ยืนยันว่าไม่ใช่ตั๋วปลายทาง และเลือก DO ที่ตรวจรับแล้วจากรายการด้วยตนเอง. บันทึกระเบียนเดิมด้วย ID เดิม (ไม่สร้างเอกสารซ้ำ), แปลงน้ำหนักเป็นช่อง 13–15, ล้างช่องปลายทาง 16–21 และบันทึก `matched_origin_do_id`; น้ำหนัก DO ที่มีอยู่ไม่ถูกเขียนทับ. ปิดการแก้ประเภทถ้ามีความสัมพันธ์กับ DO/ตั๋วปลายทางอยู่แล้ว หรือระเบียนไม่ใช่ประเภทที่รองรับ. หาก source มีเลข TR เดิม จะล้างได้เฉพาะการเปลี่ยนประเภทนี้เมื่อ API และ trigger ยืนยันเงื่อนไข; เลขที่ล้างจะไม่ถูกนำกลับมาใช้. API ย้ายไฟล์ตรวจสถานะ/ประเภท/Drive ID/ความสัมพันธ์ของทั้ง source และ DO จากฐานข้อมูลก่อนยอมย้ายไฟล์ | ไฟล์ถูกเปลี่ยนชื่อเป็นตั๋วชั่งต้นทางและย้ายเข้าชุด `<TR>_DO-<DO>` ใน zone 02; คง ID เดิมและประวัติ LINE ของระเบียนไว้; ถ้าไฟล์ไม่ได้อยู่ในโฟลเดอร์มาตรฐานหรือข้อมูลไม่ตรง API ปฏิเสธการย้ายและไม่บันทึกการจับคู่ |
@@ -453,6 +456,9 @@ SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   requested_id TEXT;
+  requested_line_inbox_id TEXT;
+  normalized_document_no TEXT;
+  normalized_store_name TEXT;
   saved_order public.orders%ROWTYPE;
   prepared_order public.orders%ROWTYPE;
 BEGIN
@@ -466,6 +472,18 @@ BEGIN
 
   PERFORM pg_advisory_xact_lock(391, 1);
   PERFORM set_config('smartweigh.prepare_do_order_id', requested_id, true);
+
+  SELECT NULLIF(
+           regexp_replace(
+             regexp_replace(upper(BTRIM(p_order->>'col6')), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+             '[[:space:]_-]', '', 'g'
+           ),
+           ''
+         ),
+         NULLIF(regexp_replace(lower(BTRIM(p_order->>'col8')), '[[:space:]()（）.,-]', '', 'g'), ''),
+         NULLIF(BTRIM(p_order->>'line_inbox_id'), '')
+  INTO normalized_document_no, normalized_store_name, requested_line_inbox_id;
+
   SELECT * INTO saved_order
   FROM public.orders
   WHERE id = requested_id
@@ -485,6 +503,42 @@ BEGIN
     RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
   END IF;
 
+  IF normalized_document_no IS NOT NULL AND normalized_store_name IS NOT NULL AND (
+    EXISTS (
+      SELECT 1
+      FROM public.orders existing
+      WHERE existing.id <> requested_id
+        AND existing.doc_type IN ('delivery_order', 'weighbridge', 'concrete', 'full_logistics')
+        AND NULLIF(
+          regexp_replace(
+            regexp_replace(upper(BTRIM(existing.col6)), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+            '[[:space:]_-]', '', 'g'
+          ),
+          ''
+        ) = normalized_document_no
+        AND NULLIF(regexp_replace(lower(BTRIM(existing.col8)), '[[:space:]()（）.,-]', '', 'g'), '') = normalized_store_name
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM public.line_inbox existing
+      WHERE existing.id IS DISTINCT FROM requested_line_inbox_id
+        AND existing.detected_doc_type IN ('delivery_order', 'weighbridge', 'concrete', 'full_logistics')
+        AND existing.status IS DISTINCT FROM 'ignored_non_bill'
+        AND existing.is_bill_document IS DISTINCT FROM FALSE
+        AND NULLIF(
+          regexp_replace(
+            regexp_replace(upper(BTRIM(existing.doc_number)), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+            '[[:space:]_-]', '', 'g'
+          ),
+          ''
+        ) = normalized_document_no
+        AND NULLIF(regexp_replace(lower(BTRIM(existing.store_name)), '[[:space:]()（）.,-]', '', 'g'), '') = normalized_store_name
+    )
+  ) THEN
+    RAISE EXCEPTION 'พบเอกสาร DO/ตั๋วชั่งที่ใช้เลขที่และชื่อร้านซ้ำ; ยกเลิกการจอง TR'
+      USING ERRCODE = '23505';
+  END IF;
+
   prepared_order := jsonb_populate_record(NULL::public.orders, p_order);
   prepared_order.col1 := NULL;
   prepared_order.status := 'pending';
@@ -493,10 +547,105 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.confirm_prepared_do_order(
+  p_order_id TEXT,
+  p_tr_number TEXT,
+  p_line_inbox_id TEXT,
+  p_paired_order JSONB DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  saved_order public.orders%ROWTYPE;
+  paired_order public.orders%ROWTYPE;
+  existing_pair public.orders%ROWTYPE;
+  paired_id TEXT;
+BEGIN
+  PERFORM pg_advisory_xact_lock(391, 1);
+
+  SELECT * INTO saved_order
+  FROM public.orders
+  WHERE id = p_order_id AND col1 = p_tr_number
+  FOR UPDATE;
+  IF NOT FOUND
+    OR saved_order.doc_type NOT IN ('delivery_order', 'concrete', 'full_logistics')
+    OR saved_order.line_inbox_id IS DISTINCT FROM p_line_inbox_id
+    OR saved_order.status NOT IN ('pending', 'verified') THEN
+    RAISE EXCEPTION 'ไม่พบ reservation ใบส่งของที่ตรงกับ ID/TR/Inbox หรือสถานะไม่ถูกต้อง'
+      USING ERRCODE = '23505';
+  END IF;
+
+  IF p_paired_order IS NOT NULL THEN
+    paired_id := NULLIF(BTRIM(p_paired_order->>'id'), '');
+    IF paired_id IS NULL
+      OR p_paired_order->>'doc_type' IS DISTINCT FROM 'weighbridge'
+      OR NULLIF(BTRIM(p_paired_order->>'line_inbox_id'), '') IS NULL
+      OR p_paired_order->>'matched_origin_do_id' IS DISTINCT FROM p_order_id
+      OR p_paired_order->>'status' IS DISTINCT FROM 'verified'
+      OR NULLIF(BTRIM(p_paired_order->>'drive_file_id'), '') IS NULL THEN
+      RAISE EXCEPTION 'ข้อมูลตั๋วชั่งที่จับคู่ไม่ครบหรือไม่ตรงกับใบส่งของ';
+    END IF;
+
+    SELECT * INTO existing_pair
+    FROM public.orders
+    WHERE id = paired_id
+    FOR UPDATE;
+    IF FOUND THEN
+      IF existing_pair.doc_type IS DISTINCT FROM 'weighbridge'
+        OR existing_pair.line_inbox_id IS DISTINCT FROM p_paired_order->>'line_inbox_id'
+        OR (
+          existing_pair.matched_origin_do_id IS NOT NULL
+          AND existing_pair.matched_origin_do_id IS DISTINCT FROM p_order_id
+        )
+        OR existing_pair.status NOT IN ('pending', 'verified') THEN
+        RAISE EXCEPTION 'ID ตั๋วชั่งที่จับคู่ถูกใช้กับข้อมูลอื่น';
+      END IF;
+      IF existing_pair.status = 'pending' OR existing_pair.matched_origin_do_id IS NULL THEN
+        UPDATE public.orders
+        SET status = 'verified',
+            matched_origin_do_id = p_order_id,
+            linked_via_doc_no = p_paired_order->>'linked_via_doc_no',
+            updated_at = NOW()
+        WHERE id = paired_id
+        RETURNING * INTO existing_pair;
+      END IF;
+    ELSE
+      paired_order := jsonb_populate_record(NULL::public.orders, p_paired_order);
+      paired_order.col1 := NULL;
+      paired_order.status := 'verified';
+      INSERT INTO public.orders SELECT (paired_order).*
+      RETURNING * INTO existing_pair;
+    END IF;
+  END IF;
+
+  IF saved_order.status = 'pending' THEN
+    UPDATE public.orders
+    SET status = 'verified', updated_at = NOW()
+    WHERE id = p_order_id AND col1 = p_tr_number AND status = 'pending'
+    RETURNING * INTO saved_order;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'reservation เปลี่ยนสถานะระหว่างยืนยัน';
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'id', saved_order.id,
+    'tr_number', saved_order.col1,
+    'status', saved_order.status,
+    'paired_order_id', existing_pair.id
+  );
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.assign_order_tr_number() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.prepare_do_order(JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.confirm_prepared_do_order(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.assign_order_tr_number() TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_do_order(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.confirm_prepared_do_order(TEXT, TEXT, TEXT, JSONB) TO service_role;
 
 -- 7. ตารางชุดรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อ Express (Purchasing Billing Notes & Express RR)
 CREATE TABLE IF NOT EXISTS public.billing_notes (

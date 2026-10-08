@@ -322,6 +322,9 @@ SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   requested_id TEXT;
+  requested_line_inbox_id TEXT;
+  normalized_document_no TEXT;
+  normalized_store_name TEXT;
   saved_order public.orders%ROWTYPE;
   prepared_order public.orders%ROWTYPE;
 BEGIN
@@ -335,6 +338,17 @@ BEGIN
 
   PERFORM pg_advisory_xact_lock(391, 1);
   PERFORM set_config('smartweigh.prepare_do_order_id', requested_id, true);
+
+  SELECT NULLIF(
+           regexp_replace(
+             regexp_replace(upper(BTRIM(p_order->>'col6')), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+             '[[:space:]_-]', '', 'g'
+           ),
+           ''
+         ),
+         NULLIF(regexp_replace(lower(BTRIM(p_order->>'col8')), '[[:space:]()（）.,-]', '', 'g'), ''),
+         NULLIF(BTRIM(p_order->>'line_inbox_id'), '')
+  INTO normalized_document_no, normalized_store_name, requested_line_inbox_id;
 
   SELECT * INTO saved_order
   FROM public.orders
@@ -355,6 +369,42 @@ BEGIN
     RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
   END IF;
 
+  IF normalized_document_no IS NOT NULL AND normalized_store_name IS NOT NULL AND (
+    EXISTS (
+      SELECT 1
+      FROM public.orders existing
+      WHERE existing.id <> requested_id
+        AND existing.doc_type IN ('delivery_order', 'weighbridge', 'concrete', 'full_logistics')
+        AND NULLIF(
+          regexp_replace(
+            regexp_replace(upper(BTRIM(existing.col6)), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+            '[[:space:]_-]', '', 'g'
+          ),
+          ''
+        ) = normalized_document_no
+        AND NULLIF(regexp_replace(lower(BTRIM(existing.col8)), '[[:space:]()（）.,-]', '', 'g'), '') = normalized_store_name
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM public.line_inbox existing
+      WHERE existing.id IS DISTINCT FROM requested_line_inbox_id
+        AND existing.detected_doc_type IN ('delivery_order', 'weighbridge', 'concrete', 'full_logistics')
+        AND existing.status IS DISTINCT FROM 'ignored_non_bill'
+        AND existing.is_bill_document IS DISTINCT FROM FALSE
+        AND NULLIF(
+          regexp_replace(
+            regexp_replace(upper(BTRIM(existing.doc_number)), '^(PO|DO|WB|INV|TAX|BILL|NO\.?|เลขที่)[[:space:]:.#-]*', '', 'i'),
+            '[[:space:]_-]', '', 'g'
+          ),
+          ''
+        ) = normalized_document_no
+        AND NULLIF(regexp_replace(lower(BTRIM(existing.store_name)), '[[:space:]()（）.,-]', '', 'g'), '') = normalized_store_name
+    )
+  ) THEN
+    RAISE EXCEPTION 'พบเอกสาร DO/ตั๋วชั่งที่ใช้เลขที่และชื่อร้านซ้ำ; ยกเลิกการจอง TR'
+      USING ERRCODE = '23505';
+  END IF;
+
   prepared_order := jsonb_populate_record(NULL::public.orders, p_order);
   prepared_order.col1 := NULL;
   prepared_order.status := 'pending';
@@ -364,10 +414,105 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.confirm_prepared_do_order(
+  p_order_id TEXT,
+  p_tr_number TEXT,
+  p_line_inbox_id TEXT,
+  p_paired_order JSONB DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  saved_order public.orders%ROWTYPE;
+  paired_order public.orders%ROWTYPE;
+  existing_pair public.orders%ROWTYPE;
+  paired_id TEXT;
+BEGIN
+  PERFORM pg_advisory_xact_lock(391, 1);
+
+  SELECT * INTO saved_order
+  FROM public.orders
+  WHERE id = p_order_id AND col1 = p_tr_number
+  FOR UPDATE;
+  IF NOT FOUND
+    OR saved_order.doc_type NOT IN ('delivery_order', 'concrete', 'full_logistics')
+    OR saved_order.line_inbox_id IS DISTINCT FROM p_line_inbox_id
+    OR saved_order.status NOT IN ('pending', 'verified') THEN
+    RAISE EXCEPTION 'ไม่พบ reservation ใบส่งของที่ตรงกับ ID/TR/Inbox หรือสถานะไม่ถูกต้อง'
+      USING ERRCODE = '23505';
+  END IF;
+
+  IF p_paired_order IS NOT NULL THEN
+    paired_id := NULLIF(BTRIM(p_paired_order->>'id'), '');
+    IF paired_id IS NULL
+      OR p_paired_order->>'doc_type' IS DISTINCT FROM 'weighbridge'
+      OR NULLIF(BTRIM(p_paired_order->>'line_inbox_id'), '') IS NULL
+      OR p_paired_order->>'matched_origin_do_id' IS DISTINCT FROM p_order_id
+      OR p_paired_order->>'status' IS DISTINCT FROM 'verified'
+      OR NULLIF(BTRIM(p_paired_order->>'drive_file_id'), '') IS NULL THEN
+      RAISE EXCEPTION 'ข้อมูลตั๋วชั่งที่จับคู่ไม่ครบหรือไม่ตรงกับใบส่งของ';
+    END IF;
+
+    SELECT * INTO existing_pair
+    FROM public.orders
+    WHERE id = paired_id
+    FOR UPDATE;
+    IF FOUND THEN
+      IF existing_pair.doc_type IS DISTINCT FROM 'weighbridge'
+        OR existing_pair.line_inbox_id IS DISTINCT FROM p_paired_order->>'line_inbox_id'
+        OR (
+          existing_pair.matched_origin_do_id IS NOT NULL
+          AND existing_pair.matched_origin_do_id IS DISTINCT FROM p_order_id
+        )
+        OR existing_pair.status NOT IN ('pending', 'verified') THEN
+        RAISE EXCEPTION 'ID ตั๋วชั่งที่จับคู่ถูกใช้กับข้อมูลอื่น';
+      END IF;
+      IF existing_pair.status = 'pending' OR existing_pair.matched_origin_do_id IS NULL THEN
+        UPDATE public.orders
+        SET status = 'verified',
+            matched_origin_do_id = p_order_id,
+            linked_via_doc_no = p_paired_order->>'linked_via_doc_no',
+            updated_at = NOW()
+        WHERE id = paired_id
+        RETURNING * INTO existing_pair;
+      END IF;
+    ELSE
+      paired_order := jsonb_populate_record(NULL::public.orders, p_paired_order);
+      paired_order.col1 := NULL;
+      paired_order.status := 'verified';
+      INSERT INTO public.orders SELECT (paired_order).*
+      RETURNING * INTO existing_pair;
+    END IF;
+  END IF;
+
+  IF saved_order.status = 'pending' THEN
+    UPDATE public.orders
+    SET status = 'verified', updated_at = NOW()
+    WHERE id = p_order_id AND col1 = p_tr_number AND status = 'pending'
+    RETURNING * INTO saved_order;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'reservation เปลี่ยนสถานะระหว่างยืนยัน';
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'id', saved_order.id,
+    'tr_number', saved_order.col1,
+    'status', saved_order.status,
+    'paired_order_id', existing_pair.id
+  );
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.assign_order_tr_number() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.prepare_do_order(JSONB) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.confirm_prepared_do_order(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.assign_order_tr_number() TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_do_order(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.confirm_prepared_do_order(TEXT, TEXT, TEXT, JSONB) TO service_role;
 
 -- 7. ตารางชุดรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อ Express (Purchasing Billing Notes & Express RR)
 CREATE TABLE IF NOT EXISTS public.billing_notes (

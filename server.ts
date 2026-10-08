@@ -698,6 +698,52 @@ async function prepareDoOrder(
   return data.tr_number;
 }
 
+async function verifyDriveFileInZone02(fileId: string): Promise<boolean> {
+  const cfg = getStoredDriveConfig();
+  const token = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+  const useGas = cfg.connectionMode === 'gas' || (!token && Boolean(cfg.gasWebAppUrl));
+  if (useGas) {
+    if (!cfg.gasWebAppUrl) {
+      throw new Error('ยังไม่ได้ตั้งค่า Google Apps Script เพื่อตรวจสอบไฟล์ใน zone 02');
+    }
+    const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+      action: 'verify_do_file_location',
+      rootFolderId: cfg.rootFolderId,
+      fileId
+    });
+    return Boolean(result?.success && result.driveFileLocation === 'zone_02');
+  }
+  if (!token) throw new Error('Google Drive ยังไม่พร้อมตรวจสอบไฟล์ใน zone 02');
+
+  const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+  const fileResponse = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents`,
+    { headers: { Authorization: 'Bearer ' + token } }
+  );
+  if (!fileResponse.ok) {
+    throw new Error(`ตรวจสอบตำแหน่งไฟล์ใน Google Drive ไม่สำเร็จ: ${await fileResponse.text()}`);
+  }
+  const file = await fileResponse.json() as { id: string; parents?: string[] };
+  const parents = file.parents || [];
+  if (parents.includes(zones.ZONE_02)) return true;
+
+  for (const parentId of parents) {
+    const parentResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+      { headers: { Authorization: 'Bearer ' + token } }
+    );
+    if (!parentResponse.ok) {
+      throw new Error(`ตรวจสอบโฟลเดอร์ไฟล์ใน Google Drive ไม่สำเร็จ: ${await parentResponse.text()}`);
+    }
+    const parent = await parentResponse.json() as { id: string; mimeType?: string; parents?: string[] };
+    if (
+      parent.mimeType === 'application/vnd.google-apps.folder' &&
+      (parent.parents || []).includes(zones.ZONE_02)
+    ) return true;
+  }
+  return false;
+}
+
 // In-memory rate limiting to prevent Denial-of-Service and Gemini API quota exhaustion
 const scanRateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const SCAN_WINDOW_MS = 60 * 1000; // 1-minute sliding window
@@ -4894,7 +4940,7 @@ app.post('/api/orders/prepare-do', async (req: Request, res: Response) => {
     const trNumber = await prepareDoOrder(client, dbRow);
     return res.json({ success: true, id: dbRow.id, trNumber });
   } catch (error: any) {
-    if (error instanceof DuplicateDocumentError) {
+    if (error instanceof DuplicateDocumentError || error?.code === '23505') {
       return res.status(409).json({ success: false, error: error.message });
     }
     console.error('[TR Queue] Failed to prepare DO in database:', error?.message || error);
@@ -4910,8 +4956,8 @@ app.post('/api/orders/cancel-prepared-do', async (req: Request, res: Response) =
   const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
   const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
   const docType = typeof req.body?.docType === 'string' ? req.body.docType.trim() : '';
-  if (!orderId || !trNumber || !inboxId || !['delivery_order', 'concrete', 'full_logistics'].includes(docType)) {
-    return res.status(400).json({ success: false, error: 'ต้องระบุ ID, เลข TR, ประเภท DO และ LINE Inbox ID เพื่อยกเลิก reservation' });
+  if (!orderId || !trNumber || !['delivery_order', 'concrete', 'full_logistics'].includes(docType)) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ ID, เลข TR และประเภท DO เพื่อยกเลิก reservation' });
   }
 
   try {
@@ -4919,18 +4965,30 @@ app.post('/api/orders/cancel-prepared-do', async (req: Request, res: Response) =
     if (!client) {
       return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงยกเลิก reservation ไม่ได้' });
     }
-    const { data, error } = await client
+    let deleteQuery = client
       .from('orders')
       .delete()
       .eq('id', orderId)
       .eq('col1', trNumber)
       .eq('doc_type', docType)
-      .eq('status', 'pending')
-      .eq('line_inbox_id', inboxId)
-      .select('id')
-      .maybeSingle();
+      .eq('status', 'pending');
+    deleteQuery = inboxId
+      ? deleteQuery.eq('line_inbox_id', inboxId)
+      : deleteQuery.is('line_inbox_id', null);
+    const { data, error } = await deleteQuery.select('id').maybeSingle();
     if (error) throw error;
     if (!data) {
+      const { data: remainingOrder, error: remainingError } = await client
+        .from('orders')
+        .select('id')
+        .eq('id', orderId)
+        .eq('col1', trNumber)
+        .eq('doc_type', docType)
+        .maybeSingle();
+      if (remainingError) throw remainingError;
+      if (!remainingOrder) {
+        return res.json({ success: true, cancelled: false, alreadyAbsent: true, id: orderId, trNumber });
+      }
       return res.status(409).json({
         success: false,
         error: 'ไม่ยกเลิก reservation: ไม่พบรายการ pending ที่ตรงกัน หรือรายการถูกบันทึก/ยืนยันไปแล้ว'
@@ -4942,6 +5000,160 @@ app.post('/api/orders/cancel-prepared-do', async (req: Request, res: Response) =
     return res.status(500).json({
       success: false,
       error: `ยกเลิก reservation เลข TR ${trNumber} ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
+app.post('/api/orders/prepared-do-status', async (req: Request, res: Response) => {
+  const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  if (!orderId || !trNumber) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ Order ID และเลข TR เพื่อตรวจสถานะ reservation' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสถานะ reservation' });
+    }
+    const { data, error } = await client
+      .from('orders')
+      .select('id,doc_type,status,line_inbox_id')
+      .eq('id', orderId)
+      .eq('col1', trNumber)
+      .maybeSingle();
+    if (error) throw error;
+    if (
+      !data ||
+      !['delivery_order', 'concrete', 'full_logistics'].includes(data.doc_type) ||
+      data.line_inbox_id !== (inboxId || null)
+    ) {
+      return res.status(404).json({ success: false, error: 'ไม่พบ reservation ที่ตรงกับ ID/TR/Inbox' });
+    }
+    return res.json({ success: true, id: data.id, trNumber, status: data.status });
+  } catch (error: any) {
+    console.error('[TR Queue] Failed to check prepared DO status:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `ตรวจสถานะ reservation เลข TR ${trNumber} ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
+app.post('/api/orders/confirm-prepared-do', async (req: Request, res: Response) => {
+  const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  if (!orderId || !trNumber) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ Order ID และเลข TR เพื่อยืนยัน DO' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมยืนยันใบส่งของ' });
+    }
+    const { data: orderRow, error: orderError } = await client
+      .from('orders')
+      .select('id,col1,doc_type,status,line_inbox_id,drive_file_id,col2,col6,col8,col9')
+      .eq('id', orderId)
+      .eq('col1', trNumber)
+      .maybeSingle();
+    if (orderError) throw orderError;
+    if (!orderRow || !['delivery_order', 'concrete', 'full_logistics'].includes(orderRow.doc_type)) {
+      return res.status(404).json({ success: false, error: 'ไม่พบ reservation ใบส่งของที่ตรงกับ ID/TR' });
+    }
+    if (orderRow.line_inbox_id !== (inboxId || null)) {
+      return res.status(409).json({ success: false, error: 'LINE Inbox ID ไม่ตรงกับ reservation ใบส่งของ' });
+    }
+    if (orderRow.status !== 'pending' && orderRow.status !== 'verified') {
+      return res.status(409).json({ success: false, error: `ไม่สามารถยืนยัน reservation ที่มีสถานะ ${orderRow.status}` });
+    }
+
+    if (inboxId) {
+      if (!orderRow.drive_file_id) {
+        return res.status(409).json({ success: false, error: 'ไม่พบ Drive File ID ใน reservation ของ LINE' });
+      }
+      const { data: inboxRow, error: inboxError } = await client
+        .from('line_inbox')
+        .select('status,drive_file_id,extracted_data')
+        .eq('id', inboxId)
+        .maybeSingle();
+      if (inboxError) throw inboxError;
+      if (
+        !inboxRow ||
+        inboxRow.status !== 'verified' ||
+        inboxRow.drive_file_id !== orderRow.drive_file_id ||
+        inboxRow.extracted_data?.verifiedDocumentId !== orderId
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: 'ข้อมูล LINE Inbox ยังไม่ยืนยันครบหรือไม่ตรงกับ reservation'
+        });
+      }
+    }
+
+    if (orderRow.drive_file_id) {
+      if (!await verifyDriveFileInZone02(orderRow.drive_file_id)) {
+        return res.status(409).json({ success: false, error: 'ไฟล์ DO ยังไม่ได้อยู่ในโฟลเดอร์ zone 02' });
+      }
+    }
+
+    let pairedOrderRow: Record<string, any> | null = null;
+    if (req.body?.pairedOrder !== undefined && req.body.pairedOrder !== null) {
+      if (!req.body.pairedOrder || typeof req.body.pairedOrder !== 'object' || Array.isArray(req.body.pairedOrder)) {
+        return res.status(400).json({ success: false, error: 'ข้อมูลตั๋วชั่งที่จับคู่ไม่ถูกต้อง' });
+      }
+      const candidatePairedOrderRow = mapOrderToSupabase(req.body.pairedOrder);
+      if (
+        candidatePairedOrderRow.doc_type !== 'weighbridge' ||
+        candidatePairedOrderRow.matched_origin_do_id !== orderId ||
+        !candidatePairedOrderRow.line_inbox_id ||
+        !candidatePairedOrderRow.drive_file_id
+      ) {
+        return res.status(409).json({ success: false, error: 'ข้อมูลตั๋วชั่งที่จับคู่ไม่ครบหรือไม่ตรงกับ DO' });
+      }
+      const { data: pairedInboxRow, error: pairedInboxError } = await client
+        .from('line_inbox')
+        .select('status,drive_file_id,extracted_data')
+        .eq('id', candidatePairedOrderRow.line_inbox_id)
+        .maybeSingle();
+      if (pairedInboxError) throw pairedInboxError;
+      if (
+        !pairedInboxRow ||
+        pairedInboxRow.status !== 'verified' ||
+        pairedInboxRow.drive_file_id !== candidatePairedOrderRow.drive_file_id ||
+        pairedInboxRow.extracted_data?.verifiedDocumentId !== candidatePairedOrderRow.id
+      ) {
+        return res.status(409).json({ success: false, error: 'รายการ LINE ของตั๋วชั่งยังไม่ยืนยันครบหรือไม่ตรงกับข้อมูลที่จับคู่' });
+      }
+      if (!await verifyDriveFileInZone02(candidatePairedOrderRow.drive_file_id)) {
+        return res.status(409).json({ success: false, error: 'ไฟล์ตั๋วชั่งยังไม่ได้อยู่ในโฟลเดอร์ zone 02' });
+      }
+      await assertNoDuplicateDocumentWrite(client, 'orders', candidatePairedOrderRow, false, true);
+      pairedOrderRow = candidatePairedOrderRow;
+    }
+
+    const { data: confirmedOrder, error: confirmError } = await client.rpc('confirm_prepared_do_order', {
+      p_order_id: orderId,
+      p_tr_number: trNumber,
+      p_line_inbox_id: inboxId || null,
+      p_paired_order: pairedOrderRow
+    });
+    if (confirmError) throw confirmError;
+    if (!confirmedOrder || confirmedOrder.status !== 'verified') {
+      throw new Error('ฐานข้อมูลไม่ได้ยืนยันสถานะ DO หลังบันทึกข้อมูล');
+    }
+    return res.json({ success: true, id: orderId, trNumber, status: 'verified' });
+  } catch (error: any) {
+    if (error instanceof DuplicateDocumentError || error?.code === '23505') {
+      return res.status(409).json({ success: false, error: error.message });
+    }
+    console.error('[TR Queue] Failed to confirm prepared DO:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `ยืนยันใบส่งของเลข TR ${trNumber} ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
     });
   }
 });

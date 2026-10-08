@@ -52,6 +52,8 @@ function doPost(e) {
       return handleRenameAndMoveFile(payload);
     } else if (action === 'restore_line_inbox_file') {
       return handleRestoreLineInboxFile(payload);
+    } else if (action === 'verify_do_file_location') {
+      return handleVerifyDoFileLocation(payload);
     } else if (action === 'cleanup') {
       return handleCleanup(payload);
     } else if (action === 'list_zone_files') {
@@ -569,6 +571,36 @@ function handleRestoreLineInboxFile(payload) {
     });
   } catch (e) {
     return jsonResponse({ success: false, error: 'คืนไฟล์เข้า LINE Inbox ไม่สำเร็จ: ' + e.toString() });
+  }
+}
+
+function handleVerifyDoFileLocation(payload) {
+  var rootFolderId = payload.rootFolderId;
+  var fileId = payload.fileId;
+  if (!rootFolderId || !fileId) {
+    return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId และ fileId เพื่อตรวจสอบไฟล์ DO' });
+  }
+
+  try {
+    var rootFolder = DriveApp.getFolderById(rootFolderId);
+    var zone02Folder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_02);
+    var file = DriveApp.getFileById(fileId);
+    var parents = file.getParents();
+    while (parents.hasNext()) {
+      var parent = parents.next();
+      if (parent.getId() === zone02Folder.getId()) {
+        return jsonResponse({ success: true, fileId: fileId, driveFileLocation: 'zone_02' });
+      }
+      var grandparents = parent.getParents();
+      while (grandparents.hasNext()) {
+        if (grandparents.next().getId() === zone02Folder.getId()) {
+          return jsonResponse({ success: true, fileId: fileId, driveFileLocation: 'zone_02' });
+        }
+      }
+    }
+    return jsonResponse({ success: false, error: 'ไฟล์ DO ไม่ได้อยู่ในโฟลเดอร์ zone 02' });
+  } catch (e) {
+    return jsonResponse({ success: false, error: 'ตรวจสอบตำแหน่งไฟล์ DO ไม่สำเร็จ: ' + e.toString() });
   }
 }
 
