@@ -5819,9 +5819,15 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
     if (!destTicketFileId) {
       return res.status(400).json({ success: false, error: 'กรุณาระบุรหัสไฟล์ตั๋วชั่งปลายทาง (destTicketFileId)' });
     }
+    if (action !== 'confirm_match' && action !== 'revoke_match') {
+      return res.status(400).json({ success: false, error: 'รูปแบบ action ไม่ถูกต้อง (ต้องเป็น confirm_match หรือ revoke_match)' });
+    }
+    if (!String(doTrNumber).trim() || !String(doDocNumber).trim()) {
+      return res.status(400).json({ success: false, error: 'ต้องระบุเลข TR และเลข DO เพื่อย้ายไฟล์เข้าหรือออกจากโฟลเดอร์ใบงาน' });
+    }
 
     const safeDoNo = sanitizeDriveName(doDocNumber);
-    const safeTrNo = sanitizeDriveName(doTrNumber || 'TR');
+    const safeTrNo = sanitizeDriveName(doTrNumber);
     const subfolderName = `${safeTrNo}_DO-${safeDoNo}`;
 
     // A) If GAS Mode
@@ -5855,10 +5861,27 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
     }
 
     const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    const fileResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(destTicketFileId)}?fields=id,parents`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!fileResponse.ok) {
+      throw new Error(`ตรวจสอบตำแหน่งไฟล์ตั๋วชั่งใน Google Drive ไม่สำเร็จ: ${await fileResponse.text()}`);
+    }
+    const fileInfo = await fileResponse.json() as { id: string; parents?: string[] };
+    const currentParents = fileInfo.parents || [];
 
     if (action === 'confirm_match') {
       const doFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
-      await moveDriveFile(token, destTicketFileId, zones.ZONE_03, doFolderId);
+      if (!currentParents.includes(doFolderId)) {
+        if (!currentParents.includes(zones.ZONE_03)) {
+          throw new Error('ไฟล์ตั๋วชั่งไม่ได้อยู่ในโซน 03 หรือโฟลเดอร์ TR/DO ปลายทาง; หยุดก่อนยืนยันการย้าย');
+        }
+        const movedFile = await moveDriveFile(token, destTicketFileId, zones.ZONE_03, doFolderId);
+        if (!(movedFile.parents || []).includes(doFolderId)) {
+          throw new Error('Google Drive ยังไม่ยืนยันว่าไฟล์ตั๋วชั่งอยู่ในโฟลเดอร์ TR/DO');
+        }
+      }
 
       return res.json({
         success: true,
@@ -5868,8 +5891,16 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
         message: `ย้ายตั๋วชั่ง ${destTicketDocNo} รวมเข้าโฟลเดอร์ใบงาน ${subfolderName} สำเร็จแล้วตามกฎยืนยัน`
       });
     } else if (action === 'revoke_match') {
-      const doFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
-      await moveDriveFile(token, destTicketFileId, doFolderId, zones.ZONE_03);
+      if (!currentParents.includes(zones.ZONE_03)) {
+        const doFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
+        if (!currentParents.includes(doFolderId)) {
+          throw new Error('ไฟล์ตั๋วชั่งไม่ได้อยู่ในโฟลเดอร์ TR/DO หรือโซน 03; หยุดก่อนยกเลิกการจับคู่');
+        }
+        const movedFile = await moveDriveFile(token, destTicketFileId, doFolderId, zones.ZONE_03);
+        if (!(movedFile.parents || []).includes(zones.ZONE_03)) {
+          throw new Error('Google Drive ยังไม่ยืนยันว่าไฟล์ตั๋วชั่งกลับไปอยู่ในโซน 03');
+        }
+      }
 
       return res.json({
         success: true,
@@ -5878,8 +5909,6 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
         targetFolderId: zones.ZONE_03,
         message: `ย้ายตั๋วชั่ง ${destTicketDocNo} กลับไปพักที่ 03_ตั๋วชั่งปลายทาง_รอจับคู่DO เรียบร้อยแล้ว`
       });
-    } else {
-      return res.status(400).json({ success: false, error: 'รูปแบบ action ไม่ถูกต้อง (ต้องเป็น confirm_match หรือ revoke_match)' });
     }
   } catch (err: any) {
     console.error('Verified-Move Error:', err);

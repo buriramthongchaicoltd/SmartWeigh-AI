@@ -65,6 +65,12 @@ interface TableView39ColsProps {
   onDuplicateOrder: (order: OrderRecord) => void;
   onDeleteOrder: (id: string, skipConfirm?: boolean) => void;
   onUpdateOrder: (order: OrderRecord) => void;
+  onSyncDestTicketDrive: (
+    action: 'confirm_match' | 'revoke_match',
+    ticket: OrderRecord,
+    deliveryOrder: OrderRecord
+  ) => Promise<Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | null>;
+  onNotifyError: (message: string) => void;
   onLinkOrderToPO?: (orderId: string, poNumber: string) => void;
   onUnlinkOrderFromPO?: (orderId: string) => void;
   onVerifyAutoFlags?: (orderId: string, scope?: 'all' | 'po' | 'dest') => void;
@@ -85,6 +91,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   onDuplicateOrder,
   onDeleteOrder,
   onUpdateOrder,
+  onSyncDestTicketDrive,
+  onNotifyError,
   onLinkOrderToPO,
   onUnlinkOrderFromPO,
   onVerifyAutoFlags,
@@ -394,7 +402,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       });
   }, [orders, matchingTaxInvoice]);
 
-  const handleExecuteManualMatchDest = (targetDO: OrderRecord) => {
+  const handleExecuteManualMatchDest = async (targetDO: OrderRecord) => {
     if (!matchingDestTicket) return;
     const snap = matchingDestTicket.rawAiSnapshot;
     let grossD = Number(matchingDestTicket.col18) || Number(matchingDestTicket.col13) || Number(snap?.rawGrossWeightKg) || 0;
@@ -429,6 +437,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         : `ชนตั๋วปลายทางด้วยมือ: ${matchingDestTicket.col17 || matchingDestTicket.col6 || ''}`
     };
 
+    const driveMove = await onSyncDestTicketDrive('confirm_match', matchingDestTicket, targetDO);
+    if (!driveMove) return;
+
     onUpdateOrder(mergedDO);
     onUpdateOrder({
       ...matchingDestTicket,
@@ -439,13 +450,14 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       col20: netD,
       linkedViaDocNo: targetDO.col6 || targetDO.col1,
       destMatchStatus: 'verified',
-      autoFlagsVerified: true
+      autoFlagsVerified: true,
+      ...driveMove
     });
     setMatchingDestTicket(null);
   };
 
   // Reverse Manual Match: User clicks "ชนตั๋วปลายทาง" from a DO row in Zone 4 and picks an unlinked Dest Ticket
-  const handleExecuteManualMatchDOToDest = (destTicket: OrderRecord) => {
+  const handleExecuteManualMatchDOToDest = async (destTicket: OrderRecord) => {
     if (!matchingDOForDest) return;
     const snap = destTicket.rawAiSnapshot;
     let grossD = Number(destTicket.col18) || Number(destTicket.col13) || Number(snap?.rawGrossWeightKg) || 0;
@@ -480,6 +492,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         : `ชนตั๋วปลายทางด้วยมือ: ${destTicket.col17 || destTicket.col6 || ''}`
     };
 
+    const driveMove = await onSyncDestTicketDrive('confirm_match', destTicket, matchingDOForDest);
+    if (!driveMove) return;
+
     onUpdateOrder(mergedDO);
     onUpdateOrder({
       ...destTicket,
@@ -490,12 +505,13 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       col20: netD,
       linkedViaDocNo: matchingDOForDest.col6 || matchingDOForDest.col1,
       destMatchStatus: 'verified',
-      autoFlagsVerified: true
+      autoFlagsVerified: true,
+      ...driveMove
     });
     setMatchingDOForDest(null);
   };
 
-  const handleUnlinkDestTicket = (ticket: OrderRecord) => {
+  const handleUnlinkDestTicket = async (ticket: OrderRecord) => {
     // Also clear Zone 4 on any DO that had this ticket linked
     const linkedDO = orders.find(
       o =>
@@ -505,7 +521,14 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
           (ticket.linkedViaDocNo && (isDocNumberMatch(o.col6, ticket.linkedViaDocNo) || isDocNumberMatch(o.col1, ticket.linkedViaDocNo))) ||
           (ticket.col17 && isDocNumberMatch(o.col17, ticket.col17)))
     );
+    let driveMove: Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | undefined;
+    if (!linkedDO && (ticket.linkedViaDocNo || ticket.driveFileLocation === 'zone_02')) {
+      onNotifyError('ไม่พบใบ DO ที่เชื่อมกับตั๋วชั่ง จึงยกเลิกการจับคู่และย้ายไฟล์กลับโซน 03 ไม่ได้');
+      return;
+    }
     if (linkedDO) {
+      driveMove = await onSyncDestTicketDrive('revoke_match', ticket, linkedDO) || undefined;
+      if (!driveMove) return;
       const filteredFlags = (linkedDO.autoActionFlags || []).filter(f => !f.includes('ตั๋วชั่งปลายทาง'));
       onUpdateOrder({
         ...linkedDO,
@@ -523,22 +546,30 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     onUpdateOrder({
       ...ticket,
       linkedViaDocNo: '',
-      destMatchStatus: undefined
+      destMatchStatus: undefined,
+      ...driveMove
     });
   };
 
-  const handleUnlinkDestFromDO = (doRecord: OrderRecord) => {
+  const handleUnlinkDestFromDO = async (doRecord: OrderRecord) => {
     const linkedTicket = allDestTickets.find(
       t =>
         t.id === doRecord.matchedDestTicketId ||
         (t.linkedViaDocNo && (isDocNumberMatch(t.linkedViaDocNo, doRecord.col6) || isDocNumberMatch(t.linkedViaDocNo, doRecord.col1))) ||
         (doRecord.col17 && isDocNumberMatch(t.col17, doRecord.col17))
     );
+    if (!linkedTicket && doRecord.matchedDestTicketId) {
+      onNotifyError('ไม่พบ record ตั๋วชั่งปลายทางที่จับคู่ไว้ จึงยกเลิกการจับคู่และย้ายไฟล์กลับโซน 03 ไม่ได้');
+      return;
+    }
     if (linkedTicket) {
+      const driveMove = await onSyncDestTicketDrive('revoke_match', linkedTicket, doRecord);
+      if (!driveMove) return;
       onUpdateOrder({
         ...linkedTicket,
         linkedViaDocNo: '',
-        destMatchStatus: undefined
+        destMatchStatus: undefined,
+        ...driveMove
       });
     }
     const filteredFlags = (doRecord.autoActionFlags || []).filter(f => !f.includes('ตั๋วชั่งปลายทาง'));

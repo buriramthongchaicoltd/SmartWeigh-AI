@@ -878,7 +878,7 @@ export default function App() {
     destTicketDocNo?: string;
     doTrNumber?: string;
     doDocNumber?: string;
-  }) => {
+  }): Promise<Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | null> => {
     try {
       const resp = await fetch('/api/drive/sync-verified-move', {
         method: 'POST',
@@ -892,12 +892,15 @@ export default function App() {
       if (!data.targetFolderId || !data.driveFileLocation) {
         throw new Error('Google Drive ไม่ส่งรหัสโฟลเดอร์ปลายทางกลับมายืนยันตำแหน่งไฟล์');
       }
+      const driveMove: Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> = {
+        driveFolderId: data.targetFolderId,
+        driveFileLocation: data.driveFileLocation
+      };
       setOrders(previous => previous.map(order =>
         order.driveFileId === params.destTicketFileId
           ? {
               ...order,
-              driveFolderId: data.targetFolderId,
-              driveFileLocation: data.driveFileLocation
+              ...driveMove
             }
           : order
       ));
@@ -911,11 +914,35 @@ export default function App() {
           : item
       ));
       console.log('[Google Drive Move Success]:', data.message);
+      return driveMove;
     } catch (err) {
       console.error('[Google Drive Move Error]:', err);
       const reason = err instanceof Error ? `: ${err.message}` : '';
       showToast(`อัปเดตตำแหน่งไฟล์ที่ยืนยันบน Google Drive ไม่สำเร็จ${reason}`, 'error');
+      return null;
     }
+  };
+
+  const handleSyncDestTicketDrive = async (
+    action: 'confirm_match' | 'revoke_match',
+    ticket: OrderRecord,
+    deliveryOrder: OrderRecord
+  ): Promise<Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | null> => {
+    if (!ticket.driveFileId) {
+      showToast('ไม่พบรหัสไฟล์ตั๋วชั่งปลายทางใน Google Drive จึงไม่สามารถย้ายไฟล์ได้', 'error');
+      return null;
+    }
+    if (!deliveryOrder.col1.trim() || !deliveryOrder.col6.trim()) {
+      showToast('ไม่พบเลข TR หรือเลข DO ของใบงาน จึงย้ายตั๋วชั่งเข้าโฟลเดอร์ TR/DO ไม่ได้', 'error');
+      return null;
+    }
+    return triggerDriveVerifiedMove({
+      action,
+      destTicketFileId: ticket.driveFileId,
+      destTicketDocNo: ticket.col17 || ticket.col6,
+      doTrNumber: deliveryOrder.col1,
+      doDocNumber: deliveryOrder.col6
+    });
   };
 
   // Google Drive Zero-Junk Cleanup Trigger
@@ -3404,7 +3431,7 @@ export default function App() {
 
   // Confirm / Verify Automatic Flags (Both Auto-Match PO/Dest Ticket & Auto System Actions)
   // "ย้ายไฟล์บน Google Drive จะย้ายก็ต่อเมื่อมีการยืนยันแล้วเท่านั้น ถ้าระบบชนบิลโดยยังไม่มีการยืนยันห้ามย้าย"
-  const handleVerifyOrderAutoFlags = (orderId: string, scope: 'all' | 'po' | 'dest' = 'all') => {
+  const handleVerifyOrderAutoFlags = async (orderId: string, scope: 'all' | 'po' | 'dest' = 'all') => {
     const nowIso = new Date().toISOString();
     const target = orders.find(o => o.id === orderId);
     const linkedDestId = target?.matchedDestTicketId;
@@ -3412,17 +3439,22 @@ export default function App() {
 
     // Trigger Google Drive Verified Move if confirming destination weighbridge match
     if (scope === 'all' || scope === 'dest') {
-      const pairedTicket = orders.find(
-        o => (linkedDestId && o.id === linkedDestId) || (targetDONo && o.linkedViaDocNo && isExactDocNumberReference(o.linkedViaDocNo, targetDONo))
+      const pairedTickets = orders.filter(order =>
+        order.docType === 'dest_weighbridge' &&
+        (linkedDestId
+          ? order.id === linkedDestId
+          : Boolean(targetDONo && order.linkedViaDocNo && isExactDocNumberReference(order.linkedViaDocNo, targetDONo)))
       );
-      if (pairedTicket && pairedTicket.driveFileId) {
-        triggerDriveVerifiedMove({
-          action: 'confirm_match',
-          destTicketFileId: pairedTicket.driveFileId,
-          destTicketDocNo: pairedTicket.col17 || pairedTicket.col6,
-          doTrNumber: target?.col1,
-          doDocNumber: target?.col6
-        });
+      if (pairedTickets.length > 1) {
+        showToast('พบตั๋วชั่งปลายทางที่จับคู่กับเลข DO นี้มากกว่าหนึ่งใบ จึงไม่ย้ายไฟล์จนกว่าจะตรวจสอบความสัมพันธ์', 'error');
+        return;
+      }
+      const pairedTicket = pairedTickets[0];
+      if (pairedTicket && target) {
+        if (!await handleSyncDestTicketDrive('confirm_match', pairedTicket, target)) return;
+      } else if (linkedDestId || target?.col17 || Number(target?.col20) > 0) {
+        showToast('ไม่พบตั๋วชั่งปลายทางที่จับคู่ไว้ จึงยืนยันการย้ายไฟล์ไม่ได้', 'error');
+        return;
       }
     }
 
@@ -3449,7 +3481,6 @@ export default function App() {
             autoFlagsVerified: allCleared ? true : ord.autoFlagsVerified,
             autoFlagsVerifiedBy: currentUser.fullName,
             autoFlagsVerifiedAt: nowIso,
-            driveFileLocation: (scope === 'all' || scope === 'dest') && ord.matchedDestTicketId ? 'zone_02' : ord.driveFileLocation,
             updatedBy: currentUser.fullName
           };
         }
@@ -3465,15 +3496,14 @@ export default function App() {
             destMatchStatus: 'verified',
             autoFlagsVerified: true,
             autoFlagsVerifiedBy: currentUser.fullName,
-            autoFlagsVerifiedAt: nowIso,
-            driveFileLocation: 'zone_02'
+            autoFlagsVerifiedAt: nowIso
           };
         }
 
         return ord;
       });
     });
-    showToast(`✅ ยืนยันการตรวจสอบรายการอัตโนมัติ (และย้ายไฟล์ตั๋วชั่งเข้าโฟลเดอร์ใบงานแล้ว)`);
+    showToast('✅ ยืนยันการตรวจสอบรายการอัตโนมัติเรียบร้อยแล้ว');
   };
 
   // Store management handlers
@@ -4047,6 +4077,8 @@ export default function App() {
               onDuplicateOrder={handleDuplicateOrder}
               onDeleteOrder={handleDeleteOrder}
               onUpdateOrder={handleUpdateOrder}
+              onSyncDestTicketDrive={handleSyncDestTicketDrive}
+              onNotifyError={(message) => showToast(message, 'error')}
               onLinkOrderToPO={handleLinkOrderToPO}
               onUnlinkOrderFromPO={handleUnlinkOrderFromPO}
               onVerifyAutoFlags={handleVerifyOrderAutoFlags}
