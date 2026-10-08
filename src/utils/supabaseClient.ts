@@ -221,6 +221,123 @@ CREATE TABLE IF NOT EXISTS public.system_config (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE OR REPLACE FUNCTION public.assign_order_tr_number()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  tr_prefix TEXT;
+  max_sequence NUMERIC;
+  next_sequence TEXT;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NULLIF(BTRIM(OLD.col1), '') IS NOT NULL THEN
+      IF NEW.col1 IS DISTINCT FROM OLD.col1 THEN
+        RAISE EXCEPTION 'เลข TR เป็นข้อมูลถาวรและไม่สามารถแก้ไขได้';
+      END IF;
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  IF NEW.doc_type IN ('delivery_order', 'concrete', 'full_logistics') THEN
+    IF current_setting('smartweigh.prepare_do_order_id', true) IS DISTINCT FROM NEW.id THEN
+      NEW.col1 := NULL;
+      RETURN NEW;
+    END IF;
+
+    IF NULLIF(BTRIM(NEW.col2), '') IS NULL OR NULLIF(BTRIM(NEW.col9), '') IS NULL THEN
+      NEW.col1 := NULL;
+    ELSE
+      PERFORM pg_advisory_xact_lock(391, 1);
+
+      SELECT NULLIF(BTRIM(config_value->>'trPrefix'), '')
+      INTO tr_prefix
+      FROM public.system_config
+      WHERE config_key = 'system_settings';
+      tr_prefix := COALESCE(tr_prefix, 'TR-' || EXTRACT(YEAR FROM CURRENT_DATE)::TEXT || '-');
+      IF LENGTH(tr_prefix) > 40 OR tr_prefix ~ '[[:cntrl:]]' THEN
+        RAISE EXCEPTION 'คำนำหน้าเลข TR ในการตั้งค่าระบบไม่ถูกต้อง';
+      END IF;
+
+      SELECT COALESCE(MAX(SUBSTRING(col1 FROM LENGTH(tr_prefix) + 1)::NUMERIC), 0)
+      INTO max_sequence
+      FROM public.orders
+      WHERE LEFT(COALESCE(col1, ''), LENGTH(tr_prefix)) = tr_prefix
+        AND SUBSTRING(col1 FROM LENGTH(tr_prefix) + 1) ~ '^[0-9]+$'
+        AND doc_type IN ('delivery_order', 'concrete', 'full_logistics');
+
+      next_sequence := (max_sequence + 1)::TEXT;
+      NEW.col1 := tr_prefix || LPAD(next_sequence, GREATEST(3, LENGTH(next_sequence)), '0');
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS orders_assign_immutable_tr_number ON public.orders;
+CREATE TRIGGER orders_assign_immutable_tr_number
+BEFORE INSERT OR UPDATE ON public.orders
+FOR EACH ROW
+EXECUTE FUNCTION public.assign_order_tr_number();
+
+CREATE OR REPLACE FUNCTION public.prepare_do_order(p_order JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  requested_id TEXT;
+  saved_order public.orders%ROWTYPE;
+  prepared_order public.orders%ROWTYPE;
+BEGIN
+  requested_id := NULLIF(BTRIM(p_order->>'id'), '');
+  IF requested_id IS NULL
+    OR COALESCE(p_order->>'doc_type', '') NOT IN ('delivery_order', 'concrete', 'full_logistics')
+    OR NULLIF(BTRIM(p_order->>'col2'), '') IS NULL
+    OR NULLIF(BTRIM(p_order->>'col9'), '') IS NULL THEN
+    RAISE EXCEPTION 'ข้อมูลใบส่งของสำหรับกำหนดเลข TR ไม่ถูกต้อง';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(391, 1);
+  PERFORM set_config('smartweigh.prepare_do_order_id', requested_id, true);
+
+  SELECT * INTO saved_order
+  FROM public.orders
+  WHERE id = requested_id
+  FOR UPDATE;
+  IF FOUND THEN
+    IF saved_order.doc_type NOT IN ('delivery_order', 'concrete', 'full_logistics') THEN
+      RAISE EXCEPTION 'ID นี้ถูกใช้กับเอกสารที่ไม่ใช่ใบส่งของ';
+    END IF;
+    IF NULLIF(BTRIM(saved_order.col1), '') IS NULL THEN
+      UPDATE public.orders
+      SET col1 = NULL,
+          col2 = COALESCE(NULLIF(BTRIM(p_order->>'col2'), ''), col2),
+          col9 = COALESCE(NULLIF(BTRIM(p_order->>'col9'), ''), col9)
+      WHERE id = requested_id
+      RETURNING * INTO saved_order;
+    END IF;
+    RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
+  END IF;
+
+  prepared_order := jsonb_populate_record(NULL::public.orders, p_order);
+  prepared_order.col1 := NULL;
+  prepared_order.status := 'pending';
+  INSERT INTO public.orders SELECT (prepared_order).* RETURNING * INTO saved_order;
+
+  RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.assign_order_tr_number() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.prepare_do_order(JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.assign_order_tr_number() TO service_role;
+GRANT EXECUTE ON FUNCTION public.prepare_do_order(JSONB) TO service_role;
+
 -- 7. ตารางชุดรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อ Express (Purchasing Billing Notes & Express RR)
 CREATE TABLE IF NOT EXISTS public.billing_notes (
   id TEXT PRIMARY KEY,

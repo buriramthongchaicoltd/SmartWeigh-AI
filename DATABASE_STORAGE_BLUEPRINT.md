@@ -86,7 +86,7 @@
 | ลำดับ | เหตุการณ์ในระบบ (System Event) | การทำงานที่ฐานข้อมูล Supabase | การทำงานที่ Google Drive อัตโนมัติ (Zero-Junk & Auto-Move) |
 | :---: | :--- | :--- | :--- |
 | **1** | **บอท LINE รับรูปบิลใหม่จากกลุ่ม** | ตรวจ signature และบันทึกแถวสถานะ `queued` ใน `line_inbox` ก่อนตอบ HTTP 200; หลัง ACK จึงทำ OCR และอัปโหลดไฟล์ โดยบันทึก `drive_file_id` เมื่อ upload สำเร็จ. ตรวจบิลซ้ำด้วยประเภทเอกสาร + เลขที่เอกสาร + ชื่อร้าน; ถ้าตรงกันให้เก็บแถวไว้และบันทึกเหตุผลเพื่อแสดงป้าย “อาจซ้ำ” | พยายามอัปโหลดรูปเข้าโฟลเดอร์ `00_กล่องพักบิล_LINE_รอตรวจรับ`; หาก process หยุดหรือ upload ล้มเหลว แถวคิวยังคงอยู่เพื่อ manual/daily recovery |
-| **1.1** | **จัดสรรและตรวจเลข TR สำหรับ DO เท่านั้น** | เอกสาร `delivery_order`, `concrete`, `full_logistics` อ่านเลขสูงสุดจาก `orders.col1` ใน Supabase จริงและเสนอเลขถัดไป; ก่อนตรวจรับ `VerifyModal` ตรวจ `col1` ซ้ำกับ Supabase. เอกสารประเภทอื่นไม่ขอเลข TR และใช้เลขเอกสารของตนในช่องเฉพาะ เช่น ตั๋วชั่งต้นทาง `col6` และตั๋วชั่งปลายทาง `col17`. การลบ `orders` หยุด timer และรอ batch upsert ที่เริ่มไปแล้วก่อนลบ เพื่อป้องกัน snapshot เก่าเขียนแถวกลับ | ไม่เกี่ยวข้อง |
+| **1.1** | **จัดสรรและตรวจเลข TR สำหรับ DO เท่านั้น** | เฉพาะ `delivery_order`, `concrete`, `full_logistics` เท่านั้นที่ใช้ TR. หลังกรอกข้อมูลบังคับครบและผู้ใช้กดยืนยัน ระบบเรียก `prepare_do_order` ซึ่ง serialize คำขอด้วย transaction advisory lock, อ่าน prefix จาก `system_config.system_settings` และเลขสูงสุดจาก `orders.col1`, กำหนด TR และสร้าง/อัปเดตระเบียน pending ใน transaction เดียวกัน. การ retry ด้วย ID เดิมคืน TR เดิมและไม่เพิ่มเลข; ถ้า Drive/ขั้นถัดไปขัดข้อง ระเบียน pending จะคงอยู่ให้ลองต่อ จึงไม่ทิ้งเลขไว้โดยไม่มีระเบียน. Trigger ใช้ transaction-local marker ที่ RPC ตั้งไว้เพื่อออกเลขเฉพาะคำขอที่ยืนยันแล้ว; autosave/batch ปกติไม่จองเลข และ trigger ปฏิเสธการแก้ `col1` ที่กำหนดไว้แล้วหรือค่าที่พยายามใส่โดยไม่ผ่าน RPC. UI แสดงเลขแบบอ่านอย่างเดียว. ต้องรัน DDL function/trigger รุ่นล่าสุดก่อนเปิดใช้. เอกสารประเภทอื่นไม่ขอเลข TR และใช้เลขเอกสารเฉพาะ เช่น ตั๋วชั่งต้นทาง `col6`, ตั๋วชั่งปลายทาง `col17`. การลบ `orders` หยุด timer และรอ batch upsert ที่เริ่มไปแล้วก่อนลบ เพื่อป้องกัน snapshot เก่าเขียนแถวกลับ | ไม่เกี่ยวข้อง |
 | **2** | **ตรวจรับหรือลบรายการซ้ำในกล่องพักบิล LINE** | ก่อนตรวจรับให้ตรวจฐานข้อมูลซ้ำอีกครั้งด้วยเกณฑ์สามค่าเดิม; ผู้ใช้เลือกยืนยันการลบรายการปัจจุบันพร้อมรูป หรือยกเลิกการยืนยันซ้ำเพื่อบันทึกตรวจรับต่อ. การลบข้อมูลเกิดหลัง Drive API ตอบว่าสำเร็จ; หาก Drive API ล้มเหลวจะไม่ลบ row | เมื่อตรวจรับ DO ระบบสร้าง/ใช้ `<col1>_DO-<col6>` ใต้โซน 02 แล้วเปลี่ยนชื่อและย้ายรูป DO เข้าโฟลเดอร์นั้น; ตั๋วชั่งต้นทางที่ผู้ใช้เลือกแนบกับ DO จะถูกย้ายเข้าโฟลเดอร์เดียวกัน. การลบรายการซ้ำยังนำไฟล์ที่เชื่อมกับ Inbox ไปถังขยะก่อน แล้วจึงลบ row ใน Supabase; ขั้นตอน Drive trash และ Supabase delete แยกกัน จึงอาจเหลือ row หาก DB delete ล้มเหลวหลัง Drive สำเร็จ |
 | **2.1** | **ผู้ใช้เลือกจับคู่ตั๋วชั่งต้นทางจาก LINE กับ DO** | ทำได้ทั้งตอนตรวจรับ DO (เลือกตั๋วชั่งที่ยังพักอยู่), จากหน้าตั๋วชั่งเพื่อเปิด DO ที่ยังรอตรวจพร้อมแนบตั๋วชั่ง, และหลัง DO บันทึกแล้ว (เลือก DO ที่บันทึกอยู่); รายการ orders โหลดแบบแบ่งหน้าจนครบ และตัวเลือกแสดงเอกสารที่มีเลข DO (`col6`) โดยรวมชนิดเอกสาร DO และข้อมูลเก่าที่ไม่มีชนิดระบุไว้ พร้อมค้นหาด้วยเลข DO/ร้านค้า/TR/โครงการ. ยกเว้นตั๋วชั่งต้นทาง/ปลายทาง, ใบกำกับ และ PO เพื่อไม่ให้เอกสารที่ไม่ใช่ DO ถูกเลือก. กรณี DO ยังรอตรวจ ระบบเปิดแบบฟอร์มตรวจรับตามปกติและยังไม่บันทึกคู่จนกว่าผู้ใช้ยืนยัน. เมื่อบันทึกแล้ว ตั๋วชั่งเป็น `orders` แยกและผูกกับ DO ที่เลือกด้วย `orders.matched_origin_do_id` โดยไม่จับคู่อัตโนมัติจากชื่อร้าน/เวลา; แถวตั๋วชั่งใหม่ไม่คัดลอกเลข TR จาก DO. ตอนตรวจรับ DO จะเติมน้ำหนักต้นทางจากตั๋วที่เลือกลงแบบฟอร์มเพื่อตรวจทาน; การจับคู่ย้อนหลังเติมช่อง 13–15 เฉพาะเมื่อ DO ยังไม่มีน้ำหนักเดิม. ตารางหลัก 39 คอลัมน์แสดงเป็นหนึ่งแถวต่อ DO โดยไม่แสดงตั๋วชั่งต้นทางที่จับคู่แล้วเป็นแถวซ้ำ; แสดงเลขตั๋วเป็นรายการย่อยที่คลิกเปิด record จริงได้. ข้อมูลเก่าที่ไม่มี `matched_origin_do_id` จะซ่อมความสัมพันธ์ได้เฉพาะเมื่อ `linked_via_doc_no` ตรงเลข DO แบบ exact และพบ DO เพียงรายการเดียว; ถ้ากำกวมจะไม่เดา. เอกสารที่จับคู่ยังคงเป็น records แยกในฐานข้อมูลและตั๋วชั่งที่มีความสัมพันธ์ไม่ถูกนับซ้ำเป็น DO ในยอดการเงิน/ปริมาณหรือรายการที่เลือกทำชุดวางบิล; เมื่อลบ DO จะล้างความสัมพันธ์และคงตั๋วชั่งเป็นเอกสารเดี่ยว | ย้ายรูปตั๋วชั่งไปโซน `02_ใบงานหลัก_DO_ครบชุด`; คงรูปและข้อมูลตั๋วชั่งเป็นเอกสารแยกสำหรับตรวจสอบย้อนกลับ |
 | **3** | **กดยืนยันตรวจรับบิลเป็น `ใบส่งของ (DO)`** | ย้ายไฟล์ให้สำเร็จก่อน แล้วปรับ local Order/Inbox state; การ sync ไป `orders`/`line_inbox` ใช้ debounced DB sync ไม่ใช่การบันทึก transaction แบบ synchronous | สร้างโฟลเดอร์ใบงาน `02_ใบงานหลัก_DO_ครบชุด/TR-xxxx_DO-xxxx` แล้วย้ายไฟล์จาก `00` เข้าไปก่อนบันทึก state |
@@ -342,6 +342,119 @@ CREATE TABLE IF NOT EXISTS public.system_config (
   config_value JSONB NOT NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Serialize DO TR assignment and make assigned TR values immutable.
+CREATE OR REPLACE FUNCTION public.assign_order_tr_number()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  tr_prefix TEXT;
+  max_sequence NUMERIC;
+  next_sequence TEXT;
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NULLIF(BTRIM(OLD.col1), '') IS NOT NULL THEN
+      IF NEW.col1 IS DISTINCT FROM OLD.col1 THEN
+        RAISE EXCEPTION 'เลข TR เป็นข้อมูลถาวรและไม่สามารถแก้ไขได้';
+      END IF;
+      RETURN NEW;
+    END IF;
+  END IF;
+
+  IF NEW.doc_type IN ('delivery_order', 'concrete', 'full_logistics') THEN
+    IF current_setting('smartweigh.prepare_do_order_id', true) IS DISTINCT FROM NEW.id THEN
+      NEW.col1 := NULL;
+      RETURN NEW;
+    END IF;
+
+    IF NULLIF(BTRIM(NEW.col2), '') IS NULL OR NULLIF(BTRIM(NEW.col9), '') IS NULL THEN
+      NEW.col1 := NULL;
+    ELSE
+      PERFORM pg_advisory_xact_lock(391, 1);
+      SELECT NULLIF(BTRIM(config_value->>'trPrefix'), '')
+      INTO tr_prefix
+      FROM public.system_config
+      WHERE config_key = 'system_settings';
+      tr_prefix := COALESCE(tr_prefix, 'TR-' || EXTRACT(YEAR FROM CURRENT_DATE)::TEXT || '-');
+      IF LENGTH(tr_prefix) > 40 OR tr_prefix ~ '[[:cntrl:]]' THEN
+        RAISE EXCEPTION 'คำนำหน้าเลข TR ในการตั้งค่าระบบไม่ถูกต้อง';
+      END IF;
+
+      SELECT COALESCE(MAX(SUBSTRING(col1 FROM LENGTH(tr_prefix) + 1)::NUMERIC), 0)
+      INTO max_sequence
+      FROM public.orders
+      WHERE LEFT(COALESCE(col1, ''), LENGTH(tr_prefix)) = tr_prefix
+        AND SUBSTRING(col1 FROM LENGTH(tr_prefix) + 1) ~ '^[0-9]+$'
+        AND doc_type IN ('delivery_order', 'concrete', 'full_logistics');
+      next_sequence := (max_sequence + 1)::TEXT;
+      NEW.col1 := tr_prefix || LPAD(next_sequence, GREATEST(3, LENGTH(next_sequence)), '0');
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS orders_assign_immutable_tr_number ON public.orders;
+CREATE TRIGGER orders_assign_immutable_tr_number
+BEFORE INSERT OR UPDATE ON public.orders
+FOR EACH ROW
+EXECUTE FUNCTION public.assign_order_tr_number();
+
+CREATE OR REPLACE FUNCTION public.prepare_do_order(p_order JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  requested_id TEXT;
+  saved_order public.orders%ROWTYPE;
+  prepared_order public.orders%ROWTYPE;
+BEGIN
+  requested_id := NULLIF(BTRIM(p_order->>'id'), '');
+  IF requested_id IS NULL
+    OR COALESCE(p_order->>'doc_type', '') NOT IN ('delivery_order', 'concrete', 'full_logistics')
+    OR NULLIF(BTRIM(p_order->>'col2'), '') IS NULL
+    OR NULLIF(BTRIM(p_order->>'col9'), '') IS NULL THEN
+    RAISE EXCEPTION 'ข้อมูลใบส่งของสำหรับกำหนดเลข TR ไม่ถูกต้อง';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(391, 1);
+  PERFORM set_config('smartweigh.prepare_do_order_id', requested_id, true);
+  SELECT * INTO saved_order
+  FROM public.orders
+  WHERE id = requested_id
+  FOR UPDATE;
+  IF FOUND THEN
+    IF saved_order.doc_type NOT IN ('delivery_order', 'concrete', 'full_logistics') THEN
+      RAISE EXCEPTION 'ID นี้ถูกใช้กับเอกสารที่ไม่ใช่ใบส่งของ';
+    END IF;
+    IF NULLIF(BTRIM(saved_order.col1), '') IS NULL THEN
+      UPDATE public.orders
+      SET col1 = NULL,
+          col2 = COALESCE(NULLIF(BTRIM(p_order->>'col2'), ''), col2),
+          col9 = COALESCE(NULLIF(BTRIM(p_order->>'col9'), ''), col9)
+      WHERE id = requested_id
+      RETURNING * INTO saved_order;
+    END IF;
+    RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
+  END IF;
+
+  prepared_order := jsonb_populate_record(NULL::public.orders, p_order);
+  prepared_order.col1 := NULL;
+  prepared_order.status := 'pending';
+  INSERT INTO public.orders SELECT (prepared_order).* RETURNING * INTO saved_order;
+  RETURN jsonb_build_object('id', saved_order.id, 'tr_number', saved_order.col1);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.assign_order_tr_number() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.prepare_do_order(JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.assign_order_tr_number() TO service_role;
+GRANT EXECUTE ON FUNCTION public.prepare_do_order(JSONB) TO service_role;
 
 -- 7. ตารางชุดรับวางบิลฝ่ายจัดซื้อ & เชื่อมต่อ Express (Purchasing Billing Notes & Express RR)
 CREATE TABLE IF NOT EXISTS public.billing_notes (

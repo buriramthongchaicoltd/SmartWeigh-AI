@@ -80,8 +80,6 @@ interface VerifyModalProps {
   pos?: PurchaseOrder[];
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
-  trPrefix: string;
-  canEditTrNumber?: boolean;
   onClose: () => void;
   onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean | Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
@@ -102,8 +100,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   pos = [],
   existingOrders = [],
   lineInboxItems = [],
-  trPrefix,
-  canEditTrNumber = false,
   onClose,
   onSaveOrder,
   onSwitchToPO,
@@ -132,11 +128,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [hasAttachedImage, setHasAttachedImage] = useState(false);
   const [pairedWeighbridgeInboxId, setPairedWeighbridgeInboxId] = useState('');
-  const [isLoadingTrNumber, setIsLoadingTrNumber] = useState(false);
-  const [trLookupFailed, setTrLookupFailed] = useState(false);
-  const [trRetryCount, setTrRetryCount] = useState(0);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const trLookupGeneration = useRef(0);
   const zoneRescanGeneration = useRef(0);
   const isExistingOrder = Boolean(orderData?.id && existingOrders.some(order => order.id === orderData.id));
   const requiresTrNumber = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
@@ -232,54 +224,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
     setShowAllCols(false);
   }, [orderData, isOpen, billImage]);
-
-  useEffect(() => {
-    if (!isOpen || !orderData || isExistingOrder) {
-      setIsLoadingTrNumber(false);
-      return;
-    }
-
-    if (!requiresTrNumber) {
-      setIsLoadingTrNumber(false);
-      setTrLookupFailed(false);
-      setSaveError('');
-      setForm(current => ({ ...current, col1: '' }));
-      return;
-    }
-
-    const generation = ++trLookupGeneration.current;
-    const controller = new AbortController();
-    setIsLoadingTrNumber(true);
-    setTrLookupFailed(false);
-    setSaveError('');
-    setForm(current => ({ ...current, col1: '' }));
-
-    fetch(`/api/orders/next-tr-number?prefix=${encodeURIComponent(trPrefix)}`, {
-      signal: controller.signal
-    })
-      .then(async response => {
-        const result = await response.json();
-        if (!response.ok || !result.success || typeof result.trNumber !== 'string') {
-          throw new Error(result.error || `อ่านเลข TR ไม่สำเร็จ (HTTP ${response.status})`);
-        }
-        if (generation === trLookupGeneration.current) {
-          setForm(current => ({ ...current, col1: result.trNumber }));
-        }
-      })
-      .catch(error => {
-        if (controller.signal.aborted || generation !== trLookupGeneration.current) return;
-        setTrLookupFailed(true);
-        setSaveError(error instanceof Error ? error.message : 'อ่านเลข TR จากฐานข้อมูลไม่สำเร็จ');
-      })
-      .finally(() => {
-        if (generation === trLookupGeneration.current) setIsLoadingTrNumber(false);
-      });
-
-    return () => {
-      controller.abort();
-      if (generation === trLookupGeneration.current) trLookupGeneration.current += 1;
-    };
-  }, [isOpen, orderData, isExistingOrder, requiresTrNumber, trPrefix, billImage, trRetryCount]);
 
   // Sync billImage into currentImage when it arrives async (e.g. fetched from LINE API after modal opens)
   useEffect(() => {
@@ -943,17 +887,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSaving) return;
-    if (isLoadingTrNumber) return;
-    if (requiresTrNumber && !form.col1?.trim()) {
-      setSaveError(currentError =>
-        trLookupFailed && currentError
-          ? currentError
-          : 'ยังไม่มีเลข TR จากฐานข้อมูลจริง กรุณาลองอ่านเลขใหม่ก่อนบันทึก'
-      );
-      setTrLookupFailed(true);
-      return;
-    }
-
     // Strict Mandatory Check: "ชื่อโครงการ (ช่อง 2)" must be present before confirming save
     if (!form.col2 || !form.col2.trim()) {
       setProjectMissingError(true);
@@ -973,20 +906,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     setIsSaving(true);
     setSaveError('');
     try {
-      if (requiresTrNumber) {
-        const trCheckParams = new URLSearchParams({ trNumber: form.col1?.trim() || '' });
-        if (isExistingOrder && form.id) trCheckParams.set('excludeId', form.id);
-        const trCheckResponse = await fetch(`/api/orders/check-tr-number?${trCheckParams.toString()}`);
-        const trCheckResult = await trCheckResponse.json();
-        if (!trCheckResponse.ok || !trCheckResult.success) {
-          throw new Error(trCheckResult.error || `ตรวจเลข TR ไม่สำเร็จ (HTTP ${trCheckResponse.status})`);
-        }
-        if (trCheckResult.isDuplicate) {
-          setSaveError(`เลข TR ${form.col1} ถูกใช้กับรายการอื่นในฐานข้อมูลแล้ว กรุณาระบุเลขที่ไม่ซ้ำ`);
-          return;
-        }
-      }
-
       if (await onSaveOrder(finalizedOrder, storeToSave, true)) {
         onClose();
       } else {
@@ -1085,28 +1004,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
           {/* Right Column: Dynamic Form tailored by Bill Type (7 Cols) */}
           <div className="md:col-span-7 bg-white p-4 overflow-y-auto space-y-3.5 flex flex-col h-full text-xs">
-            {isExistingOrder && canEditTrNumber && (
-              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 space-y-1.5">
-                <label htmlFor="editable-tr-number" className="block text-xs font-bold text-amber-950">
-                  เลข TR ภายในระบบ (แก้ไขโดย Admin)
-                </label>
-                <input
-                  id="editable-tr-number"
-                  type="text"
-                  value={form.col1 || ''}
-                  onChange={event => {
-                    setForm(current => ({ ...current, col1: event.target.value }));
-                    setSaveError('');
-                  }}
-                  disabled={isSaving}
-                  className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 font-mono text-sm font-semibold text-slate-900 focus:border-amber-500 focus:outline-none disabled:bg-slate-100"
-                />
-                <p className="text-[11px] text-amber-900">
-                  เปลี่ยนเลขแล้วกด “บันทึกการแก้ไข” เพื่อบันทึกลงฐานข้อมูล
-                </p>
-              </div>
-            )}
-            
             {/* Top Toolbar: Active Document Mode & Optional Switcher */}
             <div className="bg-slate-100 p-2 rounded-xl border border-slate-200 space-y-2">
               <div className="flex items-center justify-between flex-wrap gap-2">
@@ -3187,9 +3084,15 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <input
                           type="text"
                           value={form.col1 || ''}
-                          onChange={(e) => handleTextChange('col1', e.target.value)}
-                          className="w-full p-2 border border-slate-300 rounded-lg bg-white font-mono"
+                          readOnly
+                          aria-readonly="true"
+                          className="w-full p-2 border border-slate-300 rounded-lg bg-slate-100 font-mono text-slate-700"
                         />
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          {isExistingOrder
+                            ? 'เลข TR ที่บันทึกแล้วไม่สามารถแก้ไขได้'
+                            : 'ระบบจะกำหนดเลขจากฐานข้อมูลเมื่อยืนยัน โดยเข้าคิวป้องกันเลขซ้ำ'}
+                        </p>
                       </div>
                       <div>
                         <label className="block text-[11px] font-bold text-slate-800 mb-0.5">
@@ -3683,15 +3586,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   {saveError && (
                     <div role="alert" className="max-w-md text-xs font-semibold text-red-700">
                       <span>{saveError}</span>
-                      {trLookupFailed && (
-                        <button
-                          type="button"
-                          onClick={() => setTrRetryCount(count => count + 1)}
-                          className="ml-2 underline"
-                        >
-                          ลองอ่านเลข TR อีกครั้ง
-                        </button>
-                      )}
                     </div>
                   )}
                   {!form.col2?.trim() && (
@@ -3702,22 +3596,20 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    disabled={isSaving || isLoadingTrNumber}
+                    disabled={isSaving}
                     className="px-6 py-2.5 rounded-xl font-bold transition flex items-center gap-2 shadow-md cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 active:scale-95 text-xs md:text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-200"
                   >
                     <Save className="w-4 h-4" />
                     <span>
                       {isSaving
-                        ? isExistingOrder
-                          ? 'กำลังบันทึกการแก้ไข...'
+                            ? isExistingOrder
+                              ? 'กำลังบันทึกการแก้ไข...'
                           : form.lineInboxId
                             ? selectedDocType === 'dest_weighbridge'
                               ? 'กำลังย้ายรูปตั๋วชั่งปลายทางและบันทึก...'
                               : 'กำลังย้ายรูปและบันทึก...'
                             : 'กำลังบันทึกเอกสาร...'
-                        : isLoadingTrNumber
-                          ? 'กำลังอ่านเลข TR จากฐานข้อมูล...'
-                          : isExistingOrder
+                        : isExistingOrder
                             ? 'บันทึกการแก้ไข'
                             : form.lineInboxId
                               ? 'ยืนยันตรวจรับและบันทึกเอกสาร'

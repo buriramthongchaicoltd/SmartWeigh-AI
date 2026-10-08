@@ -1865,7 +1865,8 @@ export default function App() {
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
-  const handleSaveOrder = async (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
+  const handleSaveOrder = async (inputOrder: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
+    const order = { ...inputOrder };
     const persistVerifiedInboxItem = async (
       item: LineBillInboxItem,
       errorPrefix: string
@@ -1921,6 +1922,28 @@ export default function App() {
       );
       if (blockingDups.length > 0 && !allowDuplicate) {
         showToast(`พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาตรวจสอบและยืนยันก่อนบันทึก`, 'info');
+        return false;
+      }
+    }
+
+    if (
+      (!isExistingRecord || !String(order.col1 || '').trim()) &&
+      ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || '')
+    ) {
+      try {
+        const response = await fetch('/api/orders/prepare-do', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ record: order })
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.success || typeof result.trNumber !== 'string') {
+          throw new Error(result?.error || `กำหนดเลข TR ไม่สำเร็จ (HTTP ${response.status})`);
+        }
+        order.col1 = result.trNumber;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+        showToast(`ยังไม่ได้ดำเนินการต่อ เพราะจัดคิวใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${reason}`, 'error');
         return false;
       }
     }
@@ -4327,8 +4350,6 @@ export default function App() {
         pos={pos}
         existingOrders={orders}
         lineInboxItems={lineInbox}
-        trPrefix={systemSettings.trPrefix || `TR-${new Date().getFullYear()}-`}
-        canEditTrNumber={currentUser.role === 'admin'}
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
         onSwitchToPO={handleSwitchVerifyToPO}

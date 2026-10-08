@@ -589,6 +589,52 @@ async function preserveRestrictedOrderFields(
   }
 }
 
+async function enforceImmutableTrNumbers(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  rows: Record<string, any>[]
+): Promise<void> {
+  const existingRows = new Map<string, string>();
+  for (let index = 0; index < rows.length; index += 500) {
+    const ids = rows.slice(index, index + 500).map(row => row.id).filter(Boolean);
+    if (ids.length === 0) continue;
+    const { data, error } = await client.from('orders').select('id,col1').in('id', ids);
+    if (error) throw error;
+    for (const row of data || []) {
+      existingRows.set(String(row.id), String(row.col1 || '').trim());
+    }
+  }
+
+  for (const row of rows) {
+    const id = String(row.id || '');
+    if (!existingRows.has(id)) {
+      if (
+        ['delivery_order', 'concrete', 'full_logistics'].includes(String(row.doc_type || '')) &&
+        String(row.col1 || '').trim()
+      ) {
+        throw new Error(`เลข TR ของเอกสาร ${id} ต้องกำหนดผ่านการยืนยันใบส่งของเท่านั้น`);
+      }
+      continue;
+    }
+    if (String(row.col1 || '').trim() !== existingRows.get(id)) {
+      throw new Error(`เลข TR ของเอกสาร ${id} เป็นข้อมูลถาวรและไม่สามารถแก้ไขได้`);
+    }
+  }
+}
+
+async function prepareDoOrder(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  row: Record<string, any>
+): Promise<string> {
+  row.col1 = null;
+  const { data, error } = await client.rpc('prepare_do_order', { p_order: row });
+  if (error) throw error;
+  if (!data || typeof data.tr_number !== 'string' || !data.tr_number.trim()) {
+    throw new Error('ฐานข้อมูลไม่ได้คืนเลข TR สำหรับใบส่งของ');
+  }
+  row.col1 = data.tr_number;
+  return data.tr_number;
+}
+
 // In-memory rate limiting to prevent Denial-of-Service and Gemini API quota exhaustion
 const scanRateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const SCAN_WINDOW_MS = 60 * 1000; // 1-minute sliding window
@@ -4025,6 +4071,16 @@ app.post('/api/database/migrate-local-to-cloud', async (req: Request, res: Respo
       for (let i = 0; i < orders.length; i += chunkSize) {
         const chunk = orders.slice(i, i + chunkSize);
         const rows = chunk.map(mapOrderToSupabase);
+        for (const row of rows) {
+          if (
+            ['delivery_order', 'concrete', 'full_logistics'].includes(row.doc_type) &&
+            String(row.col2 || '').trim() &&
+            String(row.col9 || '').trim()
+          ) {
+            await prepareDoOrder(client, row);
+          }
+        }
+        await enforceImmutableTrNumbers(client, rows);
         const { error } = await client.from('orders').upsert(rows, { onConflict: 'id' });
         if (!error) migratedCounts.orders += rows.length;
         else console.error(`Migrate orders chunk ${i} error:`, error);
@@ -4369,16 +4425,25 @@ app.post('/api/auth/users', async (req: Request, res: Response) => {
 });
 
 // Read the next TR from persisted orders, never from browser counters or local state.
-app.get('/api/orders/next-tr-number', async (req: Request, res: Response) => {
-  const prefix = typeof req.query.prefix === 'string' ? req.query.prefix.trim() : '';
-  if (!prefix || prefix.length > 40 || /[\u0000-\u001f]/.test(prefix)) {
-    return res.status(400).json({ success: false, error: 'รูปแบบ prefix ของเลข TR ไม่ถูกต้อง' });
-  }
-
+app.get('/api/orders/next-tr-number', async (_req: Request, res: Response) => {
   try {
     const client = getSupabaseClient();
     if (!client) {
       return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงอ่านลำดับเลข TR จริงไม่ได้' });
+    }
+
+    const { data: settingsRow, error: settingsError } = await client
+      .from('system_config')
+      .select('config_value')
+      .eq('config_key', 'system_settings')
+      .maybeSingle();
+    if (settingsError) throw settingsError;
+    const configuredPrefix = settingsRow?.config_value?.trPrefix;
+    const prefix = typeof configuredPrefix === 'string' && configuredPrefix.trim()
+      ? configuredPrefix.trim()
+      : `TR-${new Date().getFullYear()}-`;
+    if (prefix.length > 40 || /[\u0000-\u001f]/.test(prefix)) {
+      return res.status(500).json({ success: false, error: 'คำนำหน้าเลข TR ในฐานข้อมูลไม่ถูกต้อง กรุณาตรวจสอบการตั้งค่าระบบ' });
     }
 
     const pageSize = 1000;
@@ -4474,6 +4539,38 @@ app.get('/api/orders/check-tr-number', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/api/orders/prepare-do', async (req: Request, res: Response) => {
+  const record = req.body?.record;
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    return res.status(400).json({ success: false, error: 'ข้อมูลใบส่งของไม่ถูกต้อง' });
+  }
+  if (!['delivery_order', 'concrete', 'full_logistics'].includes(record.docType)) {
+    return res.status(400).json({ success: false, error: 'เอกสารประเภทนี้ไม่ใช้เลข TR' });
+  }
+  if (!String(record.id || '').trim() || !String(record.col2 || '').trim() || !String(record.col9 || '').trim()) {
+    return res.status(400).json({ success: false, error: 'กรุณาระบุ ID โครงการ และผู้รับสินค้าให้ครบก่อนจัดคิวใบส่งของ' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงเข้าคิวกำหนดเลข TR ไม่ได้' });
+    }
+
+    const dbRow = mapOrderToSupabase(record);
+    const authenticatedUser = getAuthenticatedUser(req);
+    if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+    const trNumber = await prepareDoOrder(client, dbRow);
+    return res.json({ success: true, id: dbRow.id, trNumber });
+  } catch (error: any) {
+    console.error('[TR Queue] Failed to prepare DO in database:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `เข้าคิวบันทึกใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
 // 7. Save Single Record Directly to Supabase (100% Real Database Persistence)
 app.post('/api/database/save-record', async (req: Request, res: Response) => {
   try {
@@ -4511,8 +4608,16 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
     }
 
     const authenticatedUser = getAuthenticatedUser(req);
-    if (targetTable === 'orders' && authenticatedUser) {
-      await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+    if (targetTable === 'orders') {
+      if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+      if (
+        ['delivery_order', 'concrete', 'full_logistics'].includes(dbRow.doc_type) &&
+        String(dbRow.col2 || '').trim() &&
+        String(dbRow.col9 || '').trim()
+      ) {
+        await prepareDoOrder(client, dbRow);
+      }
+      await enforceImmutableTrNumbers(client, [dbRow]);
     }
 
     const { error } = await client.from(targetTable).upsert(dbRow, { onConflict: targetTable === 'system_config' ? 'config_key' : 'id' });
@@ -4634,6 +4739,7 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     if (targetTable === 'orders') {
       const authenticatedUser = getAuthenticatedUser(req);
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, rows);
+      await enforceImmutableTrNumbers(client, rows);
     }
     const chunkSize = 50;
     for (let i = 0; i < rows.length; i += chunkSize) {
