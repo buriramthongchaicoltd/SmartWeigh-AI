@@ -4,6 +4,27 @@
 
 ---
 
+## [2026-10-08] ซิงก์รูป LINE ก่อนตรวจซ้ำตอนบันทึก
+
+### การเปลี่ยนแปลง
+- ปรับ save gate สำหรับเอกสาร LINE ใน `orders`: ซิงก์/ยืนยัน Drive File ID ของเอกสารและตั๋วชั่งที่เลือกก่อนตรวจ duplicate ขั้นสุดท้าย; หาก sync หรือ refresh สถานะไม่สำเร็จจะหยุดก่อนจอง TR/บันทึก.
+- ปรับ PO จาก LINE ให้ซิงก์และโหลดสถานะ Inbox ล่าสุดก่อนตรวจ duplicate; ยังคงย้ายไฟล์เข้าโซน PO และใช้ rollback เดิมหากการบันทึก/ยืนยันล้มเหลว.
+- อัปเดต Blueprint ให้แยก duplicate lookup ระหว่าง OCR (ป้ายเตือนเบื้องต้น) ออกจาก duplicate gate ก่อนบันทึก และระบุลำดับที่ตรวจรับจริง.
+
+### การตรวจสอบ
+- `npm.cmd run lint`, `npm.cmd run build`, `node --check` สำหรับ Google Apps Script และ `git diff --check` ผ่าน
+- ไม่ได้เชื่อมต่อหรือทดสอบกับ Supabase/Google Drive จริง
+
+## [2026-10-08] บันทึก Blueprint กล่องพักบิล LINE
+
+### การเปลี่ยนแปลง
+- บันทึก Mermaid flow เป็น Blueprint หลักใน `DATABASE_STORAGE_BLUEPRINT.md` และอ้างอิงจาก `HANDOVER_DOCUMENTATION.md`.
+- ระบุการซิงก์/ยืนยัน Drive File ID ก่อนตรวจ duplicate เป็นลำดับเป้าหมาย; บันทึกว่ารายการพักไม่มี auto-expiration และมี filter แยก ignored/failed.
+- แผนภาพครอบคลุม durable webhook, OCR, duplicate gate, sync/verify, transaction DO+ตั๋วชั่ง, retry/ชดเชย และทางแจ้งให้ผู้ใช้/Admin ตรวจสอบ.
+
+### การตรวจสอบ
+- เป็นการอัปเดตเอกสารเท่านั้น; ไม่แก้โค้ดและไม่รัน build/test
+
 ## [2026-10-08] ชดเชย reservation DO หลังตรวจรับ LINE ล้มเหลว
 
 ### การเปลี่ยนแปลง

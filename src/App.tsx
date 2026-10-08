@@ -2251,44 +2251,6 @@ export default function App() {
         showToast('กรุณาระบุประเภทเอกสาร เลขที่เอกสาร และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ', 'info');
         return false;
       }
-      try {
-        if (await removeDuplicateInboxBeforeSave(order.lineInboxId, order.docType || 'delivery_order', billNo, order.col8)) {
-          return true;
-        }
-      } catch (error: any) {
-        showToast(`พบข้อมูลซ้ำแต่ลบรายการออกจากกล่องพัก LINE ไม่สำเร็จ จึงยังไม่บันทึกเอกสาร: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
-        return false;
-      }
-    } else if (!isExistingRecord) {
-      const billNo = order.docType === 'dest_weighbridge' ? order.col17 : order.col6;
-      if (billNo?.trim() && order.col8?.trim()) {
-        try {
-          const duplicate = await checkLineInboxDuplicate(
-            order.docType || 'delivery_order',
-            billNo,
-            order.col8,
-            ''
-          );
-          if (duplicate) {
-            showToast(`บล็อกการบันทึก: พบเอกสารซ้ำ ${duplicate.reason}`, 'error');
-            return false;
-          }
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : 'กรุณาลองอีกครั้ง';
-          showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${reason}`, 'error');
-          return false;
-        }
-      }
-    }
-
-    if (!isExistingRecord) {
-      const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
-        d => d.level === 'exact' || d.level === 'suspected'
-      );
-      if (blockingDups.length > 0) {
-        showToast(`บล็อกการบันทึก: พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาแก้เลขที่เอกสารหรือข้อมูลร้านให้ถูกต้องก่อนลองใหม่`, 'error');
-        return false;
-      }
     }
 
     let verifiedLineItem: LineBillInboxItem | undefined;
@@ -2320,8 +2282,7 @@ export default function App() {
       return mergedItem;
     };
     const ensureInboxDriveFile = async (inboxId: string): Promise<LineBillInboxItem> => {
-      let inboxItem = lineInbox.find(item => item.id === inboxId);
-      if (!inboxItem?.driveFileId) inboxItem = await refreshInboxItem(inboxId);
+      let inboxItem = await refreshInboxItem(inboxId);
       if (inboxItem.driveFileId) return inboxItem;
 
       const syncResponse = await fetch('/api/drive/sync-inbox-images', {
@@ -2374,6 +2335,57 @@ export default function App() {
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
         showToast(`ยังไม่ได้บันทึกเอกสาร: ${reason}`, 'error');
+        return false;
+      }
+    }
+
+    if (order.lineInboxId && !isExistingRecord) {
+      const billNo = order.docType === 'dest_weighbridge'
+        ? order.col17
+        : order.docType === 'purchase_order'
+          ? order.col4
+          : order.col6;
+      try {
+        if (await removeDuplicateInboxBeforeSave(
+          order.lineInboxId,
+          order.docType || 'delivery_order',
+          billNo || '',
+          order.col8 || ''
+        )) {
+          return true;
+        }
+      } catch (error: any) {
+        showToast(`พบข้อมูลซ้ำแต่ลบรายการออกจากกล่องพัก LINE ไม่สำเร็จ จึงยังไม่บันทึกเอกสาร: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        return false;
+      }
+    } else if (!isExistingRecord) {
+      const billNo = order.docType === 'dest_weighbridge' ? order.col17 : order.col6;
+      if (billNo?.trim() && order.col8?.trim()) {
+        try {
+          const duplicate = await checkLineInboxDuplicate(
+            order.docType || 'delivery_order',
+            billNo,
+            order.col8,
+            ''
+          );
+          if (duplicate) {
+            showToast(`บล็อกการบันทึก: พบเอกสารซ้ำ ${duplicate.reason}`, 'error');
+            return false;
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'กรุณาลองอีกครั้ง';
+          showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${reason}`, 'error');
+          return false;
+        }
+      }
+    }
+
+    if (!isExistingRecord) {
+      const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
+        d => d.level === 'exact' || d.level === 'suspected'
+      );
+      if (blockingDups.length > 0) {
+        showToast(`บล็อกการบันทึก: พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาแก้เลขที่เอกสารหรือข้อมูลร้านให้ถูกต้องก่อนลองใหม่`, 'error');
         return false;
       }
     }
@@ -3793,15 +3805,74 @@ export default function App() {
   const handleSavePO = async (inputPO: PurchaseOrder): Promise<boolean> => {
     let savedPO = inputPO;
     const isExistingPO = pos.some(p => p.id === savedPO.id);
+    let inboxItemForPO: LineBillInboxItem | undefined;
     if (savedPO.lineInboxId && !isExistingPO) {
-      const inboxItem = lineInbox.find(item => item.id === savedPO.lineInboxId);
-      if (!inboxItem) {
+      inboxItemForPO = lineInbox.find(item => item.id === savedPO.lineInboxId);
+      if (!inboxItemForPO) {
         showToast('ไม่พบรายการต้นทางในกล่องพัก LINE กรุณาโหลดรายการใหม่ก่อนบันทึก PO', 'error');
         return false;
       }
       if (!savedPO.poNumber?.trim() || !savedPO.storeName?.trim()) {
         showToast('กรุณาระบุเลขที่ PO และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ', 'info');
         return false;
+      }
+      try {
+        const refreshResponse = await fetch('/api/line/inbox');
+        const refreshResult = await refreshResponse.json();
+        if (!refreshResponse.ok || !refreshResult?.success || !Array.isArray(refreshResult.items)) {
+          throw new Error(refreshResult?.error || 'โหลดสถานะรายการ PO จากฐานข้อมูลไม่สำเร็จ');
+        }
+        const refreshedInboxItem = (refreshResult.items as LineBillInboxItem[])
+          .find(item => item.id === savedPO.lineInboxId);
+        if (!refreshedInboxItem) throw new Error('ไม่พบรายการ PO ในกล่องพัก LINE');
+        inboxItemForPO = {
+          ...inboxItemForPO,
+          ...refreshedInboxItem,
+          image: inboxItemForPO.image || refreshedInboxItem.image
+        };
+        setLineInbox(previous => previous.map(item =>
+          item.id === inboxItemForPO!.id ? { ...item, ...inboxItemForPO } : item
+        ));
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'กรุณาลองใหม่';
+        showToast(`ยังบันทึก PO ไม่ได้: ${reason}`, 'error');
+        return false;
+      }
+      if (!inboxItemForPO.driveFileId) {
+        try {
+          const syncResponse = await fetch('/api/drive/sync-inbox-images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ inboxId: savedPO.lineInboxId, batchSize: 1 })
+          });
+          const syncResult = await syncResponse.json();
+          if (
+            !syncResponse.ok ||
+            !syncResult?.success ||
+            Number(syncResult.failedCount) > 0 ||
+            Number(syncResult.uploadedCount) + Number(syncResult.reusedExistingCount) < 1
+          ) {
+            const syncError = Array.isArray(syncResult?.errors) ? syncResult.errors[0] : undefined;
+            throw new Error(syncError || syncResult?.error || 'ซิงก์รูป PO เข้า Google Drive ไม่สำเร็จ');
+          }
+          const refreshResponse = await fetch('/api/line/inbox');
+          const refreshResult = await refreshResponse.json();
+          if (!refreshResponse.ok || !refreshResult?.success || !Array.isArray(refreshResult.items)) {
+            throw new Error(refreshResult?.error || 'โหลดสถานะรูป PO จากฐานข้อมูลไม่สำเร็จ');
+          }
+          inboxItemForPO = (refreshResult.items as LineBillInboxItem[])
+            .find(item => item.id === savedPO.lineInboxId);
+          if (!inboxItemForPO?.driveFileId) {
+            throw new Error('ซิงก์รูป PO แล้ว แต่ฐานข้อมูลยังไม่มี Drive File ID');
+          }
+          setLineInbox(previous => previous.map(item =>
+            item.id === inboxItemForPO!.id ? { ...item, ...inboxItemForPO } : item
+          ));
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'กรุณาลองใหม่';
+          showToast(`ยังบันทึก PO ไม่ได้: ${reason}`, 'error');
+          return false;
+        }
       }
       try {
         if (await removeDuplicateInboxBeforeSave(
@@ -3845,7 +3916,7 @@ export default function App() {
 
     let verifiedInboxItem: LineBillInboxItem | undefined;
     if (savedPO.lineInboxId) {
-      const inboxItem = lineInbox.find(item => item.id === savedPO.lineInboxId);
+      const inboxItem = inboxItemForPO || lineInbox.find(item => item.id === savedPO.lineInboxId);
       if (!inboxItem?.driveFileId) {
         showToast('ยังบันทึก PO ไม่ได้: ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน', 'info');
         return false;
