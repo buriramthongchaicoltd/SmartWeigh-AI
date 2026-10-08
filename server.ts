@@ -6005,7 +6005,6 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
           .from('orders')
           .update({
             drive_folder_id: folderId,
-            drive_file_location: 'zone_02',
             updated_at: new Date().toISOString()
           })
           .eq('id', sourceOrder.id)

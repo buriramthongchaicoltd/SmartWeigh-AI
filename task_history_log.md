@@ -10,9 +10,10 @@
 - เพิ่มเครื่องมือใน Settings → Google Drive ให้ Manager/Admin เลือก DO ที่ยืนยันแล้วและมี TR/DO/Drive ID ครบ แสดงรายการอ้างอิงและปลายทางก่อนย้าย จำกัด 20 ชุดต่อรอบ พร้อมแสดงความคืบหน้าและข้อผิดพลาดรายไฟล์
 - ย้ายเฉพาะรูป DO และตั๋วชั่งต้นทางที่ผูกด้วย `matched_origin_do_id` โดยตรง; ไม่จับคู่จากเลข/ชื่อ และไม่รวมตั๋วปลายทาง, PO หรือใบกำกับภาษีที่ยังต้องมี flow แยก
 - เพิ่มการตรวจสอบซ้ำฝั่ง backend กับ Supabase ว่า DO/ตั๋วชั่งยัง verified, Drive ID ตรง, relation ตรง และเลข TR/DO/Drive ID ไม่กำกวม; จำกัดตำแหน่งต้นทางไว้ที่ LINE Inbox หรือ root/โฟลเดอร์ย่อยชั้นเดียวใต้โซน 02
-- ย้ายไฟล์เข้า `<TR>_DO-<DO>` โดยไม่เปลี่ยนชื่อ; บันทึก `drive_folder_id`/`drive_file_location` กลับ `orders`; การ retry ปลอดภัยกรณีไฟล์อยู่ปลายทางแล้วหรือ DB บันทึกพลาดหลังย้าย
+- ย้ายไฟล์เข้า `<TR>_DO-<DO>` โดยไม่เปลี่ยนชื่อ; บันทึก `drive_folder_id` กลับ `orders` (ตาราง `orders` ไม่มี `drive_file_location`); การ retry ปลอดภัยกรณีไฟล์อยู่ปลายทางแล้วหรือ DB บันทึกพลาดหลังย้าย
 - ปรับ Google Apps Script ให้ตรวจแหล่งไฟล์, ตรวจโฟลเดอร์ชื่อซ้ำ และรองรับคงชื่อเดิม; ผู้ใช้ GAS ต้อง Deploy source รุ่นล่าสุดด้วยตนเอง
 - อัปเดต `DATABASE_STORAGE_BLUEPRINT.md` และ `HANDOVER_DOCUMENTATION.md` พร้อมข้อจำกัดที่รายการกำกวม/ข้อมูลไม่ครบต้องตรวจมือ
+- แก้ปัญหาจากการทดสอบจริงที่พบว่า `orders.drive_file_location` ไม่มีใน schema; เขียนเฉพาะ `drive_folder_id` เพื่อให้ retry รายการที่ย้าย Drive ไปแล้วบันทึกฐานข้อมูลสำเร็จได้
 
 ### การตรวจสอบ
 - รัน `npm.cmd run lint`, `npm.cmd run build`, `git diff --check` และตรวจไวยากรณ์ Google Apps Script
