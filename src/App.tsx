@@ -229,10 +229,24 @@ const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
   return next;
 };
 
-// Self-healing reconciliation across DOs and Destination Weighbridge tickets (Zone 4)
-// Ensures that whenever a DO has a linked Zone 4 ticket (or vice versa), Zone 4 columns (16-21) on the DO are always populated
+// Self-healing reconciliation across DOs and weighbridge tickets.
+// Repairs unique explicit origin-DO references and keeps linked destination-ticket data in Zone 4.
 const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
   const list = ordersList.map(normalizeOrderWeights);
+
+  list.forEach(ticket => {
+    if (ticket.docType !== 'weighbridge' || ticket.matchedOriginDoId || !ticket.linkedViaDocNo?.trim()) {
+      return;
+    }
+
+    const matchingDOs = list.filter(order =>
+      isDeliveryOrderPairingCandidate(order) &&
+      isExactDocNumberReference(order.col6, ticket.linkedViaDocNo)
+    );
+    if (matchingDOs.length === 1) {
+      ticket.matchedOriginDoId = matchingDOs[0].id;
+    }
+  });
 
   for (let i = 0; i < list.length; i++) {
     const ticket = list[i];
