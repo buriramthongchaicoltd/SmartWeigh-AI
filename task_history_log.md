@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-08] ป้องกัน LINE Inbox autosave ทับสถานะยืนยัน DO
+
+### การเปลี่ยนแปลง
+- กันรายการ LINE Inbox ที่กำลังยืนยัน DO ออกจาก autosave batch; ยกเลิก timer/bump generation และรอ batch ที่เริ่มไปแล้วก่อนบันทึกสถานะ `verified` โดยตรง จึงไม่ให้ snapshot เก่าทับ marker ก่อน transactional confirmation.
+- เมื่อชดเชยการย้ายรูปสำเร็จ บันทึกและสะท้อน `driveFileLocation: zone_00` กลับทั้งฐานข้อมูลและ state ในหน้าจอ; ปลดการป้องกันแถวหลังยืนยันสำเร็จหรือ rollback ครบเท่านั้น.
+- ทำให้ API ระบุ predicate ของ LINE Inbox ที่ไม่ผ่านโดยไม่ส่งค่า ID ออกมา และแปลง unknown GAS action เป็นคำแนะนำให้ deploy Web App version ใหม่.
+- บันทึก write barrier และการแยก deploy ของ GAS ไว้ใน `DATABASE_STORAGE_BLUEPRINT.md`.
+
+### การตรวจสอบ
+- ยังไม่ทดสอบกับ Supabase/Google Drive production; ต้อง deploy source ของเว็บ, RPC SQL ที่ใช้อยู่เดิม (ไม่มีการแก้ SQL ในงานนี้) และ Google Apps Script Web App แยกกันก่อนทดสอบ end-to-end.
+
 ## [2026-10-08] ซิงก์รูป LINE ก่อนตรวจซ้ำตอนบันทึก
 
 ### การเปลี่ยนแปลง

@@ -628,6 +628,7 @@ export default function App() {
   const dbSyncGenerationRef = React.useRef<Record<string, number>>({});
   const dbSyncInFlightRef = React.useRef<Record<string, Set<Promise<void>> | undefined>>({});
   const protectedPreparedOrderIdsRef = React.useRef(new Set<string>());
+  const protectedLineInboxIdsRef = React.useRef(new Set<string>());
   const lineInboxSyncRevisionRef = React.useRef(0);
   const lineInboxDeleteCountRef = React.useRef(0);
   const lineInboxVerifiedCleanupPendingRef = React.useRef(true);
@@ -643,7 +644,9 @@ export default function App() {
         try {
           const recordsToSync = table === 'orders'
             ? records.filter(record => !protectedPreparedOrderIdsRef.current.has(String(record.id || '')))
-            : records;
+            : table === 'line_inbox'
+              ? records.filter(record => !protectedLineInboxIdsRef.current.has(String(record.id || '')))
+              : records;
           if (recordsToSync.length === 0) return;
           const request = fetch('/api/database/save-batch', {
             method: 'POST',
@@ -808,6 +811,7 @@ export default function App() {
       showToast(`บันทึกเอกสารแล้ว แต่ลบแถวที่ตรวจรับออกจากกล่องพัก LINE ไม่สำเร็จ ระบบจะลองซิงก์ซ้ำ: ${reason}`, 'error');
       return false;
     } finally {
+      protectedLineInboxIdsRef.current.delete(id);
       lineInboxDeleteCountRef.current -= 1;
       lineInboxSyncRevisionRef.current += 1;
     }
@@ -2217,6 +2221,16 @@ export default function App() {
       deferCompletion = false
     ): Promise<boolean> => {
       try {
+        protectedLineInboxIdsRef.current.add(item.id);
+        if (saveDbTimerRef.current.line_inbox) {
+          clearTimeout(saveDbTimerRef.current.line_inbox);
+          saveDbTimerRef.current.line_inbox = undefined;
+        }
+        dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
+        await Promise.all(
+          [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
+        );
+
         const response = await fetch('/api/database/save-record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2414,15 +2428,23 @@ export default function App() {
           }
           const sourceItem = lineInbox.find(item => item.id === movedFile.inboxId);
           if (!sourceItem) throw new Error('ไม่พบข้อมูลรายการต้นทางสำหรับคืนสถานะ LINE Inbox');
+          const restoredSourceItem: LineBillInboxItem = {
+            ...sourceItem,
+            driveFileLocation: 'zone_00',
+            driveFolderId: undefined
+          };
           const inboxResponse = await fetch('/api/database/save-record', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ table: 'line_inbox', record: sourceItem })
+            body: JSON.stringify({ table: 'line_inbox', record: restoredSourceItem })
           });
           const inboxResult = await inboxResponse.json();
           if (!inboxResponse.ok || !inboxResult?.success) {
             throw new Error(inboxResult?.error || `คืนสถานะ LINE Inbox ไม่สำเร็จ (HTTP ${inboxResponse.status})`);
           }
+          setLineInbox(previous => previous.map(item =>
+            item.id === movedFile.inboxId ? restoredSourceItem : item
+          ));
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
           return `คืนรูป ${movedFile.inboxId} เข้า LINE Inbox ไม่สำเร็จ (${reason}); reservation ยังคงอยู่เพื่อป้องกันข้อมูลคลาดเคลื่อน`;
@@ -2430,6 +2452,10 @@ export default function App() {
       }
       movedInboxFiles.length = 0;
       if (!preparedDoReservation) {
+        if (order.lineInboxId) protectedLineInboxIdsRef.current.delete(order.lineInboxId);
+        if (pairedWeighbridgeInboxItem) {
+          protectedLineInboxIdsRef.current.delete(pairedWeighbridgeInboxItem.id);
+        }
         setOrders(previous => previous.filter(item =>
           item.id !== order.id &&
           (!pairedWeighbridgeInboxItem || item.lineInboxId !== pairedWeighbridgeInboxItem.id)
@@ -2452,7 +2478,9 @@ export default function App() {
         }
         preparedDoReservation = undefined;
         protectedPreparedOrderIdsRef.current.delete(order.id);
+        if (order.lineInboxId) protectedLineInboxIdsRef.current.delete(order.lineInboxId);
         if (pairedWeighbridgeInboxItem) {
+          protectedLineInboxIdsRef.current.delete(pairedWeighbridgeInboxItem.id);
           protectedPreparedOrderIdsRef.current.delete(
             orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
             `line-wb-${pairedWeighbridgeInboxItem.id}`

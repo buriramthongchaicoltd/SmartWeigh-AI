@@ -5081,15 +5081,19 @@ app.post('/api/orders/confirm-prepared-do', async (req: Request, res: Response) 
         .eq('id', inboxId)
         .maybeSingle();
       if (inboxError) throw inboxError;
-      if (
-        !inboxRow ||
-        inboxRow.status !== 'verified' ||
-        inboxRow.drive_file_id !== orderRow.drive_file_id ||
-        inboxRow.extracted_data?.verifiedDocumentId !== orderId
-      ) {
+      const inboxValidationFailures = !inboxRow
+        ? ['ไม่พบแถว LINE Inbox']
+        : [
+            inboxRow.status !== 'verified' ? 'สถานะ LINE Inbox ยังไม่ใช่ verified' : '',
+            inboxRow.drive_file_id !== orderRow.drive_file_id ? 'Drive File ID ไม่ตรงกับ reservation' : '',
+            inboxRow.extracted_data?.verifiedDocumentId !== orderId
+              ? 'verifiedDocumentId ไม่ตรงกับ reservation'
+              : ''
+          ].filter(Boolean);
+      if (inboxValidationFailures.length > 0) {
         return res.status(409).json({
           success: false,
-          error: 'ข้อมูล LINE Inbox ยังไม่ยืนยันครบหรือไม่ตรงกับ reservation'
+          error: `ข้อมูล LINE Inbox ยังไม่ยืนยันครบหรือไม่ตรงกับ reservation: ${inboxValidationFailures.join('; ')}`
         });
       }
     }
@@ -6932,13 +6936,26 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
       if (!cfg.gasWebAppUrl) {
         return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script สำหรับคืนรูป' });
       }
-      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
-        action: 'restore_line_inbox_file',
-        rootFolderId: cfg.rootFolderId,
-        fileId
-      });
+      let result: any;
+      try {
+        result = await callGasDriveApi(cfg.gasWebAppUrl, {
+          action: 'restore_line_inbox_file',
+          rootFolderId: cfg.rootFolderId,
+          fileId
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/ไม่รู้จัก action:\s*restore_line_inbox_file/i.test(message)) {
+          throw new Error('Google Apps Script ที่ตั้งค่าอยู่ยังไม่มี action restore_line_inbox_file; กรุณา deploy google_apps_script_drive.gs เป็น Web App version ใหม่');
+        }
+        throw error;
+      }
       if (!result?.success || result.targetZone !== 'zone_00') {
-        throw new Error(result?.error || 'Google Apps Script ไม่ยืนยันการคืนรูปเข้า LINE Inbox');
+        const message = result?.error || 'Google Apps Script ไม่ยืนยันการคืนรูปเข้า LINE Inbox';
+        if (/ไม่รู้จัก action:\s*restore_line_inbox_file/i.test(message)) {
+          throw new Error('Google Apps Script ที่ตั้งค่าอยู่ยังไม่มี action restore_line_inbox_file; กรุณา deploy google_apps_script_drive.gs เป็น Web App version ใหม่');
+        }
+        throw new Error(message);
       }
       return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
     }
