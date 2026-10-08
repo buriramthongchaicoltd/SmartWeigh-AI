@@ -825,6 +825,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       if (!input.billNo || !input.storeName) return false;
       const current = duplicateCheckResultsRef.current[item.id];
       return duplicateRetryId === item.id ||
+        current?.status === 'checking' ||
         current?.queryKey !== queryKey;
     });
     if (pending.length === 0) return;
