@@ -46,6 +46,8 @@ function doPost(e) {
       return handleGetImage(payload);
     } else if (action === 'sync_verified_move') {
       return handleMoveFile(payload);
+    } else if (action === 'sync_tax_invoice_links') {
+      return handleSyncTaxInvoiceLinks(payload);
     } else if (action === 'rename_and_move') {
       return handleRenameAndMoveFile(payload);
     } else if (action === 'cleanup') {
@@ -103,6 +105,13 @@ function getOrCreateSubfolder(parentFolder, folderName) {
     return folder;
   }
   return parentFolder.createFolder(folderName);
+}
+
+function sanitizeDriveName(rawName) {
+  return String(rawName || 'DOC')
+    .trim()
+    .replace(/[/\\?%*:|"<>]/g, '-')
+    .replace(/\s+/g, '_');
 }
 
 function handleTestConnection(payload) {
@@ -299,6 +308,119 @@ function handleMoveFile(payload) {
     targetFolderId: targetFolder.getId(),
     message: 'ย้ายไฟล์ไปยังโฟลเดอร์เป้าหมายสำเร็จ'
   });
+}
+
+function handleSyncTaxInvoiceLinks(payload) {
+  var rootFolderId = payload.rootFolderId;
+  var invoiceFileId = payload.invoiceFileId;
+  var invoiceNumber = payload.invoiceNumber || 'INVOICE';
+  var matchAction = payload.matchAction;
+  var bundles = payload.bundles;
+  if (
+    !rootFolderId ||
+    !invoiceFileId ||
+    (matchAction !== 'confirm_match' && matchAction !== 'revoke_match') ||
+    !Array.isArray(bundles) ||
+    bundles.length === 0 ||
+    bundles.length > 50
+  ) {
+    return jsonResponse({ success: false, error: 'ข้อมูลทางลัดใบกำกับภาษีไม่ถูกต้อง' });
+  }
+
+  var root = DriveApp.getFolderById(rootFolderId);
+  var zones = {
+    ZONE_02: getOrCreateSubfolder(root, ZONE_NAMES.ZONE_02),
+    ZONE_04: getOrCreateSubfolder(root, ZONE_NAMES.ZONE_04)
+  };
+  var taxZone = zones.ZONE_04;
+  var taxFile = DriveApp.getFileById(invoiceFileId);
+  var isInTaxZone = false;
+  var parents = taxFile.getParents();
+  while (parents.hasNext()) {
+    if (parents.next().getId() === taxZone.getId()) {
+      isInTaxZone = true;
+      break;
+    }
+  }
+  if (!isInTaxZone) {
+    return jsonResponse({ success: false, error: 'ต้นฉบับใบกำกับภาษีไม่ได้อยู่ในโฟลเดอร์ใบกำกับภาษี' });
+  }
+
+  var folders = [];
+  var targetId = invoiceFileId;
+  var shortcutMimeType = 'application/vnd.google-apps.shortcut';
+  bundles.forEach(function(bundle) {
+    var trNumber = String(bundle.trNumber || '').trim();
+    var doNumber = String(bundle.doNumber || '').trim();
+    if (!trNumber || !doNumber) {
+      throw new Error('ต้องระบุเลข TR และเลข DO ของทุกทางลัด');
+    }
+    var bundleName = sanitizeDriveName(trNumber) + '_DO-' + sanitizeDriveName(doNumber);
+    var targetFolder = getOrCreateSubfolder(zones.ZONE_02, bundleName);
+    var matches = listDriveFolderFiles(targetFolder.getId()).filter(function(file) {
+      return file.mimeType === shortcutMimeType &&
+        file.shortcutDetails &&
+        file.shortcutDetails.targetId === targetId;
+    });
+
+    if (matchAction === 'confirm_match') {
+      if (matches.length === 0) {
+        gasDriveApiRequest('post', 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,mimeType,parents,shortcutDetails', {
+          name: 'INV_' + sanitizeDriveName(invoiceNumber) + '.jpg',
+          mimeType: shortcutMimeType,
+          parents: [targetFolder.getId()],
+          shortcutDetails: { targetId: targetId }
+        });
+      } else {
+        matches.slice(1).forEach(function(duplicate) {
+          gasDriveApiRequest('delete', 'https://www.googleapis.com/drive/v3/files/' +
+            encodeURIComponent(duplicate.id) + '?supportsAllDrives=true');
+        });
+      }
+    } else {
+      matches.forEach(function(shortcut) {
+        gasDriveApiRequest('delete', 'https://www.googleapis.com/drive/v3/files/' +
+          encodeURIComponent(shortcut.id) + '?supportsAllDrives=true');
+      });
+    }
+    folders.push({ trNumber: trNumber, folderId: targetFolder.getId() });
+  });
+  return jsonResponse({ success: true, folders: folders });
+}
+
+function listDriveFolderFiles(folderId) {
+  var files = [];
+  var pageToken = '';
+  do {
+    var query = encodeURIComponent("'" + folderId + "' in parents and trashed = false");
+    var url = 'https://www.googleapis.com/drive/v3/files?q=' + query +
+      '&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true' +
+      '&fields=nextPageToken,files(id,name,mimeType,parents,shortcutDetails(targetId))';
+    if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
+    var result = gasDriveApiRequest('get', url);
+    files = files.concat(result.files || []);
+    pageToken = result.nextPageToken || '';
+  } while (pageToken);
+  return files;
+}
+
+function gasDriveApiRequest(method, url, payload) {
+  var options = {
+    method: method,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  };
+  if (payload !== undefined) {
+    options.contentType = 'application/json';
+    options.payload = JSON.stringify(payload);
+  }
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+  var text = response.getContentText();
+  if (code < 200 || code >= 300) {
+    throw new Error('Google Drive API HTTP ' + code + ': ' + text);
+  }
+  return text ? JSON.parse(text) : {};
 }
 
 // Rename a file and optionally move it to a target zone in one atomic call

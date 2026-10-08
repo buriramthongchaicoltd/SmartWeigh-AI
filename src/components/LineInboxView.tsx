@@ -179,7 +179,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   showToast
 }) => {
   const [statusFilter, setStatusFilter] = useState<
-    'all' | 'pending_review' | 'scan_failed' | 'verified' | 'ignored_non_bill'
+    'all' | 'pending_review' | 'scan_failed' | 'ignored_non_bill'
   >('all');
   const [docTypeFilter, setDocTypeFilter] = useState<DocumentType | 'all'>('all');
   const [groupFilter, setGroupFilter] = useState<string>('all');
@@ -601,9 +601,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   // Filtered items
   const filteredItems = useMemo(() => inboxItems.filter(item => {
-    if (statusFilter === 'all' && item.status === 'verified') {
-      return false;
-    }
+    if (item.status === 'verified') return false;
     if (
       docTypeFilter !== 'all' &&
       item.detectedDocType !== docTypeFilter &&
@@ -1003,18 +1001,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 รอสแกนซ้ำ ({failedCount})
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => setStatusFilter('verified')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 ${
-                statusFilter === 'verified'
-                  ? 'bg-emerald-600 text-white shadow-2xs'
-                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100'
-              }`}
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>บันทึกแล้ว ({verifiedCount})</span>
-            </button>
             {ignoredCount > 0 && (
               <button
                 type="button"

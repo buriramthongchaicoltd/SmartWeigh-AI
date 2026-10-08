@@ -629,6 +629,7 @@ export default function App() {
   const dbSyncInFlightRef = React.useRef<Record<string, Set<Promise<void>> | undefined>>({});
   const lineInboxSyncRevisionRef = React.useRef(0);
   const lineInboxDeleteCountRef = React.useRef(0);
+  const lineInboxVerifiedCleanupPendingRef = React.useRef(true);
   const debouncedSyncToDb = React.useCallback((table: string, records: any[]) => {
     if (table === 'line_inbox' && lineInboxDeleteCountRef.current > 0) return;
     if (saveDbTimerRef.current[table]) {
@@ -766,6 +767,47 @@ export default function App() {
     }
   }, [currentPermissions, showToast]);
 
+  const removeVerifiedLineInboxItem = React.useCallback(async (id: string): Promise<boolean> => {
+    lineInboxDeleteCountRef.current += 1;
+    lineInboxSyncRevisionRef.current += 1;
+    try {
+      if (saveDbTimerRef.current.line_inbox) {
+        clearTimeout(saveDbTimerRef.current.line_inbox);
+        saveDbTimerRef.current.line_inbox = undefined;
+      }
+      dbSyncGenerationRef.current.line_inbox = (dbSyncGenerationRef.current.line_inbox || 0) + 1;
+      await Promise.all(
+        [...(dbSyncInFlightRef.current.line_inbox || [])].map(request => request.catch(() => undefined))
+      );
+
+      const response = await fetch('/api/line/inbox/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `HTTP ${response.status}`);
+      }
+      if (result.pending) {
+        lineInboxVerifiedCleanupPendingRef.current = true;
+        setLineInbox(prev => prev.filter(item => item.id !== id));
+        return false;
+      }
+      setLineInbox(prev => prev.filter(item => item.id !== id));
+      return true;
+    } catch (error) {
+      lineInboxVerifiedCleanupPendingRef.current = true;
+      setLineInbox(prev => prev.filter(item => item.id !== id));
+      const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      showToast(`บันทึกเอกสารแล้ว แต่ลบแถวที่ตรวจรับออกจากกล่องพัก LINE ไม่สำเร็จ ระบบจะลองซิงก์ซ้ำ: ${reason}`, 'error');
+      return false;
+    } finally {
+      lineInboxDeleteCountRef.current -= 1;
+      lineInboxSyncRevisionRef.current += 1;
+    }
+  }, [showToast]);
+
   const checkLineInboxDuplicate = React.useCallback(async (
     docType: DocumentType,
     billNo: string,
@@ -857,6 +899,18 @@ export default function App() {
     };
 
     try {
+      if (lineInboxVerifiedCleanupPendingRef.current) {
+        const cleanupResponse = await fetch('/api/line/inbox/cleanup-verified', { method: 'POST' });
+        const cleanupResult = await cleanupResponse.json();
+        if (!cleanupResponse.ok || !cleanupResult?.success) {
+          throw new Error(cleanupResult?.error || `HTTP ${cleanupResponse.status}`);
+        }
+        const pendingCount = Number(cleanupResult.pendingCount) || 0;
+        lineInboxVerifiedCleanupPendingRef.current = pendingCount > 0;
+        if (pendingCount > 0) {
+          warnOnce(`พบรายการที่ยืนยันแล้ว ${pendingCount} รายการ แต่ยังไม่พบเอกสารในทะเบียนหลัก จึงเก็บไว้และจะตรวจซ้ำ`);
+        }
+      }
       const resp = await fetch('/api/line/inbox');
       const data = await resp.json();
       if (!resp.ok || !data?.success) {
@@ -939,6 +993,44 @@ export default function App() {
       const reason = err instanceof Error ? `: ${err.message}` : '';
       showToast(`อัปเดตตำแหน่งไฟล์ที่ยืนยันบน Google Drive ไม่สำเร็จ${reason}`, 'error');
       return null;
+    }
+  };
+
+  const handleSyncTaxInvoiceDrive = async (
+    action: 'confirm_match' | 'revoke_match',
+    invoice: OrderRecord,
+    deliveryOrders: OrderRecord[]
+  ): Promise<boolean> => {
+    if (!invoice.driveFileId || deliveryOrders.length === 0) return true;
+    if (deliveryOrders.some(order => !order.col1.trim() || !order.col6.trim())) {
+      showToast('ยืนยันจับคู่ไม่ได้: ใบงานทุกใบต้องมีเลข TR และเลข DO ก่อนสร้างทางลัด', 'error');
+      return false;
+    }
+    try {
+      const response = await fetch('/api/drive/sync-tax-invoice-links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          invoiceId: invoice.id,
+          fileId: invoice.driveFileId,
+          bundles: deliveryOrders.map(order => ({
+            id: order.id,
+            trNumber: order.col1,
+            doNumber: order.col6
+          }))
+        }),
+        signal: AbortSignal.timeout(55_000)
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `HTTP ${response.status}`);
+      }
+      return true;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      showToast(`จัดการทางลัดใบกำกับภาษีในโฟลเดอร์ TR ไม่สำเร็จ: ${reason}`, 'error');
+      return false;
     }
   };
 
@@ -1663,8 +1755,14 @@ export default function App() {
       });
       return;
     }
-    if (!targetDO || !isDeliveryOrderPairingCandidate(targetDO)) {
-      throw new Error('ไม่พบใบส่งของปลายทางที่เลือก');
+    if (
+      !targetDO ||
+      targetDO.status !== 'verified' ||
+      !targetDO.col1.trim() ||
+      !targetDO.col6.trim() ||
+      !isDeliveryOrderPairingCandidate(targetDO)
+    ) {
+      throw new Error('ไม่พบใบ DO ที่ยืนยันแล้วพร้อมเลข TR และเลข DO ครบ');
     }
     const existingTicket = orders.find(item => item.lineInboxId === inboxId);
     if (existingTicket?.matchedOriginDoId === targetDO.id) {
@@ -1696,11 +1794,23 @@ export default function App() {
         fileId: inboxItem.driveFileId,
         docType: 'weighbridge',
         docDate: ticketData.col7 || targetDO.col7,
-        docNumber: ticketNumber
+        docNumber: ticketNumber,
+        bundleTrNumber: targetDO.col1,
+        bundleDoNumber: targetDO.col6
       })
     });
-    const driveResult = await driveResponse.json();
-    if (!driveResponse.ok || !driveResult?.success || driveResult.targetZone !== 'zone_02') {
+    const driveResult = await driveResponse.json() as {
+      success?: boolean;
+      targetZone?: string;
+      targetFolderId?: string;
+      error?: string;
+    };
+    if (
+      !driveResponse.ok ||
+      !driveResult?.success ||
+      driveResult.targetZone !== 'zone_02' ||
+      !driveResult.targetFolderId
+    ) {
       throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปตั๋วชั่งไปโซนใบส่งของ');
     }
     const driveFileLocation: OrderRecord['driveFileLocation'] = 'zone_02';
@@ -1752,6 +1862,7 @@ export default function App() {
       image: inboxItem.driveWebViewLink ||
         `https://drive.google.com/uc?export=view&id=${encodeURIComponent(inboxItem.driveFileId)}`,
       driveFileId: inboxItem.driveFileId,
+      driveFolderId: driveResult.targetFolderId,
       driveFileLocation,
       lineInboxId: inboxItem.id,
       lineMessageId: inboxItem.lineMessageId,
@@ -1785,6 +1896,7 @@ export default function App() {
       verifiedBy: currentUser.fullName,
       verifiedAt: now,
       driveFileLocation,
+      driveFolderId: driveResult.targetFolderId,
       extractedData: {
         ...inboxItem.extractedData,
         referenceDocNo: targetDO.col6,
@@ -1865,6 +1977,7 @@ export default function App() {
       throw error;
     }
 
+    await removeVerifiedLineInboxItem(inboxItem.id);
     setOrders(previous => {
       const updatedOrders = previous.map(item =>
         item.id === updatedDO.id ? updatedDO : item
@@ -1875,9 +1988,6 @@ export default function App() {
       setStores(previousStores => syncStoreFinancials(previousStores, updatedOrders));
       return updatedOrders;
     });
-    setLineInbox(previous => previous.map(item =>
-      item.id === verifiedInboxItem.id ? verifiedInboxItem : item
-    ));
     if (hasDOWeights) {
       showToast('จับคู่ตั๋วชั่งแล้ว; ใบส่งของมีน้ำหนักเดิม ระบบจึงไม่เขียนทับน้ำหนักเดิม', 'info');
     }
@@ -1900,6 +2010,7 @@ export default function App() {
         if (!response.ok || !result?.success) {
           throw new Error(result?.error || `HTTP ${response.status}`);
         }
+        await removeVerifiedLineInboxItem(item.id);
         return true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -2070,7 +2181,9 @@ export default function App() {
         order.docType === 'tax_invoice' ? 'zone_04' :
         'zone_02';
       verifiedLineTargetZone = targetZone;
-      if (verifiedLineItem.driveFileLocation !== targetZone) {
+      const needsUnmatchedOriginTicketStaging =
+        order.docType === 'weighbridge' && !order.matchedOriginDoId;
+      if (verifiedLineItem.driveFileLocation !== targetZone || needsUnmatchedOriginTicketStaging) {
         try {
           const driveResponse = await fetch('/api/drive/rename-and-move', {
             method: 'POST',
@@ -2426,13 +2539,16 @@ export default function App() {
         const textRefs = extractDocReferences(orderToSave.col38);
         const refCandidates = [orderToSave.referenceDocNo, ...textRefs.doNumbers].filter(Boolean) as string[];
         if (refCandidates.length > 0) {
-          const candIdx = workingList.findIndex(ord => {
-            if (ord.id === orderToSave.id || ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') return false;
-            return Boolean(ord.col6 && refCandidates.some(ref => isExactDocNumberReference(ord.col6, ref)));
-          });
+          const candidateDOs = workingList
+            .map((record, index) => ({ record, index }))
+            .filter(({ record }) =>
+              record.id !== orderToSave.id &&
+              ['delivery_order', 'concrete', 'full_logistics'].includes(record.docType || '') &&
+              Boolean(record.col6 && refCandidates.some(ref => isExactDocNumberReference(record.col6, ref)))
+            );
 
-          if (candIdx >= 0) {
-            const candidateDO = workingList[candIdx];
+          if (candidateDOs.length === 1) {
+            const { record: candidateDO, index: candIdx } = candidateDOs[0];
             const hasExistingPrice = Number(candidateDO.col29) > 0;
             const invNo = orderToSave.col6 || orderToSave.col1;
             const candFlags = new Set<string>(candidateDO.autoActionFlags || []);
@@ -2460,6 +2576,9 @@ export default function App() {
             orderToSave.linkedViaDocNo = candidateDO.col6;
             autoFlagsSet.add(`🧾 ชนเข้า DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติ`);
             autoMatchedNote = `🚩 จับคู่ใบกำกับภาษีเข้ากับ DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติแล้ว (ติดธงรอตรวจสอบยืนยัน)`;
+          } else if (candidateDOs.length > 1) {
+            autoFlagsSet.add('🧾 พบ DO ที่อ้างอิงตรงกันมากกว่าหนึ่งใบ กรุณาเลือกใบที่ถูกต้องด้วยมือ');
+            autoMatchedNote = '🚩 ยังไม่จับคู่ใบกำกับภาษี: พบ DO ที่อ้างอิงตรงกันหลายใบ กรุณาตรวจสอบและเลือกด้วยมือ';
           }
         }
       }
@@ -2575,7 +2694,8 @@ export default function App() {
           status: 'verified',
           duplicateInfo: undefined,
           verifiedOrderId: pairedWeighbridgeInboxItem.extractedData.col1 || order.col1,
-          verifiedDocumentId: pairedWeighbridgeInboxItem.id,
+          verifiedDocumentId: orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem.id)?.id ||
+            `line-wb-${pairedWeighbridgeInboxItem.id}`,
           verifiedBy: currentUser.fullName,
           verifiedAt: new Date().toISOString(),
           driveFileLocation: pairedWeighbridgeDriveLocation || sourceInboxItem.driveFileLocation,
@@ -2743,7 +2863,8 @@ export default function App() {
               status: 'verified',
               duplicateInfo: undefined,
               verifiedOrderId: pairedWeighbridgeInboxItem.extractedData.col1 || order.col1,
-              verifiedDocumentId: pairedWeighbridgeInboxItem.id,
+              verifiedDocumentId: orders.find(existing => existing.lineInboxId === pairedWeighbridgeInboxItem.id)?.id ||
+                `line-wb-${pairedWeighbridgeInboxItem.id}`,
               verifiedBy: currentUser.fullName,
               verifiedAt: new Date().toISOString(),
               driveFileLocation: pairedWeighbridgeDriveLocation || item.driveFileLocation,
@@ -2935,6 +3056,18 @@ export default function App() {
     }
     const orderToDelete = orders.find(order => order.id === id);
     if (!skipConfirm && !window.confirm(`ยืนยันลบรายการ ${orderToDelete?.col1 || id} หรือไม่?`)) return;
+    if (orderToDelete?.docType === 'tax_invoice' && orderToDelete.driveFileId) {
+      const linkedDoNos = (orderToDelete.linkedViaDocNo || '').split(',').map(docNo => docNo.trim()).filter(Boolean);
+      const linkedDOs = orders.filter(order =>
+        order.docType !== 'dest_weighbridge' &&
+        order.docType !== 'tax_invoice' &&
+        linkedDoNos.some(docNo =>
+          isExactDocNumberReference(order.col6, docNo) ||
+          isExactDocNumberReference(order.col1, docNo)
+        )
+      );
+      if (!await handleSyncTaxInvoiceDrive('revoke_match', orderToDelete, linkedDOs)) return;
+    }
     const releasedOriginTicketInboxIds = new Set(
       orders
         .filter(order => order.docType === 'weighbridge' && order.matchedOriginDoId === id)
@@ -2986,7 +3119,11 @@ export default function App() {
               autoActionFlags: (ord.autoActionFlags || []).filter(f => !f.includes('ตั๋วชั่งปลายทาง'))
             };
           });
-        } else if (target.docType !== 'tax_invoice') {
+        } else if (target.docType === 'tax_invoice') {
+          if (target.driveFileId) {
+            triggerDriveCleanup({ mode: 'delete_old_file', oldFileId: target.driveFileId });
+          }
+        } else {
           // Zero-Junk: Cascade delete DO folder + files from Google Drive (with Rescue Rule for dest ticket!)
           const pairedDestTicket = prev.find(o => o.id === target.matchedDestTicketId);
           triggerDriveCleanup({
@@ -3275,6 +3412,7 @@ export default function App() {
           }
           throw inboxSaveError;
         }
+        await removeVerifiedLineInboxItem(inboxItem.id);
       } catch (err: any) {
         console.error('[LINE Inbox] PO verification failed before completion:', err);
         showToast(`บันทึก PO ไม่สำเร็จ: ${err?.message || 'ย้ายรูปหรือบันทึกฐานข้อมูลไม่สำเร็จ'}`, 'error');
@@ -3337,17 +3475,6 @@ export default function App() {
           ...prev
         ];
       });
-    }
-
-    // If this PO was verified from the LINE OA Bot Inbox, mark the inbox item as verified
-    if (savedPO.lineInboxId && verifiedInboxItem) {
-      setLineInbox(prev =>
-        prev.map(item =>
-          item.id === savedPO.lineInboxId
-            ? verifiedInboxItem!
-            : item
-        )
-      );
     }
 
     // Reverse Auto-Match: If DOs arrived BEFORE this PO was saved, and those DOs have a reference to this PO number,
@@ -3587,6 +3714,20 @@ export default function App() {
       }
     }
 
+    if (target && scope === 'all') {
+      const linkedInvoices = orders.filter(invoice =>
+        invoice.docType === 'tax_invoice' &&
+        invoice.status === 'verified' &&
+        invoice.linkedViaDocNo?.split(',').some(docNo =>
+          isExactDocNumberReference(docNo.trim(), target.col6) ||
+          isExactDocNumberReference(docNo.trim(), target.col1)
+        )
+      );
+      for (const invoice of linkedInvoices) {
+        if (!await handleSyncTaxInvoiceDrive('confirm_match', invoice, [target])) return;
+      }
+    }
+
     setOrders(prev => {
       return prev.map(ord => {
         if (ord.id === orderId) {
@@ -3623,6 +3764,23 @@ export default function App() {
           return {
             ...ord,
             destMatchStatus: 'verified',
+            autoFlagsVerified: true,
+            autoFlagsVerifiedBy: currentUser.fullName,
+            autoFlagsVerifiedAt: nowIso
+          };
+        }
+
+        if (
+          scope === 'all' &&
+          target &&
+          ord.docType === 'tax_invoice' &&
+          ord.linkedViaDocNo?.split(',').some(docNo =>
+            isExactDocNumberReference(docNo.trim(), target.col6) ||
+            isExactDocNumberReference(docNo.trim(), target.col1)
+          )
+        ) {
+          return {
+            ...ord,
             autoFlagsVerified: true,
             autoFlagsVerifiedBy: currentUser.fullName,
             autoFlagsVerifiedAt: nowIso
@@ -4207,6 +4365,7 @@ export default function App() {
               onDeleteOrder={handleDeleteOrder}
               onUpdateOrder={handleUpdateOrder}
               onSyncDestTicketDrive={handleSyncDestTicketDrive}
+              onSyncTaxInvoiceDrive={handleSyncTaxInvoiceDrive}
               onNotifyError={(message) => showToast(message, 'error')}
               onLinkOrderToPO={handleLinkOrderToPO}
               onUnlinkOrderFromPO={handleUnlinkOrderFromPO}

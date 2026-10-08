@@ -70,6 +70,11 @@ interface TableView39ColsProps {
     ticket: OrderRecord,
     deliveryOrder: OrderRecord
   ) => Promise<Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | null>;
+  onSyncTaxInvoiceDrive: (
+    action: 'confirm_match' | 'revoke_match',
+    invoice: OrderRecord,
+    deliveryOrders: OrderRecord[]
+  ) => Promise<boolean>;
   onNotifyError: (message: string) => void;
   onLinkOrderToPO?: (orderId: string, poNumber: string) => void;
   onUnlinkOrderFromPO?: (orderId: string) => void;
@@ -92,6 +97,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   onDeleteOrder,
   onUpdateOrder,
   onSyncDestTicketDrive,
+  onSyncTaxInvoiceDrive,
   onNotifyError,
   onLinkOrderToPO,
   onUnlinkOrderFromPO,
@@ -588,8 +594,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   };
 
   // Match Tax Invoice into 1 or multiple selected DOs (updating Zone 5 if unpriced & Zone 6 Payment status)
-  const handleExecuteManualMatchTaxInvoice = (targetDOIds: string[]) => {
+  const handleExecuteManualMatchTaxInvoice = async (targetDOIds: string[]) => {
     if (!matchingTaxInvoice || targetDOIds.length === 0) return;
+    const targetDOs = targetDOIds
+      .map(doId => orders.find(order => order.id === doId))
+      .filter((order): order is OrderRecord => Boolean(order));
+    if (targetDOs.length !== targetDOIds.length) {
+      onNotifyError('ไม่พบใบ DO ที่เลือกครบถ้วน จึงยกเลิกการจับคู่ใบกำกับภาษี');
+      return;
+    }
+    if (!await onSyncTaxInvoiceDrive('confirm_match', matchingTaxInvoice, targetDOs)) return;
     const invNo = matchingTaxInvoice.col6 || matchingTaxInvoice.col1 || 'ใบกำกับภาษี';
     const invPaid = Number(matchingTaxInvoice.col35) || Number(matchingTaxInvoice.col31) || 0;
     const invUnpaid = Number(matchingTaxInvoice.col36) || 0;
@@ -654,13 +668,24 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
     onUpdateOrder({
       ...matchingTaxInvoice,
-      linkedViaDocNo: matchedDONos.join(', ')
+      linkedViaDocNo: matchedDONos.join(', '),
+      autoFlagsVerified: true
     });
     setMatchingTaxInvoice(null);
     setSelectedDOIdsForTaxMatch([]);
   };
 
-  const handleUnlinkTaxInvoice = (inv: OrderRecord) => {
+  const handleUnlinkTaxInvoice = async (inv: OrderRecord) => {
+    const linkedDoNos = (inv.linkedViaDocNo || '').split(',').map(docNo => docNo.trim()).filter(Boolean);
+    const linkedDOs = orders.filter(order =>
+      order.docType !== 'dest_weighbridge' &&
+      order.docType !== 'tax_invoice' &&
+      linkedDoNos.some(docNo =>
+        isDocNumberMatch(order.col6, docNo) ||
+        isDocNumberMatch(order.col1, docNo)
+      )
+    );
+    if (!await onSyncTaxInvoiceDrive('revoke_match', inv, linkedDOs)) return;
     onUpdateOrder({
       ...inv,
       linkedViaDocNo: ''

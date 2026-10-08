@@ -1005,49 +1005,67 @@ async function findLineInboxDuplicate(
   const billNoPattern = billNo.trim().replace(/[\\%_]/g, '\\$&');
   const duplicateDocTypes = getLineInboxDuplicateDocTypes(docType);
 
-  const { data: inboxRows, error: inboxError } = await client
-    .from('line_inbox')
-    .select('id,doc_number,store_name,detected_doc_type,status,is_bill_document')
-    .ilike('doc_number', billNoPattern)
-    .in('detected_doc_type', duplicateDocTypes)
-    .neq('id', excludeInboxId || '')
-    .limit(50);
-  if (inboxError) throw new Error(`ตรวจรายการซ้ำในกล่องพัก LINE ไม่สำเร็จ: ${inboxError.message}`);
+  const duplicatePageSize = 500;
+  for (let from = 0; ; from += duplicatePageSize) {
+    const { data: inboxRows, error: inboxError } = await client
+      .from('line_inbox')
+      .select('id,doc_number,store_name,detected_doc_type,status,is_bill_document')
+      .ilike('doc_number', billNoPattern)
+      .in('detected_doc_type', duplicateDocTypes)
+      .neq('id', excludeInboxId || '')
+      .order('id')
+      .range(from, from + duplicatePageSize - 1);
+    if (inboxError) throw new Error(`ตรวจรายการซ้ำในกล่องพัก LINE ไม่สำเร็จ: ${inboxError.message}`);
 
-  const matchingInbox = (inboxRows || []).find(row =>
-    row.status !== 'ignored_non_bill' &&
-    row.is_bill_document !== false &&
-    normalizeDocNoServer(row.doc_number) === normalizedBillNo &&
-    normalizeOcrPartyName(row.store_name) === normalizedStore
-  );
-  if (matchingInbox) {
-    return {
-      source: 'line_inbox',
-      docType: matchingInbox.detected_doc_type,
-      code: matchingInbox.id,
-      billNo: matchingInbox.doc_number || billNo,
-      storeName: matchingInbox.store_name || storeName,
-      reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} ตรงกับบิลในกล่องพัก LINE (${matchingInbox.id})`
-    };
+    const matchingInbox = (inboxRows || []).find(row =>
+      row.status !== 'ignored_non_bill' &&
+      row.is_bill_document !== false &&
+      normalizeDocNoServer(row.doc_number) === normalizedBillNo &&
+      normalizeOcrPartyName(row.store_name) === normalizedStore
+    );
+    if (matchingInbox) {
+      return {
+        source: 'line_inbox',
+        docType: matchingInbox.detected_doc_type,
+        code: matchingInbox.id,
+        billNo: matchingInbox.doc_number || billNo,
+        storeName: matchingInbox.store_name || storeName,
+        reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} ตรงกับบิลในกล่องพัก LINE (${matchingInbox.id})`
+      };
+    }
+    if ((inboxRows || []).length < duplicatePageSize) break;
   }
 
   if (docType === 'purchase_order') {
-    const { data: poRows, error: poError } = await client
-      .from('purchase_orders')
-      .select('id,po_number,supplier_name')
-      .ilike('po_number', billNoPattern)
-      .limit(50);
-    if (poError) throw new Error(`ตรวจรายการ PO ซ้ำไม่สำเร็จ: ${poError.message}`);
-    const matchingPOCandidates = (poRows || []).filter(row =>
-      normalizeDocNoServer(row.po_number) === normalizedBillNo &&
-      normalizeOcrPartyName(row.supplier_name) === normalizedStore
-    );
-    const matchingPO = matchingPOCandidates.find(row =>
-      row.id !== excludeDocumentId &&
-      (!excludeDocumentNumber ||
-        row.po_number !== excludeDocumentNumber ||
-        matchingPOCandidates.length > 1)
-    );
+    let matchingPO: { id: string; po_number: string | null; supplier_name: string | null } | undefined;
+    let matchingPOCount = 0;
+    for (let from = 0; ; from += duplicatePageSize) {
+      const { data: poRows, error: poError } = await client
+        .from('purchase_orders')
+        .select('id,po_number,supplier_name')
+        .ilike('po_number', billNoPattern)
+        .order('id')
+        .range(from, from + duplicatePageSize - 1);
+      if (poError) throw new Error(`ตรวจรายการ PO ซ้ำไม่สำเร็จ: ${poError.message}`);
+
+      for (const row of poRows || []) {
+        if (
+          normalizeDocNoServer(row.po_number) !== normalizedBillNo ||
+          normalizeOcrPartyName(row.supplier_name) !== normalizedStore
+        ) continue;
+        matchingPOCount += 1;
+        if (
+          row.id !== excludeDocumentId &&
+          (!excludeDocumentNumber ||
+            row.po_number !== excludeDocumentNumber ||
+            matchingPOCount > 1)
+        ) {
+          matchingPO = row;
+          break;
+        }
+      }
+      if (matchingPO || (poRows || []).length < duplicatePageSize) break;
+    }
     if (matchingPO) {
       return {
         source: 'purchase_orders',
@@ -1062,29 +1080,34 @@ async function findLineInboxDuplicate(
   }
 
   const primaryNumberColumn = docType === 'dest_weighbridge' ? 'col17' : 'col6';
-  const { data: orderRows, error: orderError } = await client
-    .from('orders')
-    .select('id,doc_type,col1,col6,col17,col8,line_inbox_id')
-    .in('doc_type', duplicateDocTypes)
-    .ilike(primaryNumberColumn, billNoPattern)
-    .limit(50);
-  if (orderError) throw new Error(`ตรวจรายการเอกสารที่บันทึกแล้วไม่สำเร็จ: ${orderError.message}`);
-  const matchingOrder = (orderRows || []).find(row =>
-    row.line_inbox_id !== excludeInboxId &&
-    row.id !== excludeDocumentId &&
-    normalizeDocNoServer(primaryNumberColumn === 'col17' ? row.col17 : row.col6) === normalizedBillNo &&
-    normalizeOcrPartyName(row.col8) === normalizedStore
-  );
-  if (matchingOrder) {
-    const matchedBillNo = primaryNumberColumn === 'col17' ? matchingOrder.col17 : matchingOrder.col6;
-    return {
-      source: 'orders',
-      docType: matchingOrder.doc_type,
-      code: matchingOrder.col1 || matchingOrder.id,
-      billNo: matchedBillNo || billNo,
-      storeName: matchingOrder.col8 || storeName,
-      reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} มีบันทึกในระบบแล้ว (${matchingOrder.col1 || matchingOrder.id})`
-    };
+  for (let from = 0; ; from += duplicatePageSize) {
+    const { data: orderRows, error: orderError } = await client
+      .from('orders')
+      .select('id,doc_type,col1,col6,col17,col8,line_inbox_id')
+      .in('doc_type', duplicateDocTypes)
+      .ilike(primaryNumberColumn, billNoPattern)
+      .order('id')
+      .range(from, from + duplicatePageSize - 1);
+    if (orderError) throw new Error(`ตรวจรายการเอกสารที่บันทึกแล้วไม่สำเร็จ: ${orderError.message}`);
+
+    const matchingOrder = (orderRows || []).find(row =>
+      row.line_inbox_id !== excludeInboxId &&
+      row.id !== excludeDocumentId &&
+      normalizeDocNoServer(primaryNumberColumn === 'col17' ? row.col17 : row.col6) === normalizedBillNo &&
+      normalizeOcrPartyName(row.col8) === normalizedStore
+    );
+    if (matchingOrder) {
+      const matchedBillNo = primaryNumberColumn === 'col17' ? matchingOrder.col17 : matchingOrder.col6;
+      return {
+        source: 'orders',
+        docType: matchingOrder.doc_type,
+        code: matchingOrder.col1 || matchingOrder.id,
+        billNo: matchedBillNo || billNo,
+        storeName: matchingOrder.col8 || storeName,
+        reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} มีบันทึกในระบบแล้ว (${matchingOrder.col1 || matchingOrder.id})`
+      };
+    }
+    if ((orderRows || []).length < duplicatePageSize) break;
   }
   return null;
 }
@@ -2873,6 +2896,169 @@ app.post('/api/line/test', async (req: Request, res: Response) => {
 // Columns for line_inbox list — EXCLUDES image_url (base64 ~500KB each) to prevent 33MB payload timeout
 const LINE_INBOX_LIST_COLUMNS = 'id,received_at,line_message_id,line_quote_token,line_sender_name,line_group_name,drive_file_id,drive_file_location,drive_web_view_link,detected_doc_type,ai_confidence,status,duplicate_of_order_id,duplicate_reason,bot_replied,bot_reply_mode,bot_reply_text,extracted_data,store_suggestion,doc_number,doc_date,store_name,is_bill_document,image_hash';
 
+app.post('/api/line/inbox/complete', async (req: Request, res: Response) => {
+  const inboxId = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+  if (!inboxId) return res.status(400).json({ success: false, error: 'กรุณาระบุ ID รายการ LINE' });
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase จึงนำรายการออกจากกล่องพักไม่ได้' });
+    }
+    const { data: inboxRow, error: inboxError } = await client
+      .from('line_inbox')
+      .select('status,detected_doc_type,extracted_data')
+      .eq('id', inboxId)
+      .maybeSingle();
+    if (inboxError) throw inboxError;
+    if (!inboxRow) {
+      return res.json({ success: true, deleted: false });
+    }
+    if (inboxRow.status !== 'verified') {
+      return res.status(409).json({ success: false, error: 'รายการ LINE ยังไม่ได้ยืนยัน จึงนำออกจากกล่องพักไม่ได้' });
+    }
+
+    for (let i = lineWebhookInboxQueue.length - 1; i >= 0; i--) {
+      if (lineWebhookInboxQueue[i].id === inboxId) {
+        lineWebhookInboxQueue.splice(i, 1);
+      }
+    }
+    const documentId = inboxRow.extracted_data?.verifiedDocumentId;
+    if (typeof documentId !== 'string' || !documentId.trim()) {
+      return res.json({ success: true, deleted: false, pending: true });
+    }
+    const documentTable = inboxRow.detected_doc_type === 'purchase_order' ? 'purchase_orders' : 'orders';
+    const { data: savedDocument, error: documentError } = await client
+      .from(documentTable)
+      .select('id,status')
+      .eq('id', documentId)
+      .maybeSingle();
+    if (documentError) throw documentError;
+    if (!savedDocument || (documentTable === 'orders' && savedDocument.status !== 'verified')) {
+      return res.json({ success: true, deleted: false, pending: true });
+    }
+
+    const { data: deletedRows, error } = await client
+      .from('line_inbox')
+      .delete()
+      .eq('id', inboxId)
+      .eq('status', 'verified')
+      .select('id');
+    if (error) throw error;
+
+    for (let i = lineWebhookInboxQueue.length - 1; i >= 0; i--) {
+      if (lineWebhookInboxQueue[i].id === inboxId) {
+        lineWebhookInboxQueue.splice(i, 1);
+      }
+    }
+    return res.json({ success: true, deleted: Boolean(deletedRows?.length) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[LINE Inbox] Failed to complete verified item:', message);
+    return res.status(500).json({ success: false, error: `นำรายการที่ตรวจรับแล้วออกจากกล่องพักไม่สำเร็จ: ${message}` });
+  }
+});
+
+app.post('/api/line/inbox/cleanup-verified', async (_req: Request, res: Response) => {
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อ Supabase จึงล้างรายการตรวจรับเก่าไม่ได้' });
+    }
+    const verifiedRows: Array<{ id: string; detected_doc_type: string; extracted_data: Record<string, unknown> | null }> = [];
+    const pageSize = 500;
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await client
+        .from('line_inbox')
+        .select('id,detected_doc_type,extracted_data')
+        .eq('status', 'verified')
+        .range(offset, offset + pageSize - 1);
+      if (error) throw error;
+      const page = data || [];
+      verifiedRows.push(...page);
+      if (page.length < pageSize) break;
+    }
+    const verifiedRowIds = new Set(verifiedRows.map(row => row.id));
+
+    const documentIdsByTable = {
+      orders: new Set<string>(),
+      purchase_orders: new Set<string>()
+    };
+    for (const row of verifiedRows) {
+      const documentId = row.extracted_data?.verifiedDocumentId;
+      if (typeof documentId !== 'string' || !documentId.trim()) continue;
+      const documentTable = row.detected_doc_type === 'purchase_order' ? 'purchase_orders' : 'orders';
+      documentIdsByTable[documentTable].add(documentId);
+    }
+
+    const savedDocumentIds = {
+      orders: new Set<string>(),
+      purchase_orders: new Set<string>()
+    };
+    for (const table of ['orders', 'purchase_orders'] as const) {
+      const documentIds = Array.from(documentIdsByTable[table]);
+      for (let offset = 0; offset < documentIds.length; offset += 100) {
+        const { data, error } = await client
+          .from(table)
+          .select('id,status')
+          .in('id', documentIds.slice(offset, offset + 100));
+        if (error) throw error;
+        for (const row of data || []) {
+          if (table === 'purchase_orders' || row.status === 'verified') {
+            savedDocumentIds[table].add(row.id);
+          }
+        }
+      }
+    }
+
+    const completedIds = verifiedRows
+      .filter(row => {
+        const documentId = row.extracted_data?.verifiedDocumentId;
+        if (typeof documentId !== 'string' || !documentId.trim()) return false;
+        const table = row.detected_doc_type === 'purchase_order' ? 'purchase_orders' : 'orders';
+        return savedDocumentIds[table].has(documentId);
+      })
+      .map(row => row.id);
+    const deletedIds = new Set<string>();
+    for (let offset = 0; offset < completedIds.length; offset += 100) {
+      const batchIds = completedIds.slice(offset, offset + 100);
+      const { data, error } = await client
+        .from('line_inbox')
+        .delete()
+        .eq('status', 'verified')
+        .in('id', batchIds)
+        .select('id');
+      if (error) throw error;
+      for (const row of data || []) deletedIds.add(row.id);
+    }
+
+    const { count: pendingCount, error: countError } = await client
+      .from('line_inbox')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'verified');
+    if (countError) throw countError;
+
+    for (let i = lineWebhookInboxQueue.length - 1; i >= 0; i--) {
+      if (
+        lineWebhookInboxQueue[i].status === 'verified' ||
+        verifiedRowIds.has(lineWebhookInboxQueue[i].id) ||
+        deletedIds.has(lineWebhookInboxQueue[i].id)
+      ) {
+        lineWebhookInboxQueue.splice(i, 1);
+      }
+    }
+    return res.json({
+      success: true,
+      deletedCount: deletedIds.size,
+      pendingCount: pendingCount || 0
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[LINE Inbox] Failed to clean up verified items:', message);
+    return res.status(500).json({ success: false, error: `ล้างรายการตรวจรับเก่าออกจากกล่องพักไม่สำเร็จ: ${message}` });
+  }
+});
+
 app.get('/api/line/inbox', async (_req: Request, res: Response) => {
   try {
     const client = getSupabaseClient();
@@ -2885,6 +3071,7 @@ app.get('/api/line/inbox', async (_req: Request, res: Response) => {
     const { data, error } = await client
       .from('line_inbox')
       .select(LINE_INBOX_LIST_COLUMNS)
+      .neq('status', 'verified')
       .order('received_at', { ascending: false })
       .limit(500);
 
@@ -2894,7 +3081,7 @@ app.get('/api/line/inbox', async (_req: Request, res: Response) => {
 
     const supabaseItems = (data || []).map(mapSupabaseToLineInbox);
     const supabaseIds = new Set(supabaseItems.map((i: any) => i.id));
-    const queueOnly = lineWebhookInboxQueue.filter(q => !supabaseIds.has(q.id));
+    const queueOnly = lineWebhookInboxQueue.filter(q => q.status !== 'verified' && !supabaseIds.has(q.id));
     return res.json({ success: true, items: [...queueOnly, ...supabaseItems] });
   } catch (err: any) {
     console.error('[GET /api/line/inbox] Failed to load Supabase inbox:', err?.message);
@@ -5779,7 +5966,11 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
     }
 
     const safeDocNo = sanitizeDriveName(docNumber || 'NEW');
-    const safeTrNo = sanitizeDriveName(trNumber || `TR-${Date.now().toString().slice(-4)}`);
+    const safeTrNo = String(trNumber || '').trim() ? sanitizeDriveName(String(trNumber)) : '';
+    const isDeliveryOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(docType);
+    if (isDeliveryOrder && !safeTrNo) {
+      return res.status(400).json({ success: false, error: 'ต้องกำหนดเลข TR ก่อนจัดเก็บไฟล์ใบส่งของ' });
+    }
 
     let fileName: string;
     let assignedZone: string;
@@ -5796,6 +5987,9 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
     } else if (docType === 'tax_invoice') {
       assignedZone = 'zone_04';
       fileName = `TAX_${safeDocNo}.jpg`;
+    } else if (docType === 'weighbridge') {
+      assignedZone = 'zone_02';
+      fileName = `WB_${safeDocNo}.jpg`;
     } else {
       assignedZone = 'zone_02';
       fileName = `1_DO_${safeDocNo}.jpg`;
@@ -5807,7 +6001,11 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
         action: 'upload',
         rootFolderId: cfg.rootFolderId,
         targetZone: assignedZone,
-        subfolderName: docType === 'delivery_order' ? `${safeTrNo}_DO-${safeDocNo}` : undefined,
+        subfolderName: isDeliveryOrder
+          ? `${safeTrNo}_DO-${safeDocNo}`
+          : docType === 'weighbridge'
+            ? 'รอจับคู่TR_ตั๋วชั่งต้นทาง'
+            : undefined,
         fileName,
         base64Image
       });
@@ -5842,6 +6040,8 @@ app.post('/api/drive/upload', async (req: Request, res: Response) => {
       targetFolderId = zones.ZONE_03;
     } else if (docType === 'tax_invoice') {
       targetFolderId = zones.ZONE_04;
+    } else if (docType === 'weighbridge') {
+      targetFolderId = await getOrCreateSubfolder(token, zones.ZONE_02, 'รอจับคู่TR_ตั๋วชั่งต้นทาง');
     } else {
       const subfolderName = `${safeTrNo}_DO-${safeDocNo}`;
       const subfolderId = await getOrCreateSubfolder(token, zones.ZONE_02, subfolderName);
@@ -5895,11 +6095,12 @@ app.post('/api/drive/recover-order-line-image', async (req: Request, res: Respon
     }
 
     const { data: order, error: orderError } = await client.from('orders')
-      .select('id,doc_type,line_inbox_id,drive_file_id,col1,col6,col17')
+      .select('id,doc_type,status,line_inbox_id,drive_file_id,matched_origin_do_id,col1,col6,col17')
       .eq('id', orderId)
       .maybeSingle();
     if (orderError) throw new Error(`อ่านข้อมูลบิลไม่สำเร็จ: ${orderError.message}`);
     if (!order) return res.status(404).json({ success: false, error: 'ไม่พบบิลในตารางหลัก' });
+    if (order.status !== 'verified') return res.status(409).json({ success: false, error: 'กู้รูปได้เฉพาะเอกสารที่ยืนยันแล้ว' });
     if (order.drive_file_id) {
       return res.status(409).json({ success: false, error: 'บิลนี้มี Drive File ID อยู่แล้ว จึงไม่สร้างไฟล์ซ้ำ' });
     }
@@ -5965,6 +6166,33 @@ app.post('/api/drive/recover-order-line-image', async (req: Request, res: Respon
     }
 
     const docType = order.doc_type || 'delivery_order';
+    const doTypes = ['delivery_order', 'concrete', 'full_logistics'];
+    let subfolderName: string | undefined;
+    if (doTypes.includes(docType)) {
+      if (!String(order.col1 || '').trim() || !String(order.col6 || '').trim()) {
+        return res.status(409).json({ success: false, error: 'DO ต้องมีเลข TR และเลข DO ก่อนกู้รูปเข้าโฟลเดอร์' });
+      }
+      subfolderName = `${sanitizeDriveName(order.col1)}_DO-${sanitizeDriveName(order.col6)}`;
+    } else if (docType === 'weighbridge' && order.matched_origin_do_id) {
+      const { data: parentOrder, error: parentError } = await client
+        .from('orders')
+        .select('id,doc_type,status,col1,col6')
+        .eq('id', order.matched_origin_do_id)
+        .maybeSingle();
+      if (parentError) throw new Error(`ตรวจสอบ DO ที่จับคู่ไว้ไม่สำเร็จ: ${parentError.message}`);
+      if (
+        !parentOrder ||
+        !['delivery_order', 'concrete', 'full_logistics'].includes(String(parentOrder.doc_type)) ||
+        parentOrder.status !== 'verified' ||
+        !String(parentOrder.col1 || '').trim() ||
+        !String(parentOrder.col6 || '').trim()
+      ) {
+        return res.status(409).json({ success: false, error: 'ตั๋วชั่งต้นทางชี้ไปยัง DO ที่ยืนยันหรือเลข TR/DO ไม่ครบ' });
+      }
+      subfolderName = `${sanitizeDriveName(parentOrder.col1)}_DO-${sanitizeDriveName(parentOrder.col6)}`;
+    } else if (docType === 'weighbridge') {
+      subfolderName = 'รอจับคู่TR_ตั๋วชั่งต้นทาง';
+    }
     const assignedZone = docType === 'purchase_order'
       ? 'zone_01'
       : docType === 'dest_weighbridge'
@@ -5983,7 +6211,7 @@ app.post('/api/drive/recover-order-line-image', async (req: Request, res: Respon
         action: 'upload',
         rootFolderId: driveCfg.rootFolderId,
         targetZone: assignedZone,
-        subfolderName: docType === 'delivery_order' ? `${sanitizeDriveName(order.col1 || 'TR')}_DO-${docNumber}` : undefined,
+        subfolderName,
         fileName,
         base64Image
       });
@@ -5999,11 +6227,11 @@ app.post('/api/drive/recover-order-line-image', async (req: Request, res: Respon
           : assignedZone === 'zone_04'
             ? zones.ZONE_04
             : zones.ZONE_02;
-      if (docType === 'delivery_order') {
+      if (subfolderName) {
         targetFolderId = await getOrCreateSubfolder(
           token,
           targetFolderId,
-          `${sanitizeDriveName(order.col1 || 'TR')}_DO-${docNumber}`
+          subfolderName
         );
       }
       driveResult = await findDriveFileByName(token, targetFolderId, fileName);
@@ -6173,6 +6401,172 @@ app.post('/api/drive/sync-verified-move', async (req: Request, res: Response) =>
   } catch (err: any) {
     console.error('Verified-Move Error:', err);
     res.status(500).json({ success: false, error: err?.message || 'การย้ายไฟล์บน Google Drive ขัดข้อง' });
+  }
+});
+
+app.post('/api/drive/sync-tax-invoice-links', async (req: Request, res: Response) => {
+  try {
+    const action = req.body?.action;
+    const invoiceId = typeof req.body?.invoiceId === 'string' ? req.body.invoiceId.trim() : '';
+    const fileId = typeof req.body?.fileId === 'string' ? req.body.fileId.trim() : '';
+    const bundles = Array.isArray(req.body?.bundles) ? req.body.bundles : [];
+    if (!['confirm_match', 'revoke_match'].includes(action) || !invoiceId || !fileId || bundles.length > 50) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลสำหรับจัดการทางลัดใบกำกับภาษีไม่ถูกต้อง' });
+    }
+    if (bundles.length === 0) {
+      return res.json({ success: true, folders: [] });
+    }
+
+    const client = getSupabaseClient();
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสอบการจับคู่ใบกำกับภาษี' });
+    const { data: invoice, error: invoiceError } = await client
+      .from('orders')
+      .select('id,doc_type,status,drive_file_id,col6,col1')
+      .eq('id', invoiceId)
+      .maybeSingle();
+    if (invoiceError) throw new Error(`ตรวจสอบใบกำกับภาษีไม่สำเร็จ: ${invoiceError.message}`);
+    if (!invoice || invoice.doc_type !== 'tax_invoice' || invoice.status !== 'verified' || invoice.drive_file_id !== fileId) {
+      return res.status(409).json({ success: false, error: 'ใบกำกับภาษีไม่ได้ยืนยันแล้ว หรือ Drive ID ไม่ตรงกับฐานข้อมูล' });
+    }
+
+    const requestedIds = [...new Set(bundles.map((bundle: any) => String(bundle?.id || '').trim()).filter(Boolean))];
+    if (requestedIds.length !== bundles.length) {
+      return res.status(400).json({ success: false, error: 'รายการ DO สำหรับทางลัดมี ID ว่างหรือซ้ำ' });
+    }
+    const { data: doRows, error: doError } = await client
+      .from('orders')
+      .select('id,doc_type,status,col1,col6')
+      .in('id', requestedIds);
+    if (doError) throw new Error(`ตรวจสอบ DO ปลายทางไม่สำเร็จ: ${doError.message}`);
+    const doById = new Map((doRows || []).map(row => [String(row.id), row]));
+    const requestedBundles: Array<{ trNumber: string; doNumber: string }> = [];
+    const seenTrNumbers = new Set<string>();
+    for (const bundle of bundles) {
+      const row = doById.get(String(bundle.id));
+      const trNumber = String(bundle.trNumber || '').trim();
+      const doNumber = String(bundle.doNumber || '').trim();
+      if (
+        !row ||
+        !['delivery_order', 'concrete', 'full_logistics'].includes(String(row.doc_type)) ||
+        row.status !== 'verified' ||
+        !trNumber ||
+        !doNumber ||
+        row.col1 !== trNumber ||
+        row.col6 !== doNumber
+      ) {
+        return res.status(409).json({ success: false, error: 'พบ DO ที่ยังไม่ยืนยัน หรือเลข TR/DO ไม่ตรงกับฐานข้อมูล' });
+      }
+      if (seenTrNumbers.has(trNumber)) {
+        return res.status(409).json({ success: false, error: `เลข TR ${trNumber} ซ้ำในรายการปลายทาง` });
+      }
+      seenTrNumbers.add(trNumber);
+      requestedBundles.push({ trNumber, doNumber });
+    }
+
+    const cfg = getStoredDriveConfig();
+    const isGasMode = cfg.connectionMode === 'gas';
+    const token = isGasMode ? null : await getDriveAccessToken();
+    const shouldUseGasFallback = !token && Boolean(cfg.gasWebAppUrl);
+    if (!token && !isGasMode && !shouldUseGasFallback) {
+      return res.status(400).json({ success: false, error: 'Google Drive ยังไม่ได้เชื่อมต่อ' });
+    }
+
+    if ((isGasMode || shouldUseGasFallback) && cfg.gasWebAppUrl) {
+      const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'sync_tax_invoice_links',
+        rootFolderId: cfg.rootFolderId,
+        invoiceFileId: fileId,
+        invoiceNumber: invoice.col6 || invoice.col1 || 'INVOICE',
+        matchAction: action,
+        bundles: requestedBundles
+      });
+      if (!gasResult?.success) throw new Error(gasResult?.error || 'จัดการทางลัดผ่าน Google Apps Script ไม่สำเร็จ');
+      return res.json({ success: true, folders: gasResult.folders || [] });
+    }
+    if (!token) return res.status(400).json({ success: false, error: 'ไม่พบ Token เชื่อมต่อ Google Drive' });
+
+    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    const fileResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!fileResponse.ok) throw new Error(`ตรวจสอบตำแหน่งใบกำกับภาษีไม่สำเร็จ: ${await fileResponse.text()}`);
+    const invoiceFile = await fileResponse.json() as { id: string; parents?: string[] };
+    if (!(invoiceFile.parents || []).includes(zones.ZONE_04)) {
+      return res.status(409).json({ success: false, error: 'ต้นฉบับใบกำกับภาษีไม่ได้อยู่ในโฟลเดอร์ใบกำกับภาษี' });
+    }
+
+    const shortcutMimeType = 'application/vnd.google-apps.shortcut';
+    const folders: Array<{ trNumber: string; folderId: string }> = [];
+    for (const bundle of requestedBundles) {
+      const folderName = `${sanitizeDriveName(bundle.trNumber)}_DO-${sanitizeDriveName(bundle.doNumber)}`;
+      const folderId = await getOrCreateSubfolder(token, zones.ZONE_02, folderName);
+      const query = new URLSearchParams({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: 'files(id,name,mimeType,parents,shortcutDetails(targetId)),nextPageToken',
+        pageSize: '1000',
+        supportsAllDrives: 'true',
+        includeItemsFromAllDrives: 'true'
+      });
+      const listResponse = await fetch(`https://www.googleapis.com/drive/v3/files?${query.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!listResponse.ok) throw new Error(`ค้นหาทางลัดในโฟลเดอร์ ${bundle.trNumber} ไม่สำเร็จ: ${await listResponse.text()}`);
+      const listResult = await listResponse.json() as {
+        files?: Array<{ id: string; name?: string; mimeType?: string; shortcutDetails?: { targetId?: string } }>;
+        nextPageToken?: string;
+      };
+      if (listResult.nextPageToken) {
+        throw new Error(`โฟลเดอร์ TR ${bundle.trNumber} มีไฟล์มากเกินกว่าจะตรวจทางลัดได้อย่างปลอดภัย`);
+      }
+      const shortcuts = (listResult.files || []).filter(
+        item => item.mimeType === shortcutMimeType && item.shortcutDetails?.targetId === fileId
+      );
+
+      if (action === 'confirm_match') {
+        if (shortcuts.length === 0) {
+          const createResponse = await fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,mimeType,parents,shortcutDetails', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: `INV_${sanitizeDriveName(String(invoice.col6 || invoice.col1 || 'INVOICE'))}.shortcut`,
+              mimeType: shortcutMimeType,
+              parents: [folderId],
+              shortcutDetails: { targetId: fileId }
+            })
+          });
+          if (!createResponse.ok) throw new Error(`สร้างทางลัดใบกำกับใน TR ${bundle.trNumber} ไม่สำเร็จ: ${await createResponse.text()}`);
+          const createdShortcut = await createResponse.json() as { parents?: string[]; shortcutDetails?: { targetId?: string } };
+          if (!(createdShortcut.parents || []).includes(folderId) || createdShortcut.shortcutDetails?.targetId !== fileId) {
+            throw new Error(`Google Drive ไม่ยืนยันทางลัดในโฟลเดอร์ TR ${bundle.trNumber}`);
+          }
+        } else {
+          for (const duplicate of shortcuts.slice(1)) {
+            const deleteResponse = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(duplicate.id)}?supportsAllDrives=true`,
+              { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (!deleteResponse.ok) throw new Error(`ลบทางลัดซ้ำใน TR ${bundle.trNumber} ไม่สำเร็จ: ${await deleteResponse.text()}`);
+          }
+        }
+      } else {
+        for (const shortcut of shortcuts) {
+          const deleteResponse = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(shortcut.id)}?supportsAllDrives=true`,
+            { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (!deleteResponse.ok) throw new Error(`ลบทางลัดใบกำกับจาก TR ${bundle.trNumber} ไม่สำเร็จ: ${await deleteResponse.text()}`);
+        }
+      }
+      folders.push({ trNumber: bundle.trNumber, folderId });
+    }
+    return res.json({ success: true, folders });
+  } catch (error: any) {
+    console.error('[Tax Invoice Drive Link] Failed to sync TR shortcuts:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `จัดการทางลัดใบกำกับภาษีในโฟลเดอร์ TR ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
   }
 });
 
@@ -6359,7 +6753,9 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         fileId,
         newFileName,
         targetZone,
-        subfolderName: targetZone === 'zone_02' ? bundleFolderName || undefined : undefined,
+        subfolderName: targetZone === 'zone_02'
+          ? bundleFolderName || (effectiveDocType === 'weighbridge' ? 'รอจับคู่TR_ตั๋วชั่งต้นทาง' : undefined)
+          : undefined,
         preserveOriginalName: Boolean(preserveFileName && isHistoricalReorganization),
         reorganizeExistingDo: isHistoricalReorganization
       });
@@ -6414,6 +6810,25 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       : bundleFolderName && currentParents.includes(toFolderId)
         ? toFolderId
         : '';
+    if (!sourceFolderId && targetZone === 'zone_02' && bundleFolderName) {
+      for (const parentId of currentParents) {
+        const parentResponse = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+          { headers: { Authorization: 'Bearer ' + token } }
+        );
+        if (!parentResponse.ok) {
+          throw new Error(`ตรวจสอบโฟลเดอร์ต้นทางของไฟล์ไม่สำเร็จ: ${await parentResponse.text()}`);
+        }
+        const parentFolder: { id: string; mimeType?: string; parents?: string[] } = await parentResponse.json();
+        if (
+          parentFolder.mimeType === 'application/vnd.google-apps.folder' &&
+          (parentFolder.parents || []).includes(toFolderId)
+        ) {
+          sourceFolderId = parentId;
+          break;
+        }
+      }
+    }
     if (isHistoricalReorganization && !sourceFolderId) {
       for (const parentId of currentParents) {
         const parentResponse = await fetch(
@@ -6437,8 +6852,10 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       throw new Error('ไฟล์ไม่ได้อยู่ในโฟลเดอร์ที่อนุญาตสำหรับการจัดระเบียบย้อนหลัง; หยุดก่อนย้าย');
     }
 
-    const targetFolderId = targetZone === 'zone_02' && bundleFolderName
-      ? await getOrCreateSubfolder(token, toFolderId, bundleFolderName)
+    const subfolderName = bundleFolderName ||
+      (effectiveDocType === 'weighbridge' ? 'รอจับคู่TR_ตั๋วชั่งต้นทาง' : '');
+    const targetFolderId = targetZone === 'zone_02' && subfolderName
+      ? await getOrCreateSubfolder(token, toFolderId, subfolderName)
       : toFolderId;
     if (currentParents.includes(targetFolderId)) {
       if (persistReorganizationFolder) await persistReorganizationFolder(targetFolderId);

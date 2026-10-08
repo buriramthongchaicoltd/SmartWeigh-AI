@@ -283,6 +283,11 @@ BEFORE INSERT OR UPDATE ON public.orders
 FOR EACH ROW
 EXECUTE FUNCTION public.assign_order_tr_number();
 
+CREATE UNIQUE INDEX IF NOT EXISTS orders_do_tr_number_unique
+ON public.orders (BTRIM(col1))
+WHERE doc_type IN ('delivery_order', 'concrete', 'full_logistics')
+  AND NULLIF(BTRIM(col1), '') IS NOT NULL;
+
 CREATE OR REPLACE FUNCTION public.prepare_do_order(p_order JSONB)
 RETURNS JSONB
 LANGUAGE plpgsql
