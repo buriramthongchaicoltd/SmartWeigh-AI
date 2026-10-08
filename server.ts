@@ -963,11 +963,19 @@ function getLineInboxPrimaryDocumentNumber(
 
 type LineInboxDuplicateMatch = {
   source: 'line_inbox' | 'orders' | 'purchase_orders';
+  docType: DocumentType;
   code: string;
   billNo: string;
   storeName: string;
   reason: string;
 };
+
+function getLineInboxDuplicateDocTypes(docType: DocumentType): DocumentType[] {
+  if (docType === 'purchase_order' || docType === 'dest_weighbridge' || docType === 'tax_invoice') {
+    return [docType];
+  }
+  return ['delivery_order', 'weighbridge', 'concrete', 'full_logistics'];
+}
 
 async function findLineInboxDuplicate(
   client: ReturnType<typeof getSupabaseClient>,
@@ -984,12 +992,13 @@ async function findLineInboxDuplicate(
   const normalizedStore = normalizeOcrPartyName(storeName);
   if (!normalizedBillNo || !normalizedStore) return null;
   const billNoPattern = billNo.trim().replace(/[\\%_]/g, '\\$&');
+  const duplicateDocTypes = getLineInboxDuplicateDocTypes(docType);
 
   const { data: inboxRows, error: inboxError } = await client
     .from('line_inbox')
     .select('id,doc_number,store_name,detected_doc_type,status,is_bill_document')
     .ilike('doc_number', billNoPattern)
-    .eq('detected_doc_type', docType)
+    .in('detected_doc_type', duplicateDocTypes)
     .neq('id', excludeInboxId || '')
     .limit(50);
   if (inboxError) throw new Error(`ตรวจรายการซ้ำในกล่องพัก LINE ไม่สำเร็จ: ${inboxError.message}`);
@@ -1003,6 +1012,7 @@ async function findLineInboxDuplicate(
   if (matchingInbox) {
     return {
       source: 'line_inbox',
+      docType: matchingInbox.detected_doc_type,
       code: matchingInbox.id,
       billNo: matchingInbox.doc_number || billNo,
       storeName: matchingInbox.store_name || storeName,
@@ -1013,22 +1023,27 @@ async function findLineInboxDuplicate(
   if (docType === 'purchase_order') {
     const { data: poRows, error: poError } = await client
       .from('purchase_orders')
-      .select('id,po_number,store_name')
+      .select('id,po_number,supplier_name')
       .ilike('po_number', billNoPattern)
       .limit(50);
     if (poError) throw new Error(`ตรวจรายการ PO ซ้ำไม่สำเร็จ: ${poError.message}`);
-    const matchingPO = (poRows || []).find(row =>
-      row.id !== excludeDocumentId &&
-      row.po_number !== excludeDocumentNumber &&
+    const matchingPOCandidates = (poRows || []).filter(row =>
       normalizeDocNoServer(row.po_number) === normalizedBillNo &&
-      normalizeOcrPartyName(row.store_name) === normalizedStore
+      normalizeOcrPartyName(row.supplier_name) === normalizedStore
+    );
+    const matchingPO = matchingPOCandidates.find(row =>
+      row.id !== excludeDocumentId &&
+      (!excludeDocumentNumber ||
+        row.po_number !== excludeDocumentNumber ||
+        matchingPOCandidates.length > 1)
     );
     if (matchingPO) {
       return {
         source: 'purchase_orders',
+        docType: 'purchase_order',
         code: matchingPO.po_number || matchingPO.id,
         billNo: matchingPO.po_number || billNo,
-        storeName: matchingPO.store_name || storeName,
+        storeName: matchingPO.supplier_name || storeName,
         reason: `ประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} มีอยู่ในทะเบียน PO (${matchingPO.po_number || matchingPO.id})`
       };
     }
@@ -1039,7 +1054,7 @@ async function findLineInboxDuplicate(
   const { data: orderRows, error: orderError } = await client
     .from('orders')
     .select('id,doc_type,col1,col6,col17,col8,line_inbox_id')
-    .eq('doc_type', docType)
+    .in('doc_type', duplicateDocTypes)
     .ilike(primaryNumberColumn, billNoPattern)
     .limit(50);
   if (orderError) throw new Error(`ตรวจรายการเอกสารที่บันทึกแล้วไม่สำเร็จ: ${orderError.message}`);
@@ -1053,6 +1068,7 @@ async function findLineInboxDuplicate(
     const matchedBillNo = primaryNumberColumn === 'col17' ? matchingOrder.col17 : matchingOrder.col6;
     return {
       source: 'orders',
+      docType: matchingOrder.doc_type,
       code: matchingOrder.col1 || matchingOrder.id,
       billNo: matchedBillNo || billNo,
       storeName: matchingOrder.col8 || storeName,
@@ -1092,7 +1108,7 @@ async function assertNoDuplicateDocumentWrite(
     : docType === 'dest_weighbridge'
       ? String(row.col17 || '')
       : String(row.col6 || '');
-  const storeName = String(targetTable === 'purchase_orders' ? row.store_name || '' : row.col8 || '');
+  const storeName = String(targetTable === 'purchase_orders' ? row.supplier_name || '' : row.col8 || '');
   if (!billNo.trim() || !storeName.trim()) return;
 
   const duplicate = await findLineInboxDuplicate(
@@ -3263,6 +3279,7 @@ app.post('/api/line/webhook', async (req: Request, res: Response) => {
             if (duplicateMatch) {
               inboxItem.duplicateInfo = {
                 isDuplicate: true,
+                matchedDocType: duplicateMatch.docType,
                 matchedCode: duplicateMatch.code,
                 matchedBillNo: duplicateMatch.billNo,
                 matchedVendor: duplicateMatch.storeName,
@@ -3439,6 +3456,7 @@ app.post('/api/line/simulate', rateLimitScan, async (req: Request, res: Response
           if (duplicateMatch) {
             duplicateInfo = {
               isDuplicate: true,
+              matchedDocType: duplicateMatch.docType,
               matchedCode: duplicateMatch.code,
               matchedBillNo: duplicateMatch.billNo,
               matchedVendor: duplicateMatch.storeName,
@@ -4830,10 +4848,10 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
             : docType === 'dest_weighbridge'
               ? String(row.col17 || '')
               : String(row.col6 || '');
-          const storeName = String(targetTable === 'purchase_orders' ? row.store_name || '' : row.col8 || '');
+          const storeName = String(targetTable === 'purchase_orders' ? row.supplier_name || '' : row.col8 || '');
           if (OCR_DOCUMENT_TYPES.includes(docType) && billNo.trim() && storeName.trim()) {
             const key = JSON.stringify([
-              docType,
+              getLineInboxDuplicateDocTypes(docType),
               normalizeDocNoServer(billNo),
               normalizeOcrPartyName(storeName)
             ]);

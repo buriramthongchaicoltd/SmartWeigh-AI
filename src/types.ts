@@ -425,12 +425,14 @@ export interface LineBillInboxItem {
   botReplyError?: string;
   duplicateInfo?: {
     isDuplicate: boolean;
+    matchedDocType?: DocumentType;
     matchedCode?: string;          // เช่น TR-2026-101 หรือรหัสคิวเดิม
     matchedBillNo?: string;
     matchedVendor?: string;
     reason?: string;
   };
   verifiedOrderId?: string;        // รหัสบิลที่บันทึกจริงเมื่อตรวจเสร็จ
+  verifiedDocumentId?: string;
   verifiedBy?: string;
   verifiedAt?: string;
   reviewFeedbackHistory?: {

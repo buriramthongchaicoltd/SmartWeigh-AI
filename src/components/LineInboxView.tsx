@@ -74,6 +74,24 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
   }
 ];
 
+const getDuplicateMenuLabel = (docType?: DocumentType) => {
+  switch (docType) {
+    case 'delivery_order':
+    case 'weighbridge':
+    case 'concrete':
+    case 'full_logistics':
+      return 'ใบส่งของ / ใบส่งสินค้า (DO)';
+    case 'purchase_order':
+      return 'ใบสั่งซื้อ (PO)';
+    case 'dest_weighbridge':
+      return 'ตั๋วชั่งปลายทาง';
+    case 'tax_invoice':
+      return 'ใบเสร็จ/กำกับภาษี';
+    default:
+      return 'เอกสารในระบบ';
+  }
+};
+
 const normalizeDocumentText = (value: string) =>
   value.toLocaleLowerCase().replace(/[\s.,:;!?'"“”‘’()\-_/]+/g, '');
 
@@ -354,9 +372,18 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
   };
 
-  const handleDeleteInboxItem = async (item: LineBillInboxItem) => {
-    const itemLabel = item.extractedData.col17 || item.extractedData.col8 || item.lineSenderName || item.id;
-    if (!window.confirm(`ยืนยันลบบิล ${itemLabel} ออกจากกล่องพัก LINE และนำรูปไปถังขยะหรือไม่?`)) return;
+  const handleDeleteInboxItem = async (
+    item: LineBillInboxItem,
+    duplicateInfo: LineBillInboxItem['duplicateInfo'] = item.duplicateInfo
+  ) => {
+    const itemLabel = getDuplicateCheckInput(item).billNo ||
+      item.extractedData.col8 ||
+      item.lineSenderName ||
+      item.id;
+    const duplicateContext = duplicateInfo?.isDuplicate
+      ? `\nพบรายการเดิมในเมนู ${getDuplicateMenuLabel(duplicateInfo.matchedDocType)} เลขที่ ${duplicateInfo.matchedBillNo || 'ตรงกัน'}${duplicateInfo.matchedVendor ? ` ร้าน ${duplicateInfo.matchedVendor}` : ''}.\nการลบนี้จะลบเฉพาะรายการ LINE ปัจจุบันและนำรูปไปถังขยะ ไม่ลบเอกสารเดิม`
+      : '';
+    if (!window.confirm(`ยืนยันลบบิล ${itemLabel} ออกจากกล่องพัก LINE และนำรูปไปถังขยะหรือไม่?${duplicateContext}`)) return;
     setDeletingInboxId(item.id);
     try {
       await onDeleteInboxItem(item.id);
@@ -700,8 +727,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
         billNo,
         storeName,
         excludeInboxId: item.id,
-        excludeDocumentId: docType === 'purchase_order' ? undefined : item.verifiedOrderId,
-        excludeDocumentNumber: docType === 'purchase_order' ? item.verifiedOrderId : undefined
+        excludeDocumentId: item.verifiedDocumentId,
+        excludeDocumentNumber: docType === 'purchase_order' && !item.verifiedDocumentId
+          ? item.verifiedOrderId
+          : undefined
       }),
       signal
     });
@@ -712,6 +741,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     const match = result.matches?.[0];
     return match ? {
       isDuplicate: true,
+      matchedDocType: match.docType,
       matchedCode: match.code,
       matchedBillNo: match.billNo,
       matchedVendor: match.storeName,
@@ -1468,8 +1498,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                   const duplicateCheck = duplicateCheckResults[item.id]?.queryKey === duplicateQueryKey
                     ? duplicateCheckResults[item.id]
                     : undefined;
-                  const duplicateInfo = duplicateCheck?.status === 'checked'
-                    ? duplicateCheck.duplicateInfo
+                  const duplicateInfo = duplicateCheck
+                    ? duplicateCheck.status === 'checked'
+                      ? duplicateCheck.duplicateInfo
+                      : undefined
                     : item.duplicateInfo;
 
                   const rowBg =
@@ -1604,12 +1636,26 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                           </span>
                         )}
                         {duplicateInfo?.isDuplicate && (
-                          <div
-                            className="mt-1 inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-800"
-                            title={duplicateInfo.reason || `เลขที่ ${duplicateInput.billNo} และร้าน ${duplicateInput.storeName} ตรงกับเอกสารที่มีอยู่`}
-                          >
-                            <ShieldAlert className="h-3 w-3 shrink-0" />
-                            <span>เลขที่ซ้ำ</span>
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            <div
+                              className="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-800"
+                              title={duplicateInfo.reason || `เลขที่ ${duplicateInput.billNo} และร้าน ${duplicateInput.storeName} ตรงกับเอกสารที่มีอยู่`}
+                            >
+                              <ShieldAlert className="h-3 w-3 shrink-0" />
+                              <span>ซ้ำใน {getDuplicateMenuLabel(duplicateInfo.matchedDocType)}</span>
+                            </div>
+                            {item.status !== 'verified' && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteInboxItem(item, duplicateInfo)}
+                                disabled={deletingInboxId === item.id}
+                                className="inline-flex min-h-10 items-center gap-1 rounded-md border border-rose-300 bg-white px-2 text-[11px] font-bold text-rose-800 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                aria-label={`ลบบิลซ้ำเลขที่ ${duplicateInput.billNo} ออกจากกล่องพัก LINE`}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                ลบรายการซ้ำ
+                              </button>
+                            )}
                           </div>
                         )}
                         {duplicateCheck?.status === 'checking' && (

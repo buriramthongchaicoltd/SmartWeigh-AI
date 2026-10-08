@@ -1021,7 +1021,9 @@ export function mapLineInboxToSupabase(item: LineBillInboxItem): any {
     rawAiSnapshot: item.rawAiSnapshot || {},
     reviewFeedbackHistory: item.reviewFeedbackHistory || [],
     botReplyAttempted: Boolean(item.botReplyAttempted),
-    botReplyError: item.botReplyError || undefined
+    botReplyError: item.botReplyError || undefined,
+    verifiedDocumentId: item.verifiedDocumentId || undefined,
+    duplicateDocType: item.duplicateInfo?.matchedDocType || undefined
   };
 
   const row: any = {
@@ -1109,10 +1111,12 @@ export function mapSupabaseToLineInbox(row: any): LineBillInboxItem {
     botReplyError: extData.botReplyError || undefined,
     duplicateInfo: row.duplicate_of_order_id ? {
       isDuplicate: true,
+      matchedDocType: extData.duplicateDocType || undefined,
       matchedCode: row.duplicate_of_order_id,
       reason: row.duplicate_reason || undefined
     } : undefined,
     verifiedOrderId: extData.verifiedOrderId || undefined,
+    verifiedDocumentId: extData.verifiedDocumentId || undefined,
     verifiedBy: extData.verifiedBy || undefined,
     verifiedAt: extData.verifiedAt || undefined,
     reviewFeedbackHistory: Array.isArray(extData.reviewFeedbackHistory) ? extData.reviewFeedbackHistory : []
