@@ -417,6 +417,7 @@ app.use('/api', async (req: Request, res: Response, next) => {
     '/database/delete-record',
     '/drive/cleanup-file',
     '/drive/rename-and-move',
+    '/drive/restore-line-inbox-file',
     '/drive/sync-verified-move',
     '/drive/quarantine-line-inbox-orphan',
     '/drive/delete-line-inbox-file'
@@ -1169,18 +1170,19 @@ async function assertNoDuplicateDocumentWrite(
   client: NonNullable<ReturnType<typeof getSupabaseClient>>,
   targetTable: string,
   row: Record<string, any>,
-  knownNew = false
+  knownNew = false,
+  recheckPending = false
 ): Promise<void> {
   if (!row.id || !['orders', 'purchase_orders'].includes(targetTable)) return;
 
   if (!knownNew) {
     const { data: existingRow, error: existingError } = await client
       .from(targetTable)
-      .select('id')
+      .select('id,status')
       .eq('id', row.id)
       .maybeSingle();
     if (existingError) throw new Error(`ตรวจสอบรายการเดิมก่อนบันทึกไม่สำเร็จ: ${existingError.message}`);
-    if (existingRow) return;
+    if (existingRow && !(recheckPending && existingRow.status === 'pending')) return;
   }
 
   const docType: DocumentType = targetTable === 'purchase_orders'
@@ -4888,7 +4890,7 @@ app.post('/api/orders/prepare-do', async (req: Request, res: Response) => {
     const dbRow = mapOrderToSupabase(record);
     const authenticatedUser = getAuthenticatedUser(req);
     if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
-    await assertNoDuplicateDocumentWrite(client, 'orders', dbRow);
+    await assertNoDuplicateDocumentWrite(client, 'orders', dbRow, false, true);
     const trNumber = await prepareDoOrder(client, dbRow);
     return res.json({ success: true, id: dbRow.id, trNumber });
   } catch (error: any) {
@@ -4899,6 +4901,47 @@ app.post('/api/orders/prepare-do', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: `เข้าคิวบันทึกใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
+app.post('/api/orders/cancel-prepared-do', async (req: Request, res: Response) => {
+  const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  const docType = typeof req.body?.docType === 'string' ? req.body.docType.trim() : '';
+  if (!orderId || !trNumber || !inboxId || !['delivery_order', 'concrete', 'full_logistics'].includes(docType)) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ ID, เลข TR, ประเภท DO และ LINE Inbox ID เพื่อยกเลิก reservation' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้เชื่อมต่อฐานข้อมูล จึงยกเลิก reservation ไม่ได้' });
+    }
+    const { data, error } = await client
+      .from('orders')
+      .delete()
+      .eq('id', orderId)
+      .eq('col1', trNumber)
+      .eq('doc_type', docType)
+      .eq('status', 'pending')
+      .eq('line_inbox_id', inboxId)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      return res.status(409).json({
+        success: false,
+        error: 'ไม่ยกเลิก reservation: ไม่พบรายการ pending ที่ตรงกัน หรือรายการถูกบันทึก/ยืนยันไปแล้ว'
+      });
+    }
+    return res.json({ success: true, cancelled: true, id: data.id, trNumber });
+  } catch (error: any) {
+    console.error('[TR Queue] Failed to cancel prepared DO:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `ยกเลิก reservation เลข TR ${trNumber} ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
     });
   }
 });
@@ -6632,9 +6675,127 @@ app.post('/api/drive/sync-tax-invoice-links', async (req: Request, res: Response
   }
 });
 
+app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Response) => {
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  const fileId = typeof req.body?.fileId === 'string' ? req.body.fileId.trim() : '';
+  if (!inboxId || !fileId) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ LINE Inbox ID และ Drive File ID เพื่อคืนรูป' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสอบเจ้าของรูปก่อนคืนไฟล์' });
+    }
+    const { data: inboxItem, error: inboxError } = await client
+      .from('line_inbox')
+      .select('id,drive_file_id,status')
+      .eq('id', inboxId)
+      .maybeSingle();
+    if (inboxError) throw new Error(`ตรวจสอบรายการ LINE ก่อนคืนรูปไม่สำเร็จ: ${inboxError.message}`);
+    if (!inboxItem || inboxItem.drive_file_id !== fileId) {
+      return res.status(409).json({
+        success: false,
+        error: 'ไม่คืนรูป: LINE Inbox ID และ Drive File ID ไม่ตรงกัน'
+      });
+    }
+    const { data: verifiedDocuments, error: verifiedDocumentError } = await client
+      .from('orders')
+      .select('id')
+      .eq('drive_file_id', fileId)
+      .eq('status', 'verified')
+      .limit(1);
+    if (verifiedDocumentError) throw new Error(`ตรวจสอบสถานะเอกสารก่อนคืนรูปไม่สำเร็จ: ${verifiedDocumentError.message}`);
+    if (verifiedDocuments?.length) {
+      return res.status(409).json({
+        success: false,
+        error: 'ไม่คืนรูป: พบเอกสารยืนยันแล้วที่อ้างอิงไฟล์นี้'
+      });
+    }
+
+    const cfg = getStoredDriveConfig();
+    const token = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+    const useGas = cfg.connectionMode === 'gas' || (!token && Boolean(cfg.gasWebAppUrl));
+    if (useGas) {
+      if (!cfg.gasWebAppUrl) {
+        return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script สำหรับคืนรูป' });
+      }
+      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'restore_line_inbox_file',
+        rootFolderId: cfg.rootFolderId,
+        fileId
+      });
+      if (!result?.success || result.targetZone !== 'zone_00') {
+        throw new Error(result?.error || 'Google Apps Script ไม่ยืนยันการคืนรูปเข้า LINE Inbox');
+      }
+      return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
+    }
+    if (!token) {
+      return res.status(503).json({ success: false, error: 'Google Drive ยังไม่พร้อมคืนรูปเข้า LINE Inbox' });
+    }
+
+    const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
+    const fileResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents`,
+      { headers: { Authorization: 'Bearer ' + token } }
+    );
+    if (!fileResponse.ok) {
+      throw new Error(`ตรวจสอบตำแหน่งรูปก่อนคืนไม่สำเร็จ: ${await fileResponse.text()}`);
+    }
+    const file = await fileResponse.json() as { id: string; parents?: string[] };
+    const parents = file.parents || [];
+    if (parents.includes(zones.ZONE_00)) {
+      return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
+    }
+
+    let sourceFolderId: string | undefined;
+    const standardZoneIds = new Set([zones.ZONE_01, zones.ZONE_02, zones.ZONE_03, zones.ZONE_04]);
+    for (const parentId of parents) {
+      if (standardZoneIds.has(parentId)) {
+        sourceFolderId = parentId;
+        break;
+      }
+      const parentResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+        { headers: { Authorization: 'Bearer ' + token } }
+      );
+      if (!parentResponse.ok) {
+        throw new Error(`ตรวจสอบโฟลเดอร์ปัจจุบันของรูปไม่สำเร็จ: ${await parentResponse.text()}`);
+      }
+      const parent = await parentResponse.json() as { id: string; mimeType?: string; parents?: string[] };
+      if (
+        parent.mimeType === 'application/vnd.google-apps.folder' &&
+        (parent.parents || []).includes(zones.ZONE_02)
+      ) {
+        sourceFolderId = parentId;
+        break;
+      }
+    }
+    if (!sourceFolderId) {
+      return res.status(409).json({
+        success: false,
+        error: 'ไม่คืนรูป: ไฟล์ไม่ได้อยู่ใน LINE Inbox หรือโฟลเดอร์เอกสารมาตรฐานที่อนุญาต'
+      });
+    }
+
+    const movedFile = await moveDriveFile(token, fileId, sourceFolderId, zones.ZONE_00);
+    if (!(movedFile.parents || []).includes(zones.ZONE_00)) {
+      throw new Error('Google Drive ยังไม่ยืนยันว่ารูปกลับเข้า LINE Inbox');
+    }
+    return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
+  } catch (error: any) {
+    console.error('[Drive Restore LINE Inbox Error]', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `คืนรูปเข้า LINE Inbox ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
 // 6. Rename + Move File Atomically (POST /api/drive/rename-and-move)
 // ใช้ตอน verify บิลจาก LINE inbox เพื่อตั้งชื่อตามประเภท/วันที่/เลขที่เอกสาร แล้วย้ายไป Zone ที่ถูกต้อง
 app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
+  let driveMutationStarted = false;
   try {
     const cfg = getStoredDriveConfig();
     const isGasMode = cfg.connectionMode === 'gas';
@@ -6834,6 +6995,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
 
     // A) GAS Mode
     if ((isGasMode || shouldUseGasFallback) && cfg.gasWebAppUrl) {
+      driveMutationStarted = true;
       const gasResult = await callGasDriveApi(cfg.gasWebAppUrl, {
         action: 'rename_and_move',
         rootFolderId: cfg.rootFolderId,
@@ -6859,6 +7021,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
 
       return res.json({
         success: true,
+        driveState: 'moved',
         fileId: gasResult.fileId || fileId,
         newFileName: gasResult.fileName || newFileName,
         targetZone,
@@ -6991,6 +7154,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     // 1. Rename via PATCH unless this is a history move that preserves the source name.
     let renamedData: { name?: string } = { name: currentFile.name };
     if (!preserveFileName || !isHistoricalReorganization) {
+    driveMutationStarted = true;
     const renameResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents`, {
       method: 'PATCH',
       headers: {
@@ -7017,6 +7181,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
+      driveState: 'moved',
       fileId,
       newFileName: renamedData.name,
       targetZone,
@@ -7028,7 +7193,11 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
 
   } catch (err: any) {
     console.error('[Drive Rename+Move Error]', err);
-    res.status(500).json({ success: false, error: err?.message || 'เปลี่ยนชื่อหรือย้ายไฟล์บน Google Drive ขัดข้อง' });
+    res.status(500).json({
+      success: false,
+      driveState: driveMutationStarted ? 'unknown' : 'unchanged',
+      error: err?.message || 'เปลี่ยนชื่อหรือย้ายไฟล์บน Google Drive ขัดข้อง'
+    });
   }
 });
 
@@ -7500,6 +7669,10 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     }
 
     const batchSize = Math.min(Math.max(Number(req.body?.batchSize) || 5, 1), 10);
+    const targetInboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+    if (targetInboxId.length > 200) {
+      return res.status(400).json({ success: false, error: 'inboxId ยาวเกินกำหนด' });
+    }
     const lookbackDays = req.body?.lookbackDays === undefined ? undefined : Number(req.body.lookbackDays);
     if (lookbackDays !== undefined && (!Number.isInteger(lookbackDays) || lookbackDays < 1 || lookbackDays > 365)) {
       return res.status(400).json({ success: false, error: 'lookbackDays ต้องเป็นจำนวนเต็มระหว่าง 1 ถึง 365' });
@@ -7520,6 +7693,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
       .neq('status', 'ignored_non_bill')
       .or(pendingOcrFilter);
 
+    if (targetInboxId) countQuery = countQuery.eq('id', targetInboxId);
     if (receivedAfter) countQuery = countQuery.gte('received_at', receivedAfter);
     if (cursorId) countQuery = countQuery.gt('id', cursorId);
 
@@ -7536,8 +7710,9 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
       .neq('status', 'ignored_non_bill')
       .or(pendingOcrFilter)
       .order('id', { ascending: true })
-      .limit(batchSize);
+      .limit(targetInboxId ? 1 : batchSize);
 
+    if (targetInboxId) query = query.eq('id', targetInboxId);
     if (receivedAfter) query = query.gte('received_at', receivedAfter);
     if (cursorId) query = query.gt('id', cursorId);
 
@@ -7770,7 +7945,7 @@ app.post('/api/drive/sync-inbox-images', async (req: Request, res: Response) => 
     }
 
     const remainingCount = Math.max(0, (totalPendingCount || 0) - pending.length);
-    const hasMore = pending.length === batchSize;
+    const hasMore = !targetInboxId && pending.length === batchSize;
     const nextCursorId = pending[pending.length - 1]?.id;
 
     return res.json({

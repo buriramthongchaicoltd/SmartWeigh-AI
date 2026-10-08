@@ -50,6 +50,8 @@ function doPost(e) {
       return handleSyncTaxInvoiceLinks(payload);
     } else if (action === 'rename_and_move') {
       return handleRenameAndMoveFile(payload);
+    } else if (action === 'restore_line_inbox_file') {
+      return handleRestoreLineInboxFile(payload);
     } else if (action === 'cleanup') {
       return handleCleanup(payload);
     } else if (action === 'list_zone_files') {
@@ -508,6 +510,66 @@ function handleRenameAndMoveFile(payload) {
     fileName: file.getName(),
     message: 'เปลี่ยนชื่อไฟล์สำเร็จ (ไม่ได้ย้ายโฟลเดอร์)'
   });
+}
+
+function handleRestoreLineInboxFile(payload) {
+  var rootFolderId = payload.rootFolderId;
+  var fileId = payload.fileId;
+  if (!rootFolderId || !fileId) {
+    return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId และ fileId เพื่อคืนรูป' });
+  }
+
+  try {
+    var rootFolder = DriveApp.getFolderById(rootFolderId);
+    var inboxFolder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_00);
+    var standardZoneIds = [
+      getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_01).getId(),
+      getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_02).getId(),
+      getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_03).getId(),
+      getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_04).getId()
+    ];
+    var zone02Id = standardZoneIds[1];
+    var file = DriveApp.getFileById(fileId);
+    var parents = file.getParents();
+    var inInbox = false;
+    var inDoZone = false;
+
+    while (parents.hasNext()) {
+      var parent = parents.next();
+      if (parent.getId() === inboxFolder.getId()) {
+        inInbox = true;
+        break;
+      }
+      if (standardZoneIds.indexOf(parent.getId()) >= 0) {
+        inDoZone = true;
+        continue;
+      }
+      var grandparents = parent.getParents();
+      while (grandparents.hasNext()) {
+        if (grandparents.next().getId() === zone02Id) {
+          inDoZone = true;
+          break;
+        }
+      }
+      if (inDoZone) break;
+    }
+
+    if (!inInbox && !inDoZone) {
+      return jsonResponse({
+        success: false,
+        error: 'ไม่คืนรูป: ไฟล์ไม่ได้อยู่ใน LINE Inbox หรือโฟลเดอร์ชุด DO ที่อนุญาต'
+      });
+    }
+    if (!inInbox) file.moveTo(inboxFolder);
+    return jsonResponse({
+      success: true,
+      fileId: file.getId(),
+      targetZone: 'zone_00',
+      message: inInbox ? 'ไฟล์อยู่ใน LINE Inbox แล้ว' : 'คืนไฟล์เข้า LINE Inbox สำเร็จ'
+    });
+  } catch (e) {
+    return jsonResponse({ success: false, error: 'คืนไฟล์เข้า LINE Inbox ไม่สำเร็จ: ' + e.toString() });
+  }
 }
 
 function handleCleanup(payload) {

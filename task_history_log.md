@@ -4,6 +4,29 @@
 
 ---
 
+## [2026-10-08] ชดเชย reservation DO หลังตรวจรับ LINE ล้มเหลว
+
+### การเปลี่ยนแปลง
+- เพิ่มคืนไฟล์ที่อาจย้ายแล้วจากโฟลเดอร์ชุด DO กลับ LINE Inbox ทั้ง Service Account และ Google Apps Script; ตรวจความสัมพันธ์ Inbox ID/Drive ID และ parent จริงก่อนย้าย พร้อมทำซ้ำได้เมื่อไฟล์กลับ zone 00 แล้ว.
+- คืนสถานะแถว LINE จาก snapshot ต้นทาง และยกเลิก reservation เฉพาะระเบียน `pending` ที่ตรง ID, TR, ประเภท DO และ LINE Inbox ID; รองรับ `delivery_order`, `concrete` และ `full_logistics`.
+- หากคืนไฟล์/คืนสถานะ/ยกเลิก reservation ไม่สำเร็จ ระบบแจ้งข้อผิดพลาดและไม่รายงานว่า rollback ครบ; อัปเดต Handover/Blueprint ตามข้อจำกัด transaction ข้ามบริการ.
+
+### การตรวจสอบ
+- `npm.cmd run lint`, `npm.cmd run build`, `git diff --check` และ `node --check` สำหรับ Google Apps Script ผ่าน
+- ยังไม่ทดสอบกับ Supabase/Google Drive จริง; ต้อง deploy server/frontend และ GAS รุ่นล่าสุด แล้วทดสอบเคส move ล้มเหลว/restore ซ้ำกับบริการจริงก่อนเปิดใช้งาน.
+
+## [2026-10-08] ป้องกันการจอง TR ก่อนรูป LINE อยู่ใน Google Drive
+
+### การเปลี่ยนแปลง
+- ก่อนจอง TR สำหรับเอกสารจาก LINE ให้ยืนยันว่ารูปของ DO และตั๋วชั่งที่เลือกมี Drive File ID; หากยังไม่มีให้ซิงก์เฉพาะรายการ โหลดสถานะล่าสุด และหยุดก่อน `prepare_do_order` หากซิงก์ไม่สำเร็จหรือ Drive ID ยังขาด
+- จำกัด API ซิงก์รูปให้เลือก Inbox ID เดียวได้เมื่อเรียกจากขั้นตรวจรับ; ก่อนจอง TR เก็บ Drive ID/ลิงก์ของรูปที่ซิงก์แล้วไว้ใน reservation เพื่อให้กู้คืนได้
+- ระเบียนที่ยัง `pending` หลังย้ายไฟล์ปลายทางล้มเหลวเป็น reservation สำหรับ retry ด้วย ID/TR เดิม ไม่ใช่เอกสารตรวจรับสำเร็จ; การย้าย Drive กับการเขียนฐานข้อมูลไม่สามารถทำเป็น transaction ข้ามบริการเดียวกันได้
+- อัปเดต Handover และ Blueprint ให้ระบุ preflight รูปและข้อจำกัด transaction ข้ามบริการ
+
+### การตรวจสอบ
+- ยังไม่ทดสอบกับ Supabase/Google Drive จริง; ต้อง deploy server/frontend และตรวจ environment ฐานข้อมูลจริงก่อนยืนยันการทำงานครบ end-to-end
+- `npm.cmd run lint`, `npm.cmd run build` และ `git diff --check` ผ่าน
+
 ## [2026-10-08] แก้ป้ายตรวจเลขซ้ำค้างในกล่องพัก LINE
 
 ### การเปลี่ยนแปลง
