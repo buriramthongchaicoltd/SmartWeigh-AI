@@ -276,7 +276,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [isPairingTicket, setIsPairingTicket] = useState(false);
   const [pairingDeliveryOrder, setPairingDeliveryOrder] = useState<LineBillInboxItem | null>(null);
   const [pairingDeliveryTicketId, setPairingDeliveryTicketId] = useState('');
-  const [confirmNoDeliveryTicket, setConfirmNoDeliveryTicket] = useState(false);
   const [isPairingDeliveryOrder, setIsPairingDeliveryOrder] = useState(false);
   const [duplicateCheckResults, setDuplicateCheckResults] = useState<Record<string, {
     queryKey: string;
@@ -455,14 +454,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
 
   const handleConfirmDeliveryOrderBundle = async () => {
     if (!pairingDeliveryOrder || isPairingDeliveryOrder) return;
-    if (
-      pendingOriginWeighbridgeItems.length > 0 &&
-      !pairingDeliveryTicketId &&
-      !confirmNoDeliveryTicket
-    ) {
-      showToast('กรุณาเลือกตั๋วชั่งที่แนบกับใบส่งของนี้ หรือยืนยันว่าไม่มีตั๋วแนบในคิว', 'info');
-      return;
-    }
 
     setIsPairingDeliveryOrder(true);
     try {
@@ -476,7 +467,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       }
       setPairingDeliveryOrder(null);
       setPairingDeliveryTicketId('');
-      setConfirmNoDeliveryTicket(false);
     } catch (error) {
       const reason = error instanceof Error ? `: ${error.message}` : '';
       showToast(`จัดชุดใบส่งของไม่สำเร็จ${reason}`, 'info');
@@ -1893,7 +1883,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                               if (canBundleFromInbox) {
                                 setPairingDeliveryOrder(item);
                                 setPairingDeliveryTicketId('');
-                                setConfirmNoDeliveryTicket(false);
                               } else {
                                 onOpenVerifyFromInbox(item);
                               }
@@ -1910,7 +1899,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                                 docType: item.detectedDocType,
                                 col6: item.extractedData.col6 || ''
                               })
-                                ? 'เลือกตั๋วชั่งต้นทางที่แนบกับใบส่งของนี้ก่อนเปิดตรวจรับ'
+                                ? 'เลือกจับคู่เฉพาะตั๋วชั่งที่เป็นเที่ยวเดียวกัน หรือเปิดตรวจรับ DO แยก'
                                 : undefined
                             }
                           >
@@ -1923,7 +1912,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                                       docType: item.detectedDocType,
                                       col6: item.extractedData.col6 || ''
                                     })
-                                  ? 'จัดชุด/ตรวจรับ'
+                                  ? 'ตรวจรับ / จับคู่ถ้ามี'
                                   : 'ตรวจรับบิล'}
                             </span>
                           </button>
@@ -2108,7 +2097,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <h3 id="line-do-bundle-title" className="flex items-center gap-2 text-sm font-bold text-slate-900">
                 <Link2 className="h-4 w-4 text-emerald-700" />
-                จัดชุดเอกสารก่อนตรวจรับ
+                ตรวจ DO / จับคู่ตั๋วชั่ง (ถ้าเป็นเที่ยวเดียวกัน)
               </h3>
               <button
                 type="button"
@@ -2141,7 +2130,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               </section>
 
               <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-950">
-                ระบบไม่สามารถรู้จากชื่อร้านหรือเวลาว่าเป็นใบแนบหรือไม่ กรุณาเทียบภาพตั๋วกับ DO แล้วเลือกจับคู่ด้วยตนเอง ห้ามเลือกจากข้อมูลใกล้เคียงอย่างเดียว
+                ตั๋วชั่งต้นทางไม่ได้แนบกับ DO ทุกใบ และรายการด้านล่างอาจเป็นคนละเที่ยวกัน ระบบไม่จับคู่อัตโนมัติ: เลือกเฉพาะเมื่อเทียบภาพแล้วว่าเป็นเที่ยวเดียวกัน หากเป็นเอกสารแยก ให้ตรวจรับ DO แยกได้เลย แล้วค่อยกด “จับคู่ DO” จากแถวตั๋วชั่งภายหลังเมื่อยืนยันความสัมพันธ์ได้
               </div>
 
               {pendingOriginWeighbridgeItems.length > 0 ? (
@@ -2169,7 +2158,6 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                           checked={pairingDeliveryTicketId === ticket.id}
                           onChange={() => {
                             setPairingDeliveryTicketId(ticket.id);
-                            setConfirmNoDeliveryTicket(false);
                           }}
                           className="mt-1 h-4 w-4 accent-emerald-700"
                           aria-label={`เลือกตั๋วชั่ง ${ticket.extractedData.col6 || 'ไม่ทราบเลขที่'}`}
@@ -2197,21 +2185,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                       </div>
                     );
                   })}
-                  {!pairingDeliveryTicketId && (
-                    <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700">
-                      <input
-                        type="checkbox"
-                        checked={confirmNoDeliveryTicket}
-                        onChange={event => setConfirmNoDeliveryTicket(event.target.checked)}
-                        className="mt-0.5 h-4 w-4 accent-slate-700"
-                      />
-                      <span>ยืนยันว่าไม่มีตั๋วชั่งต้นทางของใบส่งของนี้ในรายการที่รอตรวจ</span>
-                    </label>
-                  )}
                 </fieldset>
               ) : (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700">
-                  ขณะนี้ไม่มีตั๋วชั่งต้นทางรอตรวจในกล่องพัก จึงเปิดตรวจรับใบส่งของได้
+                  ขณะนี้ไม่มีตั๋วชั่งต้นทางรอตรวจ เปิดตรวจรับใบส่งของได้ตามปกติ
                 </div>
               )}
 
@@ -2233,19 +2210,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleConfirmDeliveryOrderBundle()}
-                  disabled={
-                    isPairingDeliveryOrder ||
-                    (pendingOriginWeighbridgeItems.length > 0 &&
-                      !pairingDeliveryTicketId &&
-                      !confirmNoDeliveryTicket)
-                  }
+                  disabled={isPairingDeliveryOrder}
                   className="min-h-10 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isPairingDeliveryOrder
-                    ? 'กำลังจัดชุด...'
+                    ? 'กำลังดำเนินการ...'
                     : pairingDeliveryTicketId
                       ? 'จับคู่และตรวจรับ DO'
-                      : 'ยืนยันและตรวจรับ DO'}
+                      : 'ตรวจรับ DO แยก'}
                 </button>
               </div>
             </div>
