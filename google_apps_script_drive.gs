@@ -96,7 +96,11 @@ var ZONE_KEY_MAP = {
 function getOrCreateSubfolder(parentFolder, folderName) {
   var folders = parentFolder.getFoldersByName(folderName);
   if (folders.hasNext()) {
-    return folders.next();
+    var folder = folders.next();
+    if (folders.hasNext()) {
+      throw new Error('พบโฟลเดอร์ชื่อ "' + folderName + '" ซ้ำกันใต้โฟลเดอร์เดียวกัน');
+    }
+    return folder;
   }
   return parentFolder.createFolder(folderName);
 }
@@ -304,6 +308,8 @@ function handleRenameAndMoveFile(payload) {
   var rootFolderId = payload.rootFolderId;
   var targetZone   = payload.targetZone;    // 'zone_01' | 'zone_02' | 'zone_03' | 'zone_04'
   var subfolderName = payload.subfolderName; // optional sub-folder inside zone (e.g. TR-xxx_DO-xxx)
+  var preserveOriginalName = payload.preserveOriginalName === true;
+  var reorganizeExistingDo = payload.reorganizeExistingDo === true;
 
   if (!fileId || !newFileName) {
     return jsonResponse({ success: false, error: 'ระบุ fileId และ newFileName ไม่ครบ' });
@@ -316,31 +322,57 @@ function handleRenameAndMoveFile(payload) {
     return jsonResponse({ success: false, error: 'ไม่พบไฟล์: ' + e.toString() });
   }
 
-  // 1. Rename
-  file.setName(newFileName);
-
   // 2. Move (optional)
   if (rootFolderId && targetZone && ZONE_KEY_MAP[targetZone]) {
     try {
       var rootFolder = DriveApp.getFolderById(rootFolderId);
+      if (reorganizeExistingDo && targetZone !== 'zone_02') {
+        return jsonResponse({ success: false, error: 'จัดระเบียบย้อนหลังได้เฉพาะไฟล์ในโซน 02' });
+      }
+      if (reorganizeExistingDo) {
+        var zone02Folder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_02);
+        var inboxFolder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_00);
+        var parents = file.getParents();
+        var allowedSource = false;
+        while (parents.hasNext()) {
+          var parent = parents.next();
+          if (parent.getId() === inboxFolder.getId() || parent.getId() === zone02Folder.getId()) {
+            allowedSource = true;
+            break;
+          }
+          var grandparents = parent.getParents();
+          while (grandparents.hasNext()) {
+            if (grandparents.next().getId() === zone02Folder.getId()) {
+              allowedSource = true;
+              break;
+            }
+          }
+          if (allowedSource) break;
+        }
+        if (!allowedSource) {
+          return jsonResponse({ success: false, error: 'ไฟล์ไม่ได้อยู่ใน LINE Inbox หรือโซน 02 ที่อนุญาต จึงหยุดก่อนย้าย' });
+        }
+      }
       var zoneName   = ZONE_NAMES[ZONE_KEY_MAP[targetZone]];
       var targetFolder = getOrCreateSubfolder(rootFolder, zoneName);
       if (subfolderName) {
         targetFolder = getOrCreateSubfolder(targetFolder, subfolderName);
       }
+      if (!preserveOriginalName) file.setName(newFileName);
       file.moveTo(targetFolder);
       return jsonResponse({
         success: true,
         fileId: file.getId(),
         fileName: file.getName(),
         targetFolderId: targetFolder.getId(),
-        message: 'เปลี่ยนชื่อและย้ายไฟล์สำเร็จ'
+        message: preserveOriginalName ? 'ย้ายไฟล์เข้าโฟลเดอร์ใบงานสำเร็จ' : 'เปลี่ยนชื่อและย้ายไฟล์สำเร็จ'
       });
     } catch (e) {
-      return jsonResponse({ success: false, error: 'เปลี่ยนชื่อสำเร็จแต่ย้ายโฟลเดอร์ไม่ได้: ' + e.toString() });
+      return jsonResponse({ success: false, error: 'จัดการไฟล์ใน Google Drive ไม่สำเร็จ: ' + e.toString() });
     }
   }
 
+  if (!preserveOriginalName) file.setName(newFileName);
   return jsonResponse({
     success: true,
     fileId: file.getId(),

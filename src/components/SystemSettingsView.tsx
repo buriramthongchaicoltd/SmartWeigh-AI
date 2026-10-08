@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   SystemSettings,
   SystemBackupPayload,
@@ -80,7 +80,11 @@ interface SystemSettingsViewProps {
     billingNotes: BillingNoteRecord[];
   }) => void;
   onReloadDatabase?: () => Promise<void>;
-  showToast: (msg: string, type?: 'success' | 'info') => void;
+  onReorganizeDriveOrders?: (
+    orderIds: string[],
+    onProgress: (completed: number, total: number) => void
+  ) => Promise<{ succeeded: number; failures: string[] }>;
+  showToast: (msg: string, type?: 'success' | 'info' | 'error') => void;
 }
 
 export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
@@ -98,6 +102,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   onRestoreBackup,
   onSyncFromCloud,
   onReloadDatabase,
+  onReorganizeDriveOrders,
   showToast
 }) => {
   const [subTab, setSubTab] = useState<'settings' | 'backup' | 'database' | 'handover'>('settings');
@@ -172,6 +177,85 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
   const [isSavingDrive, setIsSavingDrive] = useState(false);
   const [driveSetupSecret, setDriveSetupSecret] = useState('');
   const [isSettingUpDriveSecret, setIsSettingUpDriveSecret] = useState(false);
+  const [selectedLegacyDoIds, setSelectedLegacyDoIds] = useState<string[]>([]);
+  const [legacyMoveConfirmed, setLegacyMoveConfirmed] = useState(false);
+  const [isReorganizingLegacyFiles, setIsReorganizingLegacyFiles] = useState(false);
+  const [legacyMoveProgress, setLegacyMoveProgress] = useState<{ completed: number; total: number } | null>(null);
+  const [legacyMoveResult, setLegacyMoveResult] = useState<{ succeeded: number; failures: string[] } | null>(null);
+
+  const legacyDoCandidates = useMemo(() => {
+    const doTypes = new Set(['delivery_order', 'concrete', 'full_logistics']);
+    const doRecords = orders.filter(order => doTypes.has(order.docType || 'delivery_order'));
+    const candidateRecords = doRecords.filter(order =>
+      order.status === 'verified' && Boolean(order.col1.trim() && order.col6.trim() && order.driveFileId)
+    );
+    const bundleCounts = new Map<string, number>();
+    doRecords.filter(order => order.col1.trim() && order.col6.trim()).forEach(order => {
+      const key = `${order.col1.trim()}\u0000${order.col6.trim()}`;
+      bundleCounts.set(key, (bundleCounts.get(key) || 0) + 1);
+    });
+    const fileIdCounts = new Map<string, number>();
+    orders.forEach(order => {
+      if (order.driveFileId) {
+        fileIdCounts.set(order.driveFileId, (fileIdCounts.get(order.driveFileId) || 0) + 1);
+      }
+    });
+
+    return candidateRecords
+      .filter(order =>
+        bundleCounts.get(`${order.col1.trim()}\u0000${order.col6.trim()}`) === 1 &&
+        fileIdCounts.get(order.driveFileId || '') === 1
+      )
+      .map(order => {
+        const relatedTickets = orders.filter(ticket =>
+          ticket.docType === 'weighbridge' &&
+          ticket.matchedOriginDoId === order.id
+        );
+        return {
+          order,
+          originTickets: relatedTickets.filter(ticket =>
+            ticket.status === 'verified' &&
+            Boolean(ticket.driveFileId) &&
+            fileIdCounts.get(ticket.driveFileId || '') === 1
+          ),
+          unavailableOriginTicketCount: relatedTickets.filter(ticket =>
+            ticket.status !== 'verified' ||
+            !ticket.driveFileId ||
+            fileIdCounts.get(ticket.driveFileId || '') !== 1
+          ).length
+        };
+      });
+  }, [orders]);
+  const selectedLegacyDoCandidates = useMemo(
+    () => legacyDoCandidates.filter(candidate => selectedLegacyDoIds.includes(candidate.order.id)),
+    [legacyDoCandidates, selectedLegacyDoIds]
+  );
+
+  const handleReorganizeLegacyFiles = async () => {
+    if (!onReorganizeDriveOrders || selectedLegacyDoCandidates.length === 0) return;
+    setIsReorganizingLegacyFiles(true);
+    setLegacyMoveResult(null);
+    setLegacyMoveProgress({ completed: 0, total: 0 });
+    try {
+      const result = await onReorganizeDriveOrders(
+        selectedLegacyDoCandidates.map(candidate => candidate.order.id),
+        (completed, total) => setLegacyMoveProgress({ completed, total })
+      );
+      setLegacyMoveResult(result);
+      if (result.failures.length > 0) {
+        showToast(`จัดระเบียบสำเร็จ ${result.succeeded} ไฟล์; มี ${result.failures.length} รายการที่ต้องตรวจสอบ`, 'error');
+      } else {
+        showToast(`จัดระเบียบไฟล์ย้อนหลังสำเร็จ ${result.succeeded} ไฟล์`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLegacyMoveResult({ succeeded: 0, failures: [message] });
+      showToast(`จัดระเบียบไฟล์ย้อนหลังไม่สำเร็จ: ${message}`, 'error');
+    } finally {
+      setIsReorganizingLegacyFiles(false);
+      setLegacyMoveConfirmed(false);
+    }
+  };
 
   // Global Startup & Live Services Self-Test State
   const [startupStatus, setStartupStatus] = useState<{
@@ -3013,6 +3097,171 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
               </div>
             </form>
           </div>
+
+          {(currentUser.role === 'admin' || currentUser.role === 'manager') && (
+            <section className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4" aria-labelledby="legacy-drive-reorganization-heading">
+              <div className="flex items-start gap-3 border-b border-slate-100 pb-3">
+                <div className="w-10 h-10 shrink-0 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                  <Layers className="w-5 h-5" aria-hidden="true" />
+                </div>
+                <div>
+                  <h3 id="legacy-drive-reorganization-heading" className="text-sm font-bold text-slate-900">
+                    จัดระเบียบไฟล์ DO ที่บันทึกไว้ก่อนหน้า
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    ย้ายเฉพาะรูป DO ที่ยืนยันแล้วและตั๋วชั่งต้นทางซึ่งมีความสัมพันธ์ตรงในฐานข้อมูลไปยัง
+                    <code className="mx-1 font-mono font-bold">02_ใบงานหลัก_DO_ครบชุด/&lt;เลข TR&gt;_DO-&lt;เลข DO&gt;</code>
+                    โดยคงชื่อไฟล์เดิม
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950 leading-relaxed">
+                รายการด้านล่างเป็นตัวอย่างจากข้อมูลฐานข้อมูล ไม่ใช่การอ่านตำแหน่งจริงจาก Drive ล่วงหน้า
+                เมื่อเริ่มย้าย ระบบจะตรวจ Drive ID, สถานะ, ความสัมพันธ์ DO/ตั๋วชั่ง และตำแหน่งไฟล์จริงอีกครั้ง
+                หากไฟล์ไม่ได้อยู่ใน LINE Inbox หรือโซน 02 ที่อนุญาต หรือข้อมูลกำกวม ระบบจะหยุดรายการนั้นและแจ้งเหตุผล
+                {driveConfig.connectionMode === 'gas' && (
+                  <span className="mt-1 block font-semibold">
+                    ใช้ Google Apps Script ต้องคัดลอก Code.gs ล่าสุดด้านบนไปแทนโค้ดเดิมและ Deploy เวอร์ชันใหม่ก่อนใช้เครื่องมือนี้
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <p className="font-semibold text-slate-700">
+                  เลือกได้ไม่เกิน 20 ชุดต่อรอบ • พบชุดที่เข้าเกณฑ์ {legacyDoCandidates.length} ชุด
+                </p>
+                <p className="text-slate-500">
+                  ข้ามอัตโนมัติ {Math.max(0, orders.filter(order =>
+                    ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || 'delivery_order')
+                  ).length - legacyDoCandidates.length)} DO ที่ข้อมูลไม่ครบ/ไม่ยืนยัน/กำกวม
+                </p>
+              </div>
+
+              <div className="max-h-72 overflow-y-auto rounded-xl border border-slate-200 divide-y divide-slate-100">
+                {legacyDoCandidates.length === 0 ? (
+                  <p className="p-4 text-xs text-slate-500">
+                    ยังไม่มี DO ที่ผ่านเงื่อนไข (ต้องยืนยันแล้ว มีเลข TR/DO และมี Drive ID ที่ไม่ซ้ำ)
+                  </p>
+                ) : legacyDoCandidates.map(({ order, originTickets, unavailableOriginTicketCount }) => {
+                  const isSelected = selectedLegacyDoIds.includes(order.id);
+                  const selectionLimitReached = selectedLegacyDoIds.length >= 20;
+                  return (
+                    <label
+                      key={order.id}
+                      className={`flex items-start gap-3 p-3 cursor-pointer transition-colors ${
+                        isSelected ? 'bg-indigo-50/70' : 'hover:bg-slate-50'
+                      } ${selectionLimitReached && !isSelected ? 'opacity-60' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        disabled={isReorganizingLegacyFiles || (selectionLimitReached && !isSelected)}
+                        onChange={event => {
+                          setLegacyMoveConfirmed(false);
+                          setLegacyMoveResult(null);
+                          setSelectedLegacyDoIds(previous => event.target.checked
+                            ? [...previous, order.id]
+                            : previous.filter(id => id !== order.id)
+                          );
+                        }}
+                        className="mt-1 h-4 w-4 shrink-0 accent-indigo-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <strong className="text-xs text-slate-900">{order.col1} / DO {order.col6}</strong>
+                          <span className="text-[11px] text-slate-500">
+                            {1 + originTickets.length} ไฟล์ที่ย้ายได้จากข้อมูลปัจจุบัน
+                          </span>
+                        </span>
+                        <span className="mt-1 block truncate font-mono text-[10px] text-slate-500" title={order.driveFileId || ''}>
+                          DO Drive ID: {order.driveFileId}
+                        </span>
+                        {originTickets.map(ticket => (
+                          <span key={ticket.id} className="mt-0.5 block truncate font-mono text-[10px] text-sky-800" title={ticket.driveFileId}>
+                            ตั๋วชั่ง {ticket.col6} • Drive ID: {ticket.driveFileId}
+                          </span>
+                        ))}
+                        {unavailableOriginTicketCount > 0 && (
+                          <span className="mt-1 block text-[10px] font-medium text-amber-800">
+                            ไม่รวมตั๋วชั่งที่ยังไม่ยืนยันหรือไม่มี Drive ID/ID ซ้ำ: {unavailableOriginTicketCount} รายการ
+                          </span>
+                        )}
+                        <span className="mt-1 block text-[10px] text-slate-600">
+                          ปลายทาง: 02_ใบงานหลัก_DO_ครบชุด/{order.col1}_DO-{order.col6}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {selectedLegacyDoCandidates.length > 0 && (
+                <div className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/60 p-3">
+                  <p className="text-xs font-bold text-indigo-950">
+                    ตรวจรายการที่จะย้าย: {selectedLegacyDoCandidates.length} ชุด • รวม {
+                      selectedLegacyDoCandidates.reduce((total, candidate) => total + 1 + candidate.originTickets.length, 0)
+                    } ไฟล์
+                  </p>
+                  <label className="flex items-start gap-2 text-xs text-indigo-950 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={legacyMoveConfirmed}
+                      disabled={isReorganizingLegacyFiles}
+                      onChange={event => setLegacyMoveConfirmed(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+                    />
+                    <span>
+                      ยืนยันให้ย้ายเฉพาะไฟล์ตามชุด TR/DO ที่เลือก โดยไม่เปลี่ยนชื่อไฟล์ และยอมรับว่ารายการที่ตรวจสอบไม่ผ่านจะไม่ถูกย้าย
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => void handleReorganizeLegacyFiles()}
+                disabled={
+                  !onReorganizeDriveOrders ||
+                  selectedLegacyDoCandidates.length === 0 ||
+                  !legacyMoveConfirmed ||
+                  isReorganizingLegacyFiles
+                }
+                className="min-h-11 w-full rounded-xl bg-indigo-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-700"
+              >
+                {isReorganizingLegacyFiles
+                  ? `กำลังจัดระเบียบ ${legacyMoveProgress?.completed || 0}/${legacyMoveProgress?.total || '...'} ไฟล์`
+                  : `ย้ายไฟล์ของชุดที่เลือก (${selectedLegacyDoCandidates.length})`}
+              </button>
+
+              {legacyMoveProgress && isReorganizingLegacyFiles && (
+                <div role="status" aria-live="polite" className="text-xs text-slate-600">
+                  ดำเนินการแล้ว {legacyMoveProgress.completed} จาก {legacyMoveProgress.total || 'กำลังตรวจสอบ'} ไฟล์
+                </div>
+              )}
+              {legacyMoveResult && (
+                <div
+                  role={legacyMoveResult.failures.length > 0 ? 'alert' : 'status'}
+                  aria-live={legacyMoveResult.failures.length > 0 ? 'assertive' : 'polite'}
+                  className={`rounded-xl border p-3 text-xs ${
+                    legacyMoveResult.failures.length > 0
+                      ? 'border-amber-200 bg-amber-50 text-amber-950'
+                      : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  }`}
+                >
+                  <p className="font-bold">
+                    ตรวจ/จัดเก็บสำเร็จ {legacyMoveResult.succeeded} ไฟล์
+                    {legacyMoveResult.failures.length > 0 && ` • ต้องตรวจสอบ ${legacyMoveResult.failures.length} รายการ`}
+                  </p>
+                  {legacyMoveResult.failures.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-4">
+                      {legacyMoveResult.failures.map((failure, index) => <li key={`${index}-${failure}`}>{failure}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
         </div>
       )}
 

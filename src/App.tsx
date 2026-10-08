@@ -929,6 +929,121 @@ export default function App() {
     }
   };
 
+  const handleReorganizeDriveOrders = async (
+    orderIds: string[],
+    onProgress: (completed: number, total: number) => void
+  ): Promise<{ succeeded: number; failures: string[] }> => {
+    if (currentUser.role === 'user') {
+      throw new Error('ต้องใช้บัญชีผู้จัดการหรือ Admin เพื่อจัดระเบียบไฟล์ย้อนหลัง');
+    }
+
+    const selectedOrders = orderIds.map(id => orders.find(order => order.id === id));
+    if (orderIds.length > 20) {
+      throw new Error('จัดระเบียบได้ไม่เกิน 20 ชุดต่อรอบ กรุณาแบ่งรายการ');
+    }
+    if (selectedOrders.some(order => !order)) {
+      throw new Error('ข้อมูลใบงานเปลี่ยนระหว่างเตรียมรายการ กรุณาโหลดข้อมูลใหม่แล้วตรวจสอบอีกครั้ง');
+    }
+
+    const doTypes = new Set(['delivery_order', 'concrete', 'full_logistics']);
+    const bundleKeyCounts = new Map<string, number>();
+    const fileIdCounts = new Map<string, number>();
+    orders.forEach(order => {
+      if (order.driveFileId) {
+        fileIdCounts.set(order.driveFileId, (fileIdCounts.get(order.driveFileId) || 0) + 1);
+      }
+      if (doTypes.has(order.docType || 'delivery_order') && order.col1.trim() && order.col6.trim()) {
+        const key = `${order.col1.trim()}\u0000${order.col6.trim()}`;
+        bundleKeyCounts.set(key, (bundleKeyCounts.get(key) || 0) + 1);
+      }
+    });
+
+    const jobs: Array<{ parent: OrderRecord; source: OrderRecord }> = [];
+    selectedOrders.forEach(order => {
+      if (
+        !order ||
+        order.status !== 'verified' ||
+        !doTypes.has(order.docType || 'delivery_order') ||
+        !order.col1.trim() ||
+        !order.col6.trim() ||
+        !order.driveFileId
+      ) {
+        throw new Error('ข้ามรายการ: DO ต้องยืนยันแล้วและมีเลข TR, เลข DO และ Drive ID ครบ');
+      }
+      const key = `${order.col1.trim()}\u0000${order.col6.trim()}`;
+      if (bundleKeyCounts.get(key) !== 1 || fileIdCounts.get(order.driveFileId) !== 1) {
+        throw new Error(`ข้ามรายการ ${order.col1}/${order.col6}: พบเลขชุดหรือ Drive ID ซ้ำในฐานข้อมูล`);
+      }
+      jobs.push({ parent: order, source: order });
+      orders
+        .filter(ticket => ticket.docType === 'weighbridge' && ticket.matchedOriginDoId === order.id)
+        .forEach(ticket => {
+          if (ticket.status === 'verified' && ticket.driveFileId && fileIdCounts.get(ticket.driveFileId) === 1) {
+            jobs.push({ parent: order, source: ticket });
+          }
+        });
+    });
+
+    let succeeded = 0;
+    let completed = 0;
+    const failures: string[] = [];
+    for (const { parent, source } of jobs) {
+      try {
+        const response = await fetch('/api/drive/rename-and-move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileId: source.driveFileId,
+            docType: source.docType || 'delivery_order',
+            docDate: source.col7,
+            docNumber: source.col6,
+            bundleTrNumber: parent.col1,
+            bundleDoNumber: parent.col6,
+            reorganizationOrderId: parent.id,
+            reorganizationRecordId: source.id,
+            preserveFileName: true
+          }),
+          signal: AbortSignal.timeout(55_000)
+        });
+        const responseText = await response.text();
+        let result: {
+          success?: boolean;
+          targetZone?: string;
+          targetFolderId?: string;
+          error?: string;
+        };
+        try {
+          result = JSON.parse(responseText);
+        } catch {
+          throw new Error(`Google Drive ตอบกลับไม่ใช่ JSON (HTTP ${response.status}): ${responseText.slice(0, 240)}`);
+        }
+        if (!response.ok || !result.success || result.targetZone !== 'zone_02' || !result.targetFolderId) {
+          throw new Error(result.error || `HTTP ${response.status}`);
+        }
+
+        succeeded += 1;
+        setOrders(previous => previous.map(order =>
+          order.id === source.id
+            ? { ...order, driveFolderId: result.targetFolderId, driveFileLocation: 'zone_02' }
+            : order
+        ));
+        setLineInbox(previous => previous.map(item =>
+          item.driveFileId === source.driveFileId
+            ? { ...item, driveFileLocation: 'zone_02' }
+            : item
+        ));
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        failures.push(`${parent.col1}/${parent.col6} (${source.docType === 'weighbridge' ? `ตั๋วชั่ง ${source.col6}` : 'ใบ DO'}): ${reason}`);
+      } finally {
+        completed += 1;
+        onProgress(completed, jobs.length);
+      }
+    }
+
+    return { succeeded, failures };
+  };
+
   // User Auth & Management Handlers
   const handleLoginSuccess = async (loggedInUser: AppUser, mustChangePassword: boolean) => {
     setAuthenticatedUser(loggedInUser);
@@ -4078,6 +4193,7 @@ export default function App() {
               onRestoreBackup={handleRestoreBackup}
               onSyncFromCloud={handleSyncFromCloud}
               onReloadDatabase={fetchDatabaseData}
+              onReorganizeDriveOrders={handleReorganizeDriveOrders}
               showToast={showToast}
             />
           )}

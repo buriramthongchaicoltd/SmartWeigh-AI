@@ -5906,21 +5906,124 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       docDate = '',  // วันที่ในเอกสาร (YYYY-MM-DD)
       docNumber = '', // เลขที่เอกสาร เช่น DO-01-0045, WB-0012
       bundleTrNumber = '',
-      bundleDoNumber = ''
+      bundleDoNumber = '',
+      reorganizationOrderId = '',
+      reorganizationRecordId = '',
+      preserveFileName = false
     } = req.body;
 
     if (!fileId) {
       return res.status(400).json({ success: false, error: 'กรุณาระบุ fileId ของไฟล์ที่ต้องการเปลี่ยนชื่อ' });
     }
 
+    const isHistoricalReorganization = Boolean(reorganizationOrderId || reorganizationRecordId);
+    let effectiveDocType = String(docType);
+    let effectiveDocDate = String(docDate || '');
+    let effectiveDocNumber = String(docNumber || '');
+    let effectiveBundleTrNumber = String(bundleTrNumber || '');
+    let effectiveBundleDoNumber = String(bundleDoNumber || '');
+    let persistReorganizationFolder: ((folderId: string) => Promise<void>) | undefined;
+
+    if (isHistoricalReorganization) {
+      if (!reorganizationOrderId || !reorganizationRecordId) {
+        return res.status(400).json({ success: false, error: 'ข้อมูลอ้างอิงชุดใบงานย้อนหลังไม่ครบ' });
+      }
+      const client = getSupabaseClient();
+      if (!client) {
+        return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสอบชุดใบงานย้อนหลัง' });
+      }
+
+      const { data: parentRow, error: parentError } = await client
+        .from('orders')
+        .select('*')
+        .eq('id', String(reorganizationOrderId))
+        .maybeSingle();
+      if (parentError) throw new Error(`ตรวจสอบ DO ต้นทางในฐานข้อมูลไม่สำเร็จ: ${parentError.message}`);
+      if (!parentRow) return res.status(404).json({ success: false, error: 'ไม่พบ DO ที่อ้างอิงในฐานข้อมูล' });
+
+      const parentOrder = mapSupabaseToOrder(parentRow);
+      const bundleDocTypes = ['delivery_order', 'concrete', 'full_logistics'];
+      if (
+        parentRow.status !== 'verified' ||
+        !bundleDocTypes.includes(String(parentRow.doc_type || 'delivery_order')) ||
+        !parentOrder.col1.trim() ||
+        !parentOrder.col6.trim()
+      ) {
+        return res.status(409).json({ success: false, error: 'ข้ามรายการ: DO ยังไม่ยืนยันหรือไม่มีเลข TR/DO ครบ' });
+      }
+
+      const { data: sameBundleRows, error: sameBundleError } = await client
+        .from('orders')
+        .select('id')
+        .in('doc_type', bundleDocTypes)
+        .eq('col1', parentOrder.col1)
+        .eq('col6', parentOrder.col6);
+      if (sameBundleError) throw new Error(`ตรวจสอบเลข TR/DO ซ้ำในฐานข้อมูลไม่สำเร็จ: ${sameBundleError.message}`);
+      if ((sameBundleRows || []).some(row => row.id !== parentOrder.id)) {
+        return res.status(409).json({ success: false, error: 'ข้ามรายการ: พบ DO มากกว่าหนึ่งรายการที่ใช้เลข TR/DO ชุดเดียวกัน' });
+      }
+
+      const { data: sourceRow, error: sourceError } = await client
+        .from('orders')
+        .select('*')
+        .eq('id', String(reorganizationRecordId))
+        .maybeSingle();
+      if (sourceError) throw new Error(`ตรวจสอบเอกสารในชุดใบงานไม่สำเร็จ: ${sourceError.message}`);
+      if (!sourceRow) return res.status(404).json({ success: false, error: 'ไม่พบเอกสารที่ต้องการจัดระเบียบในฐานข้อมูล' });
+
+      const sourceOrder = mapSupabaseToOrder(sourceRow);
+      const isBundleDo = sourceOrder.id === parentOrder.id;
+      const sourceIsValid = isBundleDo
+        ? bundleDocTypes.includes(String(sourceRow.doc_type || 'delivery_order'))
+        : sourceRow.doc_type === 'weighbridge' &&
+          sourceRow.matched_origin_do_id === parentOrder.id &&
+          sourceRow.status === 'verified';
+      if (!sourceIsValid || sourceRow.status !== 'verified' || sourceOrder.driveFileId !== fileId) {
+        return res.status(409).json({
+          success: false,
+          error: 'ข้ามรายการ: Drive ID หรือความสัมพันธ์เอกสารไม่ตรงกับ DO ที่ยืนยันในฐานข้อมูล'
+        });
+      }
+
+      const { data: duplicateFileRows, error: duplicateFileError } = await client
+        .from('orders')
+        .select('id')
+        .eq('drive_file_id', fileId)
+        .neq('id', sourceOrder.id);
+      if (duplicateFileError) throw new Error(`ตรวจสอบ Drive ID ซ้ำในฐานข้อมูลไม่สำเร็จ: ${duplicateFileError.message}`);
+      if ((duplicateFileRows || []).length > 0) {
+        return res.status(409).json({ success: false, error: 'ข้ามรายการ: Drive ID นี้ถูกอ้างอิงโดยเอกสารอื่นด้วย' });
+      }
+
+      effectiveDocType = String(sourceRow.doc_type || 'delivery_order');
+      effectiveDocDate = sourceOrder.col7;
+      effectiveDocNumber = sourceOrder.col6;
+      effectiveBundleTrNumber = parentOrder.col1;
+      effectiveBundleDoNumber = parentOrder.col6;
+      persistReorganizationFolder = async (folderId: string) => {
+        const { data, error } = await client
+          .from('orders')
+          .update({
+            drive_folder_id: folderId,
+            drive_file_location: 'zone_02',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', sourceOrder.id)
+          .select('id')
+          .maybeSingle();
+        if (error) throw new Error(`ย้ายไฟล์แล้ว แต่บันทึกตำแหน่งในฐานข้อมูลไม่สำเร็จ: ${error.message}`);
+        if (!data) throw new Error('ย้ายไฟล์แล้ว แต่ไม่พบแถวใบงานสำหรับบันทึกตำแหน่งในฐานข้อมูล');
+      };
+    }
+
     // --- Build new filename and target zone from docType ---
-    const safeDate   = sanitizeDriveName(docDate || new Date().toISOString().slice(0, 10));
-    const safeDocNo  = sanitizeDriveName(docNumber || 'NEW');
+    const safeDate   = sanitizeDriveName(effectiveDocDate || new Date().toISOString().slice(0, 10));
+    const safeDocNo  = sanitizeDriveName(effectiveDocNumber || 'NEW');
 
     let prefix: string;
     let targetZone: string;
 
-    switch (docType) {
+    switch (effectiveDocType) {
       case 'purchase_order':
         prefix     = 'PO';
         targetZone = 'zone_01';
@@ -5943,21 +6046,21 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     }
 
     const newFileName = `${prefix}_${safeDate}_${safeDocNo}.jpg`;
-    const needsDoBundle = ['delivery_order', 'concrete', 'full_logistics'].includes(docType);
-    if (needsDoBundle && (!String(bundleTrNumber).trim() || !String(bundleDoNumber).trim())) {
+    const needsDoBundle = ['delivery_order', 'concrete', 'full_logistics'].includes(effectiveDocType);
+    if (needsDoBundle && (!effectiveBundleTrNumber.trim() || !effectiveBundleDoNumber.trim())) {
       return res.status(400).json({
         success: false,
         error: 'ต้องมีเลข TR และเลข DO เพื่อสร้างโฟลเดอร์ใบงานในโซน 02'
       });
     }
-    if (Boolean(String(bundleTrNumber).trim()) !== Boolean(String(bundleDoNumber).trim())) {
+    if (Boolean(effectiveBundleTrNumber.trim()) !== Boolean(effectiveBundleDoNumber.trim())) {
       return res.status(400).json({
         success: false,
         error: 'ข้อมูลโฟลเดอร์ใบงานต้องระบุเลข TR และเลข DO ให้ครบทั้งคู่'
       });
     }
-    const bundleFolderName = String(bundleTrNumber).trim() && String(bundleDoNumber).trim()
-      ? `${sanitizeDriveName(String(bundleTrNumber))}_DO-${sanitizeDriveName(String(bundleDoNumber))}`
+    const bundleFolderName = effectiveBundleTrNumber.trim() && effectiveBundleDoNumber.trim()
+      ? `${sanitizeDriveName(effectiveBundleTrNumber)}_DO-${sanitizeDriveName(effectiveBundleDoNumber)}`
       : '';
 
     // A) GAS Mode
@@ -5968,20 +6071,27 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         fileId,
         newFileName,
         targetZone,
-        subfolderName: targetZone === 'zone_02' ? bundleFolderName || undefined : undefined
+        subfolderName: targetZone === 'zone_02' ? bundleFolderName || undefined : undefined,
+        preserveOriginalName: Boolean(preserveFileName && isHistoricalReorganization),
+        reorganizeExistingDo: isHistoricalReorganization
       });
 
       if (!gasResult || !gasResult.success) {
         throw new Error(gasResult?.error || 'เปลี่ยนชื่อไฟล์ผ่าน Google Apps Script ขัดข้อง');
       }
 
+      if (persistReorganizationFolder) {
+        if (!gasResult.targetFolderId) throw new Error('ย้ายไฟล์แล้ว แต่ Google Apps Script ไม่ส่งรหัสโฟลเดอร์เป้าหมายกลับมา');
+        await persistReorganizationFolder(gasResult.targetFolderId);
+      }
+
       return res.json({
         success: true,
         fileId: gasResult.fileId || fileId,
-        newFileName,
+        newFileName: gasResult.fileName || newFileName,
         targetZone,
         targetFolderId: gasResult.targetFolderId,
-        message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ (GAS)`
+        message: `ย้ายไฟล์ไป ${targetZone} สำเร็จ (GAS)`
       });
     }
 
@@ -6001,10 +6111,6 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     if (!toFolderId) {
       throw new Error(`ไม่พบโฟลเดอร์ Google Drive สำหรับ ${targetZone}`);
     }
-    const targetFolderId = targetZone === 'zone_02' && bundleFolderName
-      ? await getOrCreateSubfolder(token, toFolderId, bundleFolderName)
-      : toFolderId;
-
     const inboxFolderId = zones.ZONE_00;
     const fileUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`;
     const currentResponse = await fetch(`${fileUrl}?fields=id,name,parents`, {
@@ -6015,44 +6121,82 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     }
     const currentFile: { id: string; name: string; parents?: string[] } = await currentResponse.json();
     const currentParents = currentFile.parents || [];
+    let sourceFolderId = currentParents.includes(inboxFolderId)
+      ? inboxFolderId
+      : bundleFolderName && currentParents.includes(toFolderId)
+        ? toFolderId
+        : '';
+    if (isHistoricalReorganization && !sourceFolderId) {
+      for (const parentId of currentParents) {
+        const parentResponse = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+          { headers: { Authorization: 'Bearer ' + token } }
+        );
+        if (!parentResponse.ok) {
+          throw new Error(`ตรวจสอบโฟลเดอร์ต้นทางของไฟล์ไม่สำเร็จ: ${await parentResponse.text()}`);
+        }
+        const parentFolder: { id: string; mimeType?: string; parents?: string[] } = await parentResponse.json();
+        if (
+          parentFolder.mimeType === 'application/vnd.google-apps.folder' &&
+          (parentFolder.parents || []).includes(toFolderId)
+        ) {
+          sourceFolderId = parentId;
+          break;
+        }
+      }
+    }
+    if (isHistoricalReorganization && !sourceFolderId) {
+      throw new Error('ไฟล์ไม่ได้อยู่ในโฟลเดอร์ที่อนุญาตสำหรับการจัดระเบียบย้อนหลัง; หยุดก่อนย้าย');
+    }
+
+    const targetFolderId = targetZone === 'zone_02' && bundleFolderName
+      ? await getOrCreateSubfolder(token, toFolderId, bundleFolderName)
+      : toFolderId;
     if (currentParents.includes(targetFolderId)) {
+      if (persistReorganizationFolder) await persistReorganizationFolder(targetFolderId);
       return res.json({
         success: true,
         fileId,
         newFileName: currentFile.name,
         targetZone,
+        targetFolderId,
         message: `ไฟล์อยู่ใน ${targetZone} แล้ว`
       });
     }
-    const sourceFolderId = currentParents.includes(inboxFolderId)
-      ? inboxFolderId
-      : bundleFolderName && currentParents.includes(toFolderId)
-        ? toFolderId
-        : '';
     if (!sourceFolderId) {
-      throw new Error(`ไม่พบไฟล์ใน LINE Inbox หรือโฟลเดอร์ ${targetZone}; หยุดก่อนบันทึกข้อมูล`);
+      throw new Error(
+        isHistoricalReorganization
+          ? 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์ที่อนุญาตสำหรับการจัดระเบียบย้อนหลัง; หยุดก่อนย้าย'
+          : `ไม่พบไฟล์ใน LINE Inbox หรือโฟลเดอร์ ${targetZone}; หยุดก่อนบันทึกข้อมูล`
+      );
     }
 
-    // 1. Rename via PATCH
+    // 1. Rename via PATCH unless this is a history move that preserves the source name.
+    let renamedData: { name?: string } = { name: currentFile.name };
+    if (!preserveFileName || !isHistoricalReorganization) {
     const renameResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents`, {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ name: newFileName })
+      body: JSON.stringify({
+        name: newFileName
+      })
     });
     if (!renameResp.ok) {
       const errText = await renameResp.text();
       throw new Error(`Rename failed: ${errText}`);
     }
-    const renamedData: any = await renameResp.json();
+      renamedData = await renameResp.json();
+    }
 
     // Move from LINE Inbox, or move an existing zone-02 file into its TR bundle.
     const movedFile = await moveDriveFile(token, fileId, sourceFolderId, targetFolderId);
     if (!(movedFile.parents || []).includes(targetFolderId)) {
       throw new Error(`Google Drive ยังไม่ยืนยันว่าไฟล์อยู่ใน ${targetZone}`);
     }
+    if (persistReorganizationFolder) await persistReorganizationFolder(targetFolderId);
 
     return res.json({
       success: true,
@@ -6060,7 +6204,9 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       newFileName: renamedData.name,
       targetZone,
       targetFolderId,
-      message: `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ`
+      message: isHistoricalReorganization
+        ? `จัดเก็บไฟล์ย้อนหลังเข้าโฟลเดอร์ใบงานสำเร็จ`
+        : `เปลี่ยนชื่อเป็น "${newFileName}" และย้ายไป ${targetZone} สำเร็จ`
     });
 
   } catch (err: any) {
