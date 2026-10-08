@@ -16,7 +16,8 @@ import {
   Package,
   Truck,
   Edit3,
-  Trash2
+  Trash2,
+  Link2
 } from 'lucide-react';
 import { StoreMerchant, OrderRecord } from '../types';
 import { exportStoreStatement } from '../utils/excelExport';
@@ -56,6 +57,30 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
       o.docType !== 'dest_weighbridge'
     );
   }, [orders, store]);
+
+  const storeDocumentGroups = useMemo(() => {
+    const storeOrderIds = new Set(storeOrders.map(order => order.id));
+    const pairedTicketsByDoId = new Map<string, OrderRecord[]>();
+    orders.forEach(order => {
+      if (
+        order.docType !== 'weighbridge' ||
+        !order.matchedOriginDoId ||
+        !storeOrderIds.has(order.matchedOriginDoId)
+      ) {
+        return;
+      }
+      const tickets = pairedTicketsByDoId.get(order.matchedOriginDoId) || [];
+      tickets.push(order);
+      pairedTicketsByDoId.set(order.matchedOriginDoId, tickets);
+    });
+
+    return storeOrders
+      .filter(order => !isMatchedOriginWeighbridge(order))
+      .map(order => ({
+        order,
+        originTickets: pairedTicketsByDoId.get(order.id) || []
+      }));
+  }, [orders, storeOrders]);
 
   // Recalculate dynamic totals from actual orders
   const stats = useMemo(() => {
@@ -99,16 +124,19 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
   }, [storeOrders]);
 
   const filteredStoreOrders = useMemo(() => {
-    if (!searchTerm.trim()) return storeOrders;
-    const q = searchTerm.toLowerCase();
-    return storeOrders.filter(o => 
-      o.col1.toLowerCase().includes(q) ||
-      o.col2.toLowerCase().includes(q) ||
-      o.col6.toLowerCase().includes(q) ||
-      o.col10.toLowerCase().includes(q) ||
-      o.col11.toLowerCase().includes(q)
+    if (!searchTerm.trim()) return storeDocumentGroups;
+    const q = searchTerm.trim().toLowerCase();
+    return storeDocumentGroups.filter(({ order, originTickets }) =>
+      [
+        order.col1,
+        order.col2,
+        order.col6,
+        order.col10,
+        order.col11,
+        ...originTickets.map(ticket => ticket.col6)
+      ].some(value => value.toLowerCase().includes(q))
     );
-  }, [storeOrders, searchTerm]);
+  }, [storeDocumentGroups, searchTerm]);
 
   const fmtCurrency = (val: number) => {
     return '฿' + val.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -286,7 +314,7 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
                   </span>
                 </h3>
                 <p className="text-xs text-slate-500">
-                  รายการสั่งซื้อและตั๋วส่งของทั้งหมดที่บันทึกสำหรับ {store.name}
+                  แสดง DO และตั๋วชั่งต้นทางที่จับคู่เป็นชุดเอกสารเดียวกัน; ตั๋วชั่งที่ยังไม่จับคู่จะแสดงแยก
                 </p>
               </div>
 
@@ -335,7 +363,7 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
                       <th className="p-2.5">เลข TR</th>
                       <th className="p-2.5">วันที่</th>
                       <th className="p-2.5">โครงการ</th>
-                      <th className="p-2.5">DO / ตั๋ว</th>
+                      <th className="p-2.5">DO / ตั๋วชั่งที่แนบ</th>
                       <th className="p-2.5">ทะเบียนรถ</th>
                       <th className="p-2.5">รายการสินค้า</th>
                       <th className="p-2.5 text-right">ปริมาณ</th>
@@ -354,14 +382,36 @@ export const StoreDetailModal: React.FC<StoreDetailModalProps> = ({
                         </td>
                       </tr>
                     ) : (
-                      filteredStoreOrders.map((ord) => {
+                      filteredStoreOrders.map(({ order: ord, originTickets }) => {
                         const isUnpaid = Number(ord.col36) > 0;
                         return (
                           <tr key={ord.id} className="hover:bg-slate-50 transition">
                             <td className="p-2.5 font-bold text-blue-600 font-mono">{ord.col1}</td>
                             <td className="p-2.5 text-slate-600 font-mono">{ord.col7}</td>
                             <td className="p-2.5 text-slate-800 font-medium truncate max-w-[150px]" title={ord.col2}>{ord.col2}</td>
-                            <td className="p-2.5 text-slate-600 font-mono">{ord.col6}</td>
+                            <td className="p-2.5 text-slate-600 font-mono">
+                              <div>{ord.docType === 'weighbridge' ? `ตั๋วชั่ง ${ord.col6}` : ord.col6}</div>
+                              {originTickets.length > 0 && (
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {originTickets.map(ticket => (
+                                    <button
+                                      key={ticket.id}
+                                      type="button"
+                                      onClick={() => {
+                                        onClose();
+                                        onInspectOrder(ticket);
+                                      }}
+                                      className="inline-flex min-h-7 items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-800 hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700"
+                                      title={`เปิดตั๋วชั่ง ${ticket.col6} ที่แนบกับ DO ${ord.col6}`}
+                                      aria-label={`เปิดตั๋วชั่ง ${ticket.col6} ที่แนบกับ DO ${ord.col6}`}
+                                    >
+                                      <Link2 className="h-3 w-3" aria-hidden="true" />
+                                      <span>ตั๋วชั่ง {ticket.col6}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
                             <td className="p-2.5 text-slate-700 font-mono bg-slate-50">{ord.col10 || '-'}</td>
                             <td className="p-2.5 font-medium text-slate-900 truncate max-w-[160px]" title={ord.col11}>{ord.col11}</td>
                             <td className="p-2.5 text-right font-mono font-semibold">{ord.col22} {ord.col23}</td>
