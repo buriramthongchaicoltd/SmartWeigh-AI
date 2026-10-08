@@ -762,7 +762,7 @@ export default function App() {
     return result.matches?.[0] || null;
   }, []);
 
-  const resolveDuplicateInboxBeforeSave = React.useCallback(async (
+  const removeDuplicateInboxBeforeSave = React.useCallback(async (
     inboxId: string,
     docType: DocumentType,
     billNo: string,
@@ -770,14 +770,10 @@ export default function App() {
   ): Promise<boolean> => {
     const duplicate = await checkLineInboxDuplicate(docType, billNo, storeName, inboxId);
     if (!duplicate) return false;
-    const confirmedDuplicate = window.confirm(
-      `พบรายการที่ตรงกันทั้งประเภทเอกสาร เลขที่ และชื่อร้าน:\n${duplicate.reason}\n\n` +
-      'ตกลง = ยืนยันว่าเป็นบิลซ้ำและลบรายการนี้พร้อมรูป\nยกเลิก = ไม่ยืนยันว่าซ้ำ และดำเนินการบันทึกตรวจรับต่อ'
-    );
-    if (!confirmedDuplicate) return false;
     await deleteLineInboxItem(inboxId);
+    showToast(`พบเลขที่เอกสารซ้ำ (${duplicate.reason}) ลบรายการและรูปออกจากกล่องพัก LINE แล้ว โดยไม่บันทึกเอกสารซ้ำ`, 'info');
     return true;
-  }, [checkLineInboxDuplicate, deleteLineInboxItem]);
+  }, [checkLineInboxDuplicate, deleteLineInboxItem, showToast]);
 
   useEffect(() => {
     if (!isDbLoaded) return;
@@ -1865,7 +1861,7 @@ export default function App() {
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
-  const handleSaveOrder = async (inputOrder: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate = false): Promise<boolean> => {
+  const handleSaveOrder = async (inputOrder: OrderRecord, storeToSave?: StoreMerchant): Promise<boolean> => {
     const order = { ...inputOrder };
     const persistVerifiedInboxItem = async (
       item: LineBillInboxItem,
@@ -1906,13 +1902,32 @@ export default function App() {
         return false;
       }
       try {
-        if (await resolveDuplicateInboxBeforeSave(order.lineInboxId, order.docType || 'delivery_order', billNo, order.col8)) {
-          showToast('ยืนยันบิลซ้ำแล้ว ลบรายการในกล่องพักพร้อมรูปเรียบร้อย');
+        if (await removeDuplicateInboxBeforeSave(order.lineInboxId, order.docType || 'delivery_order', billNo, order.col8)) {
           return true;
         }
       } catch (error: any) {
-        showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        showToast(`พบข้อมูลซ้ำแต่ลบรายการออกจากกล่องพัก LINE ไม่สำเร็จ จึงยังไม่บันทึกเอกสาร: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
         return false;
+      }
+    } else if (!isExistingRecord) {
+      const billNo = order.docType === 'dest_weighbridge' ? order.col17 : order.col6;
+      if (billNo?.trim() && order.col8?.trim()) {
+        try {
+          const duplicate = await checkLineInboxDuplicate(
+            order.docType || 'delivery_order',
+            billNo,
+            order.col8,
+            ''
+          );
+          if (duplicate) {
+            showToast(`บล็อกการบันทึก: พบเอกสารซ้ำ ${duplicate.reason}`, 'error');
+            return false;
+          }
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'กรุณาลองอีกครั้ง';
+          showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${reason}`, 'error');
+          return false;
+        }
       }
     }
 
@@ -1920,8 +1935,8 @@ export default function App() {
       const blockingDups = checkDuplicateOrder(order, orders, order.image).filter(
         d => d.level === 'exact' || d.level === 'suspected'
       );
-      if (blockingDups.length > 0 && !allowDuplicate) {
-        showToast(`พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาตรวจสอบและยืนยันก่อนบันทึก`, 'info');
+      if (blockingDups.length > 0) {
+        showToast(`บล็อกการบันทึก: พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาแก้เลขที่เอกสารหรือข้อมูลร้านให้ถูกต้องก่อนลองใหม่`, 'error');
         return false;
       }
     }
@@ -3104,17 +3119,34 @@ export default function App() {
         return false;
       }
       try {
-        if (await resolveDuplicateInboxBeforeSave(
+        if (await removeDuplicateInboxBeforeSave(
           savedPO.lineInboxId,
           'purchase_order',
           savedPO.poNumber,
           savedPO.storeName
         )) {
-          showToast('ยืนยันบิลซ้ำแล้ว ลบรายการในกล่องพักพร้อมรูปเรียบร้อย');
           return true;
         }
       } catch (error: any) {
-        showToast(`ตรวจบิลซ้ำก่อนบันทึก PO ไม่สำเร็จ: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        showToast(`พบข้อมูลซ้ำแต่ลบรายการ PO ออกจากกล่องพัก LINE ไม่สำเร็จ จึงยังไม่บันทึกเอกสาร: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
+        return false;
+      }
+    }
+    if (!isExistingPO && !savedPO.lineInboxId && savedPO.poNumber?.trim() && savedPO.storeName?.trim()) {
+      try {
+        const duplicate = await checkLineInboxDuplicate(
+          'purchase_order',
+          savedPO.poNumber,
+          savedPO.storeName,
+          ''
+        );
+        if (duplicate) {
+          showToast(`บล็อกการบันทึก PO: พบเอกสารซ้ำ ${duplicate.reason}`, 'error');
+          return false;
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'กรุณาลองอีกครั้ง';
+        showToast(`ตรวจบิลซ้ำก่อนบันทึก PO ไม่สำเร็จ: ${reason}`, 'error');
         return false;
       }
     }

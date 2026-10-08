@@ -1057,6 +1057,53 @@ async function findLineInboxDuplicate(
   return null;
 }
 
+class DuplicateDocumentError extends Error {}
+
+async function assertNoDuplicateDocumentWrite(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  targetTable: string,
+  row: Record<string, any>,
+  knownNew = false
+): Promise<void> {
+  if (!row.id || !['orders', 'purchase_orders'].includes(targetTable)) return;
+
+  if (!knownNew) {
+    const { data: existingRow, error: existingError } = await client
+      .from(targetTable)
+      .select('id')
+      .eq('id', row.id)
+      .maybeSingle();
+    if (existingError) throw new Error(`ตรวจสอบรายการเดิมก่อนบันทึกไม่สำเร็จ: ${existingError.message}`);
+    if (existingRow) return;
+  }
+
+  const docType: DocumentType = targetTable === 'purchase_orders'
+    ? 'purchase_order'
+    : row.doc_type;
+  if (!OCR_DOCUMENT_TYPES.includes(docType)) return;
+
+  const billNo = targetTable === 'purchase_orders'
+    ? String(row.po_number || '')
+    : docType === 'dest_weighbridge'
+      ? String(row.col17 || '')
+      : String(row.col6 || '');
+  const storeName = String(targetTable === 'purchase_orders' ? row.store_name || '' : row.col8 || '');
+  if (!billNo.trim() || !storeName.trim()) return;
+
+  const duplicate = await findLineInboxDuplicate(
+    client,
+    docType,
+    billNo,
+    storeName,
+    typeof row.line_inbox_id === 'string' ? row.line_inbox_id : undefined
+  );
+  if (duplicate) {
+    throw new DuplicateDocumentError(
+      `บล็อกการบันทึก: พบเอกสารซ้ำประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName} (${duplicate.code})`
+    );
+  }
+}
+
 function normalizeOcrWeightPair(grossValue: unknown, tareValue: unknown, netValue: unknown = 0) {
   const gross = Number(grossValue) || 0;
   const tare = Number(tareValue) || 0;
@@ -4560,9 +4607,13 @@ app.post('/api/orders/prepare-do', async (req: Request, res: Response) => {
     const dbRow = mapOrderToSupabase(record);
     const authenticatedUser = getAuthenticatedUser(req);
     if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+    await assertNoDuplicateDocumentWrite(client, 'orders', dbRow);
     const trNumber = await prepareDoOrder(client, dbRow);
     return res.json({ success: true, id: dbRow.id, trNumber });
   } catch (error: any) {
+    if (error instanceof DuplicateDocumentError) {
+      return res.status(409).json({ success: false, error: error.message });
+    }
     console.error('[TR Queue] Failed to prepare DO in database:', error?.message || error);
     return res.status(500).json({
       success: false,
@@ -4608,6 +4659,9 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
     }
 
     const authenticatedUser = getAuthenticatedUser(req);
+    if (targetTable === 'orders' || targetTable === 'purchase_orders') {
+      await assertNoDuplicateDocumentWrite(client, targetTable, dbRow);
+    }
     if (targetTable === 'orders') {
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
       if (
@@ -4628,6 +4682,9 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
 
     return res.json({ success: true, message: `Record saved to ${targetTable}` });
   } catch (err: any) {
+    if (err instanceof DuplicateDocumentError) {
+      return res.status(409).json({ success: false, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
@@ -4736,6 +4793,47 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     else if (table === 'billing_notes') mapper = mapBillingNoteToSupabase;
 
     const rows = records.map(mapper);
+    if (targetTable === 'orders' || targetTable === 'purchase_orders') {
+      const existingIds = new Set<string>();
+      const newDocumentKeys = new Set<string>();
+      const rowIds = rows.map(row => String(row.id || '')).filter(Boolean);
+      for (let index = 0; index < rowIds.length; index += 500) {
+        const { data, error } = await client
+          .from(targetTable)
+          .select('id')
+          .in('id', rowIds.slice(index, index + 500));
+        if (error) throw new Error(`ตรวจสอบรายการเดิมก่อนบันทึกชุดข้อมูลไม่สำเร็จ: ${error.message}`);
+        for (const existingRow of data || []) existingIds.add(String(existingRow.id));
+      }
+
+      for (const row of rows) {
+        if (row.id && !existingIds.has(String(row.id))) {
+          const docType: DocumentType = targetTable === 'purchase_orders'
+            ? 'purchase_order'
+            : row.doc_type;
+          const billNo = targetTable === 'purchase_orders'
+            ? String(row.po_number || '')
+            : docType === 'dest_weighbridge'
+              ? String(row.col17 || '')
+              : String(row.col6 || '');
+          const storeName = String(targetTable === 'purchase_orders' ? row.store_name || '' : row.col8 || '');
+          if (OCR_DOCUMENT_TYPES.includes(docType) && billNo.trim() && storeName.trim()) {
+            const key = JSON.stringify([
+              docType,
+              normalizeDocNoServer(billNo),
+              normalizeOcrPartyName(storeName)
+            ]);
+            if (newDocumentKeys.has(key)) {
+              throw new DuplicateDocumentError(
+                `บล็อกการบันทึกชุดข้อมูล: พบเอกสารซ้ำประเภท ${getDocTypeThaiLabel(docType)} เลขที่ ${billNo} ร้าน ${storeName}`
+              );
+            }
+            newDocumentKeys.add(key);
+          }
+          await assertNoDuplicateDocumentWrite(client, targetTable, row, true);
+        }
+      }
+    }
     if (targetTable === 'orders') {
       const authenticatedUser = getAuthenticatedUser(req);
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, rows);
@@ -4761,6 +4859,9 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
 
     return res.json({ success: true, count: rows.length });
   } catch (err: any) {
+    if (err instanceof DuplicateDocumentError) {
+      return res.status(409).json({ success: false, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err?.message });
   }
 });

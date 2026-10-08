@@ -81,7 +81,7 @@ interface VerifyModalProps {
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
   onClose: () => void;
-  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant, allowDuplicate?: boolean) => boolean | Promise<boolean>;
+  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant) => boolean | Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
   onRecoverLineImage?: (orderId: string) => Promise<{
     image: string;
@@ -906,7 +906,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     setIsSaving(true);
     setSaveError('');
     try {
-      if (await onSaveOrder(finalizedOrder, storeToSave, true)) {
+      if (await onSaveOrder(finalizedOrder, storeToSave)) {
         onClose();
       } else {
         setSaveError('ยังบันทึกไม่ได้ กรุณาตรวจสอบข้อความแจ้งเตือนแล้วลองอีกครั้ง');
