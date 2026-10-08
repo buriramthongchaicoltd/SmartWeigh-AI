@@ -306,6 +306,7 @@ const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
 export default function App() {
   // Main Data States (100% Real Database Mode - Loaded directly from Supabase Cloud PostgreSQL)
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const verifiedDestMoveAttemptsRef = useRef<Set<string>>(new Set());
   const [stores, setStores] = useState<StoreMerchant[]>([]);
   const [pos, setPos] = useState<PurchaseOrder[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -944,6 +945,51 @@ export default function App() {
       doDocNumber: deliveryOrder.col6
     });
   };
+
+  useEffect(() => {
+    if (!isDbLoaded || !['admin', 'manager'].includes(currentUser.role)) return;
+
+    const pendingMoves: { ticket: OrderRecord; deliveryOrder: OrderRecord }[] = [];
+    orders.forEach(ticket => {
+      if (
+        ticket.docType !== 'dest_weighbridge' ||
+        ticket.status !== 'verified' ||
+        ticket.destMatchStatus !== 'verified' ||
+        !ticket.driveFileId ||
+        verifiedDestMoveAttemptsRef.current.has(ticket.id)
+      ) {
+        return;
+      }
+
+      const linkedDOs = orders.filter(order =>
+        isDeliveryOrderPairingCandidate(order) &&
+        (
+          order.matchedDestTicketId === ticket.id ||
+          Boolean(ticket.linkedViaDocNo && isExactDocNumberReference(order.col6, ticket.linkedViaDocNo))
+        )
+      );
+      if (linkedDOs.length !== 1) return;
+
+      const deliveryOrder = linkedDOs[0];
+      if (deliveryOrder.status !== 'verified' || !deliveryOrder.col1.trim() || !deliveryOrder.col6.trim()) return;
+      if (
+        ticket.driveFileLocation === 'zone_02' &&
+        ticket.driveFolderId &&
+        ticket.driveFolderId === deliveryOrder.driveFolderId
+      ) {
+        return;
+      }
+
+      verifiedDestMoveAttemptsRef.current.add(ticket.id);
+      pendingMoves.push({ ticket, deliveryOrder });
+    });
+
+    void (async () => {
+      for (const { ticket, deliveryOrder } of pendingMoves) {
+        await handleSyncDestTicketDrive('confirm_match', ticket, deliveryOrder);
+      }
+    })();
+  }, [currentUser.role, handleSyncDestTicketDrive, isDbLoaded, orders]);
 
   // Google Drive Zero-Junk Cleanup Trigger
   const triggerDriveCleanup = async (params: {
