@@ -974,7 +974,9 @@ async function findLineInboxDuplicate(
   docType: DocumentType,
   billNo: string,
   storeName: string,
-  excludeInboxId?: string
+  excludeInboxId?: string,
+  excludeDocumentId?: string,
+  excludeDocumentNumber?: string
 ): Promise<LineInboxDuplicateMatch | null> {
   if (!client || !billNo.trim() || !storeName.trim()) return null;
 
@@ -1016,6 +1018,8 @@ async function findLineInboxDuplicate(
       .limit(50);
     if (poError) throw new Error(`ตรวจรายการ PO ซ้ำไม่สำเร็จ: ${poError.message}`);
     const matchingPO = (poRows || []).find(row =>
+      row.id !== excludeDocumentId &&
+      row.po_number !== excludeDocumentNumber &&
       normalizeDocNoServer(row.po_number) === normalizedBillNo &&
       normalizeOcrPartyName(row.store_name) === normalizedStore
     );
@@ -1041,6 +1045,7 @@ async function findLineInboxDuplicate(
   if (orderError) throw new Error(`ตรวจรายการเอกสารที่บันทึกแล้วไม่สำเร็จ: ${orderError.message}`);
   const matchingOrder = (orderRows || []).find(row =>
     row.line_inbox_id !== excludeInboxId &&
+    row.id !== excludeDocumentId &&
     normalizeDocNoServer(primaryNumberColumn === 'col17' ? row.col17 : row.col6) === normalizedBillNo &&
     normalizeOcrPartyName(row.col8) === normalizedStore
   );
@@ -2989,7 +2994,14 @@ app.post('/api/line/inbox/ack', (req: Request, res: Response) => {
 // Duplicate lookup for LINE Inbox uses document type, document number, and store name together.
 app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
   try {
-    const { docType, billNo, storeName, excludeInboxId } = req.body || {};
+    const {
+      docType,
+      billNo,
+      storeName,
+      excludeInboxId,
+      excludeDocumentId,
+      excludeDocumentNumber
+    } = req.body || {};
     if (
       !OCR_DOCUMENT_TYPES.includes(docType) ||
       typeof billNo !== 'string' || !billNo.trim() ||
@@ -3009,7 +3021,9 @@ app.post('/api/line/check-duplicate', async (req: Request, res: Response) => {
       docType,
       billNo,
       storeName,
-      typeof excludeInboxId === 'string' ? excludeInboxId : undefined
+      typeof excludeInboxId === 'string' ? excludeInboxId : undefined,
+      typeof excludeDocumentId === 'string' ? excludeDocumentId : undefined,
+      typeof excludeDocumentNumber === 'string' ? excludeDocumentNumber : undefined
     );
     return res.json({ success: true, isDuplicate: Boolean(match), matches: match ? [match] : [] });
   } catch (err: any) {

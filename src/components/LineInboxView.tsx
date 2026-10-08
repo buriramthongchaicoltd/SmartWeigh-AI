@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageSquare,
   Sparkles,
@@ -76,6 +76,23 @@ const DOC_TYPE_OPTIONS: { value: DocumentType; shortLabel: string }[] = [
 
 const normalizeDocumentText = (value: string) =>
   value.toLocaleLowerCase().replace(/[\s.,:;!?'"“”‘’()\-_/]+/g, '');
+
+const getDuplicateCheckInput = (item: LineBillInboxItem) => {
+  const rawSnapshot = item.rawAiSnapshot as Partial<OrderRecord> & {
+    rawDocNo?: string;
+    rawDestDocNo?: string;
+    rawStoreName?: string;
+  };
+  const docType = item.detectedDocType;
+  const billNo = docType === 'dest_weighbridge'
+    ? item.extractedData?.col17 || rawSnapshot.rawDestDocNo || rawSnapshot.rawDocNo || ''
+    : docType === 'purchase_order'
+      ? item.extractedData?.col4 || rawSnapshot.rawDocNo || ''
+      : item.extractedData?.col6 || rawSnapshot.rawDocNo || '';
+  const storeName = item.extractedData?.col8 || rawSnapshot.rawStoreName || '';
+
+  return { docType, billNo: billNo.trim(), storeName: storeName.trim() };
+};
 
 const loadInboxImage = async (item: LineBillInboxItem, signal?: AbortSignal): Promise<string> => {
   if (item.image && item.image.length > 10) return item.image;
@@ -239,6 +256,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [pairingTicket, setPairingTicket] = useState<LineBillInboxItem | null>(null);
   const [pairTargetOrderId, setPairTargetOrderId] = useState('');
   const [isPairingTicket, setIsPairingTicket] = useState(false);
+  const [duplicateCheckResults, setDuplicateCheckResults] = useState<Record<string, {
+    queryKey: string;
+    status: 'checking' | 'checked' | 'error' | 'unavailable';
+    duplicateInfo?: LineBillInboxItem['duplicateInfo'];
+    error?: string;
+  }>>({});
+  const duplicateCheckResultsRef = useRef(duplicateCheckResults);
+  const [duplicateRetryId, setDuplicateRetryId] = useState<string | null>(null);
 
   const handleAuditDriveInbox = async () => {
     const controller = new AbortController();
@@ -548,7 +573,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     groupFilter !== 'all' || Boolean(searchQuery.trim());
 
   // Filtered items
-  const filteredItems = inboxItems.filter(item => {
+  const filteredItems = useMemo(() => inboxItems.filter(item => {
     if (statusFilter === 'all' && item.status === 'verified') {
       return false;
     }
@@ -592,7 +617,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       }
     }
     return true;
-  });
+  }), [inboxItems, statusFilter, docTypeFilter, groupFilter, searchQuery]);
   const preloadKey = filteredItems.map(item => item.id).join('|');
 
   useEffect(() => {
@@ -653,10 +678,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     return () => controller.abort();
   }, [preloadKey]);
 
-  const findDuplicateInfo = async (
+  const findDuplicateInfo = useCallback(async (
     item: LineBillInboxItem,
     docType: DocumentType,
-    extractedData: Partial<OrderRecord>
+    extractedData: Partial<OrderRecord>,
+    signal?: AbortSignal
   ): Promise<LineBillInboxItem['duplicateInfo']> => {
     const billNo = docType === 'dest_weighbridge'
       ? extractedData.col17
@@ -669,7 +695,15 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     const response = await fetch('/api/line/check-duplicate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ docType, billNo, storeName, excludeInboxId: item.id })
+      body: JSON.stringify({
+        docType,
+        billNo,
+        storeName,
+        excludeInboxId: item.id,
+        excludeDocumentId: docType === 'purchase_order' ? undefined : item.verifiedOrderId,
+        excludeDocumentNumber: docType === 'purchase_order' ? item.verifiedOrderId : undefined
+      }),
+      signal
     });
     const result = await response.json();
     if (!response.ok || !result?.success) {
@@ -683,7 +717,107 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       matchedVendor: match.storeName,
       reason: match.reason
     } : undefined;
-  };
+  }, []);
+
+  useEffect(() => {
+    const eligibleStatuses = new Set<string>([
+      'pending_review',
+      'queued',
+      'duplicate_warning',
+      'scan_failed',
+      'verified'
+    ]);
+    const candidates = filteredItems
+      .filter(item => item.isBillDocument !== false && eligibleStatuses.has(item.status))
+      .map(item => {
+        const input = getDuplicateCheckInput(item);
+        return {
+          item,
+          input,
+          queryKey: `${input.docType}|${input.billNo}|${input.storeName}`
+        };
+      });
+    const missingDetails = candidates.filter(({ item, input }) =>
+      item.status === 'scan_failed' && (!input.billNo || !input.storeName)
+    );
+    if (missingDetails.length) {
+      const next = { ...duplicateCheckResultsRef.current };
+      for (const { item, queryKey } of missingDetails) {
+        if (next[item.id]?.queryKey !== queryKey || next[item.id]?.status !== 'unavailable') {
+          next[item.id] = { queryKey, status: 'unavailable' };
+        }
+      }
+      duplicateCheckResultsRef.current = next;
+      setDuplicateCheckResults(next);
+    }
+
+    const pending = candidates.filter(({ item, input, queryKey }) => {
+      if (!input.billNo || !input.storeName) return false;
+      const current = duplicateCheckResultsRef.current[item.id];
+      return duplicateRetryId === item.id ||
+        current?.queryKey !== queryKey;
+    });
+    if (pending.length === 0) return;
+
+    const controller = new AbortController();
+    const checking = { ...duplicateCheckResultsRef.current };
+    for (const { item, queryKey } of pending) {
+      checking[item.id] = { queryKey, status: 'checking' };
+    }
+    duplicateCheckResultsRef.current = checking;
+    setDuplicateCheckResults(checking);
+
+    let nextIndex = 0;
+    const updateResult = (
+      id: string,
+      result: (typeof checking)[string]
+    ) => {
+      const next = { ...duplicateCheckResultsRef.current, [id]: result };
+      duplicateCheckResultsRef.current = next;
+      setDuplicateCheckResults(next);
+    };
+    const checkNext = async () => {
+      while (nextIndex < pending.length && !controller.signal.aborted) {
+        const { item, input, queryKey } = pending[nextIndex++];
+        try {
+          const extractedData: Partial<OrderRecord> = {
+            ...item.extractedData,
+            col8: input.storeName,
+            ...(input.docType === 'dest_weighbridge'
+              ? { col17: input.billNo }
+              : input.docType === 'purchase_order'
+                ? { col4: input.billNo }
+                : { col6: input.billNo })
+          };
+          const duplicateInfo = await findDuplicateInfo(
+            item,
+            input.docType,
+            extractedData,
+            controller.signal
+          );
+          if (controller.signal.aborted) return;
+          updateResult(item.id, { queryKey, status: 'checked', duplicateInfo });
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            updateResult(item.id, {
+              queryKey,
+              status: 'error',
+              error: error instanceof Error ? error.message : 'ตรวจรายการซ้ำไม่สำเร็จ'
+            });
+          }
+        }
+      }
+    };
+
+    void Promise.all(
+      Array.from({ length: Math.min(3, pending.length) }, () => checkNext())
+    ).finally(() => {
+      if (duplicateRetryId) {
+        setDuplicateRetryId(current => current === duplicateRetryId ? null : current);
+      }
+    });
+    return () => controller.abort();
+  }, [filteredItems, duplicateRetryId, findDuplicateInfo]);
 
   // Instant Document Type Switch
   const handleInstantDocTypeChange = async (item: LineBillInboxItem, newDocType: DocumentType) => {
@@ -1329,6 +1463,14 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                       : Number(item.extractedData?.col15) || 0;
                   const totalAmount = Number(item.extractedData?.col29) || Number(item.extractedData?.col25) || 0;
                   const currentProject = (item.extractedData?.col2 || '').trim();
+                  const duplicateInput = getDuplicateCheckInput(item);
+                  const duplicateQueryKey = `${duplicateInput.docType}|${duplicateInput.billNo}|${duplicateInput.storeName}`;
+                  const duplicateCheck = duplicateCheckResults[item.id]?.queryKey === duplicateQueryKey
+                    ? duplicateCheckResults[item.id]
+                    : undefined;
+                  const duplicateInfo = duplicateCheck?.status === 'checked'
+                    ? duplicateCheck.duplicateInfo
+                    : item.duplicateInfo;
 
                   const rowBg =
                     item.status === 'verified'
@@ -1461,13 +1603,47 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                             <span>รอตรวจสอบ</span>
                           </span>
                         )}
-                        {item.duplicateInfo?.isDuplicate && (
+                        {duplicateInfo?.isDuplicate && (
                           <div
                             className="mt-1 inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-800"
-                            title={item.duplicateInfo.reason || 'ประเภทเอกสาร เลขที่ และชื่อร้านตรงกับรายการอื่น'}
+                            title={duplicateInfo.reason || `เลขที่ ${duplicateInput.billNo} และร้าน ${duplicateInput.storeName} ตรงกับเอกสารที่มีอยู่`}
                           >
                             <ShieldAlert className="h-3 w-3 shrink-0" />
-                            <span>อาจซ้ำ</span>
+                            <span>เลขที่ซ้ำ</span>
+                          </div>
+                        )}
+                        {duplicateCheck?.status === 'checking' && (
+                          <div role="status" className="mt-1 inline-flex items-center gap-1 rounded-md border border-slate-300 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                            กำลังตรวจเลขซ้ำ
+                          </div>
+                        )}
+                        {duplicateCheck?.status === 'error' && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            <span
+                              role="status"
+                              className="inline-flex items-center rounded-md border border-red-300 bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-800"
+                              title={duplicateCheck.error}
+                            >
+                              ตรวจซ้ำไม่สำเร็จ
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setDuplicateRetryId(item.id)}
+                              className="inline-flex min-h-10 items-center rounded-md px-2 text-[10px] font-bold text-blue-700 underline hover:bg-blue-50"
+                              aria-label={`ตรวจเลขซ้ำของบิล ${duplicateInput.billNo} อีกครั้ง`}
+                            >
+                              ลองอีกครั้ง
+                            </button>
+                          </div>
+                        )}
+                        {duplicateCheck?.status === 'unavailable' && (
+                          <div
+                            role="status"
+                            className="mt-1 inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-900"
+                            title="AI ยังอ่านเลขที่เอกสารหรือชื่อร้านไม่ครบ จึงยังตรวจรายการซ้ำไม่ได้"
+                          >
+                            ยังตรวจเลขซ้ำไม่ได้
                           </div>
                         )}
                         {item.botReplyAttempted && !item.botReplySent && (
