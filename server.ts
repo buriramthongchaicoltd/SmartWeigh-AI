@@ -591,7 +591,8 @@ async function preserveRestrictedOrderFields(
 
 async function enforceImmutableTrNumbers(
   client: NonNullable<ReturnType<typeof getSupabaseClient>>,
-  rows: Record<string, any>[]
+  rows: Record<string, any>[],
+  allowedTrClearIds: Set<string> = new Set()
 ): Promise<Array<{ id: string; col1: string }>> {
   const existingRows = new Map<string, string>();
   for (let index = 0; index < rows.length; index += 500) {
@@ -618,6 +619,7 @@ async function enforceImmutableTrNumbers(
     }
     const persistedTrNumber = existingRows.get(id)!;
     if (persistedTrNumber.trim()) {
+      if (allowedTrClearIds.has(id) && !String(row.col1 || '').trim()) continue;
       if (row.col1 !== persistedTrNumber) {
         console.warn(`[TR Guard] Restoring immutable TR from database for order ${id}`);
         row.col1 = persistedTrNumber;
@@ -630,6 +632,55 @@ async function enforceImmutableTrNumbers(
     }
   }
   return correctedTrNumbers;
+}
+
+async function validateOriginTicketReclassification(
+  client: NonNullable<ReturnType<typeof getSupabaseClient>>,
+  row: Record<string, any>
+): Promise<boolean> {
+  const sourceId = String(row.id || '').trim();
+  const targetDoId = String(row.matched_origin_do_id || '').trim();
+  if (
+    !sourceId ||
+    !targetDoId ||
+    sourceId === targetDoId ||
+    row.doc_type !== 'weighbridge' ||
+    String(row.col1 || '').trim() ||
+    !String(row.col6 || '').trim() ||
+    Number(row.col15) <= 0 ||
+    !String(row.drive_file_id || '').trim()
+  ) return false;
+
+  const { data: source, error: sourceError } = await client
+    .from('orders')
+    .select('id,doc_type,status,matched_origin_do_id,matched_dest_ticket_id,linked_via_doc_no,dest_match_status,drive_file_id')
+    .eq('id', sourceId)
+    .maybeSingle();
+  if (sourceError) throw sourceError;
+  if (
+    !source ||
+    !['delivery_order', 'concrete', 'full_logistics', 'tax_invoice'].includes(String(source.doc_type || '')) ||
+    source.status !== 'verified' ||
+    source.matched_origin_do_id ||
+    source.matched_dest_ticket_id ||
+    String(source.linked_via_doc_no || '').trim() ||
+    ['verified', 'auto_flagged'].includes(String(source.dest_match_status || '')) ||
+    source.drive_file_id !== row.drive_file_id
+  ) return false;
+
+  const { data: targetDo, error: targetError } = await client
+    .from('orders')
+    .select('id,doc_type,status,col1,col6')
+    .eq('id', targetDoId)
+    .maybeSingle();
+  if (targetError) throw targetError;
+  return Boolean(
+    targetDo &&
+    ['delivery_order', 'concrete', 'full_logistics'].includes(String(targetDo.doc_type || '')) &&
+    targetDo.status === 'verified' &&
+    String(targetDo.col1 || '').trim() &&
+    String(targetDo.col6 || '').trim()
+  );
 }
 
 async function prepareDoOrder(
@@ -4861,6 +4912,7 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
     }
 
     const { table, record } = req.body;
+    const originTicketCorrection = req.body?.originTicketCorrection === true;
     if (!table || !record) {
       return res.status(400).json({ success: false, error: 'Missing table or record' });
     }
@@ -4889,11 +4941,21 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
     }
 
     const authenticatedUser = getAuthenticatedUser(req);
+    const allowedTrClearIds = new Set<string>();
     if (targetTable === 'orders' || targetTable === 'purchase_orders') {
       await assertNoDuplicateDocumentWrite(client, targetTable, dbRow);
     }
     if (targetTable === 'orders') {
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
+      if (originTicketCorrection) {
+        if (!await validateOriginTicketReclassification(client, dbRow)) {
+          return res.status(409).json({
+            success: false,
+            error: 'ไม่สามารถล้างเลข TR ได้: ข้อมูลต้นทางหรือ DO เป้าหมายไม่ผ่านการตรวจสอบสำหรับการแก้ตั๋วชั่ง'
+          });
+        }
+        allowedTrClearIds.add(String(dbRow.id));
+      }
       if (
         ['delivery_order', 'concrete', 'full_logistics'].includes(dbRow.doc_type) &&
         String(dbRow.col2 || '').trim() &&
@@ -4901,7 +4963,7 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
       ) {
         await prepareDoOrder(client, dbRow);
       }
-      await enforceImmutableTrNumbers(client, [dbRow]);
+      await enforceImmutableTrNumbers(client, [dbRow], allowedTrClearIds);
     }
 
     const { error } = await client.from(targetTable).upsert(dbRow, { onConflict: targetTable === 'system_config' ? 'config_key' : 'id' });
@@ -6592,6 +6654,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       bundleDoNumber = '',
       reorganizationOrderId = '',
       reorganizationRecordId = '',
+      reclassifyOriginWeighbridgeOrderId = '',
       preserveFileName = false
     } = req.body;
 
@@ -6599,7 +6662,10 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'กรุณาระบุ fileId ของไฟล์ที่ต้องการเปลี่ยนชื่อ' });
     }
 
-    const isHistoricalReorganization = Boolean(reorganizationOrderId || reorganizationRecordId);
+    const isOriginTicketCorrection = Boolean(reclassifyOriginWeighbridgeOrderId);
+    const isHistoricalReorganization = Boolean(
+      reorganizationOrderId || reorganizationRecordId || reclassifyOriginWeighbridgeOrderId
+    );
     let effectiveDocType = String(docType);
     let effectiveDocDate = String(docDate || '');
     let effectiveDocNumber = String(docNumber || '');
@@ -6610,6 +6676,15 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
     if (isHistoricalReorganization) {
       if (!reorganizationOrderId || !reorganizationRecordId) {
         return res.status(400).json({ success: false, error: 'ข้อมูลอ้างอิงชุดใบงานย้อนหลังไม่ครบ' });
+      }
+      if (
+        isOriginTicketCorrection &&
+        (
+          String(reclassifyOriginWeighbridgeOrderId) !== String(reorganizationRecordId) ||
+          String(docType) !== 'weighbridge'
+        )
+      ) {
+        return res.status(400).json({ success: false, error: 'ข้อมูลแก้ประเภทตั๋วชั่งต้นทางย้อนหลังไม่ถูกต้อง' });
       }
       const client = getSupabaseClient();
       if (!client) {
@@ -6656,11 +6731,17 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
 
       const sourceOrder = mapSupabaseToOrder(sourceRow);
       const isBundleDo = sourceOrder.id === parentOrder.id;
-      const sourceIsValid = isBundleDo
-        ? bundleDocTypes.includes(String(sourceRow.doc_type || 'delivery_order'))
-        : sourceRow.doc_type === 'weighbridge' &&
-          sourceRow.matched_origin_do_id === parentOrder.id &&
-          sourceRow.status === 'verified';
+      const sourceIsValid = isOriginTicketCorrection
+        ? sourceOrder.id !== parentOrder.id &&
+          ['delivery_order', 'concrete', 'full_logistics', 'tax_invoice'].includes(String(sourceRow.doc_type || '')) &&
+          !sourceOrder.matchedOriginDoId &&
+          !sourceOrder.matchedDestTicketId &&
+          !sourceOrder.linkedViaDocNo?.trim()
+        : isBundleDo
+          ? bundleDocTypes.includes(String(sourceRow.doc_type || 'delivery_order'))
+          : sourceRow.doc_type === 'weighbridge' &&
+            sourceRow.matched_origin_do_id === parentOrder.id &&
+            sourceRow.status === 'verified';
       if (!sourceIsValid || sourceRow.status !== 'verified' || sourceOrder.driveFileId !== fileId) {
         return res.status(409).json({
           success: false,
@@ -6678,9 +6759,15 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         return res.status(409).json({ success: false, error: 'ข้ามรายการ: Drive ID นี้ถูกอ้างอิงโดยเอกสารอื่นด้วย' });
       }
 
-      effectiveDocType = String(sourceRow.doc_type || 'delivery_order');
-      effectiveDocDate = sourceOrder.col7;
-      effectiveDocNumber = sourceOrder.col6;
+      effectiveDocType = isOriginTicketCorrection
+        ? 'weighbridge'
+        : String(sourceRow.doc_type || 'delivery_order');
+      effectiveDocDate = isOriginTicketCorrection
+        ? String(docDate || sourceOrder.col7)
+        : sourceOrder.col7;
+      effectiveDocNumber = isOriginTicketCorrection
+        ? String(docNumber || sourceOrder.col6 || sourceOrder.col17 || sourceOrder.col4)
+        : sourceOrder.col6;
       effectiveBundleTrNumber = parentOrder.col1;
       effectiveBundleDoNumber = parentOrder.col6;
       persistReorganizationFolder = async (folderId: string) => {
@@ -6757,7 +6844,8 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
           ? bundleFolderName || (effectiveDocType === 'weighbridge' ? 'รอจับคู่TR_ตั๋วชั่งต้นทาง' : undefined)
           : undefined,
         preserveOriginalName: Boolean(preserveFileName && isHistoricalReorganization),
-        reorganizeExistingDo: isHistoricalReorganization
+        reorganizeExistingDo: isHistoricalReorganization,
+        allowOriginTicketCorrection: isOriginTicketCorrection
       });
 
       if (!gasResult || !gasResult.success) {
@@ -6842,6 +6930,30 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         if (
           parentFolder.mimeType === 'application/vnd.google-apps.folder' &&
           (parentFolder.parents || []).includes(toFolderId)
+        ) {
+          sourceFolderId = parentId;
+          break;
+        }
+      }
+    }
+    if (isOriginTicketCorrection && !sourceFolderId) {
+      const standardZoneFolderIds = new Set(Object.values(zoneMapping));
+      for (const parentId of currentParents) {
+        if (standardZoneFolderIds.has(parentId)) {
+          sourceFolderId = parentId;
+          break;
+        }
+        const parentResponse = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+          { headers: { Authorization: 'Bearer ' + token } }
+        );
+        if (!parentResponse.ok) {
+          throw new Error(`ตรวจสอบโฟลเดอร์เอกสารเดิมไม่สำเร็จ: ${await parentResponse.text()}`);
+        }
+        const parentFolder: { id: string; mimeType?: string; parents?: string[] } = await parentResponse.json();
+        if (
+          parentFolder.mimeType === 'application/vnd.google-apps.folder' &&
+          (parentFolder.parents || []).some(zoneId => standardZoneFolderIds.has(zoneId))
         ) {
           sourceFolderId = parentId;
           break;

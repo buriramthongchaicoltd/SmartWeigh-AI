@@ -274,6 +274,10 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
   const [pairingTicket, setPairingTicket] = useState<LineBillInboxItem | null>(null);
   const [pairTargetOrderId, setPairTargetOrderId] = useState('');
   const [isPairingTicket, setIsPairingTicket] = useState(false);
+  const [pairingDeliveryOrder, setPairingDeliveryOrder] = useState<LineBillInboxItem | null>(null);
+  const [pairingDeliveryTicketId, setPairingDeliveryTicketId] = useState('');
+  const [confirmNoDeliveryTicket, setConfirmNoDeliveryTicket] = useState(false);
+  const [isPairingDeliveryOrder, setIsPairingDeliveryOrder] = useState(false);
   const [duplicateCheckResults, setDuplicateCheckResults] = useState<Record<string, {
     queryKey: string;
     status: 'checking' | 'checked' | 'error' | 'unavailable';
@@ -442,6 +446,44 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
       item.extractedData.col2
     ].some(value => value?.toLocaleLowerCase().includes(normalizedPairOrderQuery));
   });
+  const pendingOriginWeighbridgeItems = inboxItems.filter(item =>
+    item.status === 'pending_review' && item.detectedDocType === 'weighbridge'
+  );
+  const selectedOriginWeighbridgeItem = pendingOriginWeighbridgeItems.find(
+    item => item.id === pairingDeliveryTicketId
+  );
+
+  const handleConfirmDeliveryOrderBundle = async () => {
+    if (!pairingDeliveryOrder || isPairingDeliveryOrder) return;
+    if (
+      pendingOriginWeighbridgeItems.length > 0 &&
+      !pairingDeliveryTicketId &&
+      !confirmNoDeliveryTicket
+    ) {
+      showToast('กรุณาเลือกตั๋วชั่งที่แนบกับใบส่งของนี้ หรือยืนยันว่าไม่มีตั๋วแนบในคิว', 'info');
+      return;
+    }
+
+    setIsPairingDeliveryOrder(true);
+    try {
+      if (pairingDeliveryTicketId) {
+        await onPairWeighbridgeInboxItem(
+          pairingDeliveryTicketId,
+          `inbox:${pairingDeliveryOrder.id}`
+        );
+      } else {
+        onOpenVerifyFromInbox(pairingDeliveryOrder);
+      }
+      setPairingDeliveryOrder(null);
+      setPairingDeliveryTicketId('');
+      setConfirmNoDeliveryTicket(false);
+    } catch (error) {
+      const reason = error instanceof Error ? `: ${error.message}` : '';
+      showToast(`จัดชุดใบส่งของไม่สำเร็จ${reason}`, 'info');
+    } finally {
+      setIsPairingDeliveryOrder(false);
+    }
+  };
 
   // Load bill image on-demand from server (image_url is NOT in list payload to save bandwidth)
   const handleOpenImagePreview = async (item: LineBillInboxItem) => {
@@ -1839,15 +1881,50 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                         <div className="flex items-center justify-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => onOpenVerifyFromInbox(item)}
+                            onClick={() => {
+                              const canBundleFromInbox =
+                                item.status === 'pending_review' &&
+                                pendingOriginWeighbridgeItems.length > 0 &&
+                                isDeliveryOrderPairingCandidate({
+                                  docType: item.detectedDocType,
+                                  col6: item.extractedData.col6 || ''
+                                });
+                              if (canBundleFromInbox) {
+                                setPairingDeliveryOrder(item);
+                                setPairingDeliveryTicketId('');
+                                setConfirmNoDeliveryTicket(false);
+                              } else {
+                                onOpenVerifyFromInbox(item);
+                              }
+                            }}
                             className={`px-2.5 py-1.5 rounded-lg font-bold text-[11px] flex items-center gap-1 transition cursor-pointer whitespace-nowrap ${
                               item.status === 'verified'
                                 ? 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300'
                                 : 'bg-blue-600 hover:bg-blue-700 text-white shadow-2xs'
                             }`}
+                            title={
+                              item.status === 'pending_review' &&
+                              pendingOriginWeighbridgeItems.length > 0 &&
+                              isDeliveryOrderPairingCandidate({
+                                docType: item.detectedDocType,
+                                col6: item.extractedData.col6 || ''
+                              })
+                                ? 'เลือกตั๋วชั่งต้นทางที่แนบกับใบส่งของนี้ก่อนเปิดตรวจรับ'
+                                : undefined
+                            }
                           >
                             <Sparkles className="w-3 h-3 shrink-0" />
-                            <span>{item.status === 'verified' ? 'ดู/แก้ไข' : 'ตรวจรับบิล'}</span>
+                            <span>
+                              {item.status === 'verified'
+                                ? 'ดู/แก้ไข'
+                                : pendingOriginWeighbridgeItems.length > 0 &&
+                                    isDeliveryOrderPairingCandidate({
+                                      docType: item.detectedDocType,
+                                      col6: item.extractedData.col6 || ''
+                                    })
+                                  ? 'จัดชุด/ตรวจรับ'
+                                  : 'ตรวจรับบิล'}
+                            </span>
                           </button>
                           {item.detectedDocType === 'weighbridge' && (
                             <button
@@ -2012,6 +2089,162 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                     : pairTargetOrderId.startsWith('inbox:')
                       ? 'เปิดตรวจรับ DO'
                       : 'ยืนยันจับคู่'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pairingDeliveryOrder && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="line-do-bundle-title"
+        >
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <h3 id="line-do-bundle-title" className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                <Link2 className="h-4 w-4 text-emerald-700" />
+                จัดชุดเอกสารก่อนตรวจรับ
+              </h3>
+              <button
+                type="button"
+                onClick={() => setPairingDeliveryOrder(null)}
+                disabled={isPairingDeliveryOrder}
+                className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+                aria-label="ปิดหน้าต่างจัดชุดเอกสาร"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-4 p-5">
+              <section className="rounded-xl border border-sky-200 bg-sky-50 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 text-xs text-sky-950">
+                    <div className="font-bold">ใบส่งของ {pairingDeliveryOrder.extractedData.col6 || '(ยังไม่มีเลข DO)'}</div>
+                    <div className="mt-1">
+                      {pairingDeliveryOrder.extractedData.col8 || 'ไม่ทราบร้าน'} · {pairingDeliveryOrder.extractedData.col11 || 'ไม่ทราบสินค้า'} · {pairingDeliveryOrder.extractedData.col22 ?? '-'} {pairingDeliveryOrder.extractedData.col23 || ''}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenImagePreview(pairingDeliveryOrder)}
+                    className="inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-lg border border-sky-300 bg-white px-3 py-2 text-xs font-semibold text-sky-900 hover:bg-sky-100"
+                  >
+                    <Eye className="h-4 w-4" />
+                    ดูภาพ DO
+                  </button>
+                </div>
+              </section>
+
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-950">
+                ระบบไม่สามารถรู้จากชื่อร้านหรือเวลาว่าเป็นใบแนบหรือไม่ กรุณาเทียบภาพตั๋วกับ DO แล้วเลือกจับคู่ด้วยตนเอง ห้ามเลือกจากข้อมูลใกล้เคียงอย่างเดียว
+              </div>
+
+              {pendingOriginWeighbridgeItems.length > 0 ? (
+                <fieldset className="space-y-2">
+                  <legend className="mb-2 text-xs font-bold text-slate-800">
+                    ตั๋วชั่งต้นทางที่ยังรอตรวจ ({pendingOriginWeighbridgeItems.length})
+                  </legend>
+                  {pendingOriginWeighbridgeItems.map(ticket => {
+                    const gross = Number(ticket.extractedData.col13) || 0;
+                    const tare = Number(ticket.extractedData.col14) || 0;
+                    const net = Number(ticket.extractedData.col15) || Math.max(0, gross - tare);
+                    return (
+                      <div
+                        key={ticket.id}
+                        className={`flex items-start gap-3 rounded-xl border p-3 ${
+                          pairingDeliveryTicketId === ticket.id
+                            ? 'border-emerald-400 bg-emerald-50'
+                            : 'border-slate-200 bg-white'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="line-do-origin-ticket"
+                          value={ticket.id}
+                          checked={pairingDeliveryTicketId === ticket.id}
+                          onChange={() => {
+                            setPairingDeliveryTicketId(ticket.id);
+                            setConfirmNoDeliveryTicket(false);
+                          }}
+                          className="mt-1 h-4 w-4 accent-emerald-700"
+                          aria-label={`เลือกตั๋วชั่ง ${ticket.extractedData.col6 || 'ไม่ทราบเลขที่'}`}
+                        />
+                        <div className="min-w-0 flex-1 text-xs text-slate-800">
+                          <div className="font-bold">
+                            ตั๋วชั่ง {ticket.extractedData.col6 || '(ไม่ทราบเลขที่)'}
+                          </div>
+                          <div className="mt-1 text-slate-600">
+                            {ticket.extractedData.col8 || 'ไม่ทราบร้าน'} · {ticket.extractedData.col10 || 'ไม่ทราบทะเบียนรถ'} · สุทธิ {net.toLocaleString()} กก.
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">
+                            ผู้ส่ง {ticket.lineSenderName} · {new Date(ticket.receivedAt).toLocaleString('th-TH')}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenImagePreview(ticket)}
+                          className="inline-flex min-h-10 shrink-0 items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                          aria-label={`ดูภาพตั๋วชั่ง ${ticket.extractedData.col6 || ''}`}
+                        >
+                          <Eye className="h-4 w-4" />
+                          ดูภาพ
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {!pairingDeliveryTicketId && (
+                    <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={confirmNoDeliveryTicket}
+                        onChange={event => setConfirmNoDeliveryTicket(event.target.checked)}
+                        className="mt-0.5 h-4 w-4 accent-slate-700"
+                      />
+                      <span>ยืนยันว่าไม่มีตั๋วชั่งต้นทางของใบส่งของนี้ในรายการที่รอตรวจ</span>
+                    </label>
+                  )}
+                </fieldset>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700">
+                  ขณะนี้ไม่มีตั๋วชั่งต้นทางรอตรวจในกล่องพัก จึงเปิดตรวจรับใบส่งของได้
+                </div>
+              )}
+
+              {selectedOriginWeighbridgeItem && (
+                <p className="text-xs leading-relaxed text-emerald-900" role="status">
+                  เลือกจับคู่ตั๋วชั่ง {selectedOriginWeighbridgeItem.extractedData.col6 || 'ไม่ทราบเลขที่'} กับใบส่งของนี้แล้ว ทั้งสองเอกสารจะถูกบันทึกเป็นเอกสารแยกในชุดเดียวกัน ไม่ได้จับคู่โดยระบบอัตโนมัติ
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2 border-t border-slate-200 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setPairingDeliveryOrder(null)}
+                  disabled={isPairingDeliveryOrder}
+                  className="min-h-10 rounded-lg border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleConfirmDeliveryOrderBundle()}
+                  disabled={
+                    isPairingDeliveryOrder ||
+                    (pendingOriginWeighbridgeItems.length > 0 &&
+                      !pairingDeliveryTicketId &&
+                      !confirmNoDeliveryTicket)
+                  }
+                  className="min-h-10 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isPairingDeliveryOrder
+                    ? 'กำลังจัดชุด...'
+                    : pairingDeliveryTicketId
+                      ? 'จับคู่และตรวจรับ DO'
+                      : 'ยืนยันและตรวจรับ DO'}
                 </button>
               </div>
             </div>

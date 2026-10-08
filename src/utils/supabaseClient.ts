@@ -235,6 +235,32 @@ BEGIN
   IF TG_OP = 'UPDATE' THEN
     IF NULLIF(BTRIM(OLD.col1), '') IS NOT NULL THEN
       IF NEW.col1 IS DISTINCT FROM OLD.col1 THEN
+        IF OLD.doc_type IN ('delivery_order', 'concrete', 'full_logistics', 'tax_invoice')
+          AND OLD.status = 'verified'
+          AND OLD.matched_origin_do_id IS NULL
+          AND OLD.matched_dest_ticket_id IS NULL
+          AND NULLIF(BTRIM(OLD.linked_via_doc_no), '') IS NULL
+          AND OLD.dest_match_status IS DISTINCT FROM 'verified'
+          AND OLD.dest_match_status IS DISTINCT FROM 'auto_flagged'
+          AND NEW.doc_type = 'weighbridge'
+          AND NULLIF(BTRIM(NEW.col1), '') IS NULL
+          AND NULLIF(BTRIM(NEW.col6), '') IS NOT NULL
+          AND NEW.col15 > 0
+          AND NEW.matched_origin_do_id IS NOT NULL
+          AND NEW.drive_file_id IS NOT DISTINCT FROM OLD.drive_file_id
+          AND OLD.drive_file_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM public.orders target_do
+            WHERE target_do.id = NEW.matched_origin_do_id
+              AND target_do.id <> OLD.id
+              AND target_do.doc_type IN ('delivery_order', 'concrete', 'full_logistics')
+              AND target_do.status = 'verified'
+              AND NULLIF(BTRIM(target_do.col1), '') IS NOT NULL
+              AND NULLIF(BTRIM(target_do.col6), '') IS NOT NULL
+          ) THEN
+          RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'เลข TR เป็นข้อมูลถาวรและไม่สามารถแก้ไขได้';
       END IF;
       RETURN NEW;

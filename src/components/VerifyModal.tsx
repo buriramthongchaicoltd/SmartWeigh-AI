@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem, OrderItemDetail } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
-import { isExactDocNumberReference } from '../utils/poReconciliation';
+import { isDeliveryOrderPairingCandidate, isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
 import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
@@ -82,6 +82,7 @@ interface VerifyModalProps {
   lineInboxItems?: LineBillInboxItem[];
   onClose: () => void;
   onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant) => boolean | Promise<boolean>;
+  onCorrectAndPairOriginWeighbridge?: (ticket: OrderRecord, doOrderId: string) => Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
   onRecoverLineImage?: (orderId: string) => Promise<{
     image: string;
@@ -102,6 +103,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   lineInboxItems = [],
   onClose,
   onSaveOrder,
+  onCorrectAndPairOriginWeighbridge,
   onSwitchToPO,
   onRecoverLineImage
 }) => {
@@ -121,6 +123,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [isRecoveringLineImage, setIsRecoveringLineImage] = useState(false);
   const [isRescanningAI, setIsRescanningAI] = useState(false);
   const [isRescanningZone, setIsRescanningZone] = useState<AIRescanZone | null>(null);
+  const [correctedWeighbridgeDoId, setCorrectedWeighbridgeDoId] = useState('');
+  const [confirmOriginWeighbridgeCorrection, setConfirmOriginWeighbridgeCorrection] = useState(false);
   const [zoneRescanProposal, setZoneRescanProposal] = useState<{
     zone: AIRescanZone;
     data: Partial<OrderRecord>;
@@ -131,6 +135,10 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const zoneRescanGeneration = useRef(0);
   const isExistingOrder = Boolean(orderData?.id && existingOrders.some(order => order.id === orderData.id));
+  const canCorrectStoredDocumentToOriginTicket = Boolean(
+    orderData?.status === 'verified' &&
+    ['delivery_order', 'concrete', 'full_logistics', 'tax_invoice'].includes(orderData.docType || '')
+  );
   const requiresTrNumber = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
 
   useEffect(() => {
@@ -189,6 +197,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       setHasAttachedImage(false);
       setIsRecoveringLineImage(false);
       setPairedWeighbridgeInboxId(normalized.pairedWeighbridgeInboxId || '');
+      setCorrectedWeighbridgeDoId('');
+      setConfirmOriginWeighbridgeCorrection(false);
 
       // Preserve a document type already classified by the shared OCR pipeline.
       let detectedType: DocumentType = normalized.docType || 'delivery_order';
@@ -267,6 +277,19 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const isWeighbridge = selectedDocType === 'weighbridge';
   const isDestWeighbridge = selectedDocType === 'dest_weighbridge';
   const isDeliveryOrder = selectedDocType === 'delivery_order' || selectedDocType === 'concrete';
+  const isCorrectingStoredWeighbridge = Boolean(
+    isExistingOrder &&
+    canCorrectStoredDocumentToOriginTicket &&
+    selectedDocType === 'weighbridge' &&
+    orderData?.docType !== 'weighbridge' &&
+    orderData?.docType !== 'dest_weighbridge'
+  );
+  const eligibleOriginWeighbridgeDOs = existingOrders.filter(order =>
+    order.id !== orderData?.id &&
+    order.status === 'verified' &&
+    Boolean(order.col1.trim()) &&
+    isDeliveryOrderPairingCandidate(order)
+  );
   const isContractorChargeOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
   const requiresRecipient = isContractorChargeOrder;
   const contractorChargeItems: OrderItemDetail[] = form.lineItems?.length
@@ -298,19 +321,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const pairedWeighbridgeInboxItem = availableWeighbridgeInboxItems.find(
     item => item.id === pairedWeighbridgeInboxId
   );
-
-  const handlePairWeighbridgeSelection = (inboxId: string) => {
-    setPairedWeighbridgeInboxId(inboxId);
-    const ticket = availableWeighbridgeInboxItems.find(item => item.id === inboxId);
-    if (!ticket) return;
-    setForm(previous => ({
-      ...previous,
-      col13: Number(ticket.extractedData.col13) || 0,
-      col14: Number(ticket.extractedData.col14) || 0,
-      col15: Number(ticket.extractedData.col15) ||
-        Math.max(0, (Number(ticket.extractedData.col13) || 0) - (Number(ticket.extractedData.col14) || 0))
-    }));
-  };
 
   const validationWarnings = React.useMemo(() => {
     const warnings: string[] = [];
@@ -517,6 +527,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
 
   const handleDocTypeSelect = (docType: DocumentType) => {
     if (isRescanningAI || isRescanningZone !== null) return;
+    setConfirmOriginWeighbridgeCorrection(false);
+    if (docType !== 'weighbridge') setCorrectedWeighbridgeDoId('');
     if (docType !== 'delivery_order' && docType !== 'concrete') {
       setPairedWeighbridgeInboxId('');
     }
@@ -543,6 +555,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       }
       if (!updated.col26) updated.col26 = 'สิบล้อ/หกล้อ';
     } else if (docType === 'weighbridge') {
+      setEnableDOWeighing(true);
       if (!updated.col23) updated.col23 = 'ตัน';
       if (!updated.col26) updated.col26 = 'พ่วง 18 ล้อ';
       if (!updated.col3) updated.col3 = 'งานหิน/ดิน/ทราย';
@@ -554,6 +567,8 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
         ? '⚡ ย้ายเลขที่ตั๋วไปช่อง 17 และน้ำหนักไปช่อง 18–20 ให้อัตโนมัติแล้ว (ไม่ต้องให้ AI อ่านใหม่)'
         : docType === 'delivery_order'
         ? '⚡ ย้ายเลขที่บิลไปช่อง 6 (DO) และน้ำหนักไปช่อง 13–15 ให้อัตโนมัติแล้ว (ไม่ต้องให้ AI อ่านใหม่)'
+        : docType === 'weighbridge'
+        ? '⚡ เตรียมเลขตั๋วและน้ำหนักต้นทางช่อง 13–15 ให้ตรวจทานจากภาพก่อนจับคู่ DO'
         : docType === 'tax_invoice'
         ? '⚡ สลับเป็นโหมดใบเสร็จ/ใบกำกับภาษีอัตโนมัติแล้ว (ไม่ต้องให้ AI อ่านใหม่)'
         : '⚡ เตรียมข้อมูลสำหรับโอนเข้าใบสั่งซื้อ (PO) เรียบร้อยแล้ว'
@@ -783,7 +798,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
       docTypeEvidence: form.docTypeEvidence || overrideExistingOrder?.docTypeEvidence,
       docTypeConfidence: form.docTypeConfidence ?? overrideExistingOrder?.docTypeConfidence,
       col1: overrideExistingOrder
-        ? overrideExistingOrder.col1
+        ? (selectedDocType === 'weighbridge' ? '' : overrideExistingOrder.col1)
         : requiresTrNumber
           ? (form.col1 || '').trim()
           : '',
@@ -899,6 +914,43 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     }
     if (isContractorChargeOrder && contractorChargeItems.some(item => !item.contractorChargeDecision)) {
       setSaveError('กรุณาเลือกทุกรายการว่าจะนำไปหักผู้รับเหมา หรือไม่นำหักเพราะบริษัทซื้อใช้เอง');
+      return;
+    }
+
+    if (isCorrectingStoredWeighbridge) {
+      if (!confirmOriginWeighbridgeCorrection) {
+        setSaveError('กรุณายืนยันว่าตรวจภาพแล้วและเอกสารเป็นตั๋วชั่งต้นทาง');
+        return;
+      }
+      if (!correctedWeighbridgeDoId) {
+        setSaveError('กรุณาเลือก DO ที่ยืนยันแล้วเพื่อจับคู่ตั๋วชั่งต้นทาง');
+        return;
+      }
+      if (!onCorrectAndPairOriginWeighbridge) {
+        setSaveError('ระบบยังไม่พร้อมสำหรับการแก้ประเภทและจับคู่ย้อนหลัง กรุณาแจ้งผู้ดูแลระบบ');
+        return;
+      }
+      const ticketNumber = form.col6?.trim();
+      const netWeight = Number(form.col15) ||
+        Math.max(0, (Number(form.col13) || 0) - (Number(form.col14) || 0));
+      if (!ticketNumber || netWeight <= 0) {
+        setSaveError('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิจากภาพให้ครบก่อนจับคู่');
+        return;
+      }
+      setIsSaving(true);
+      setSaveError('');
+      try {
+        const { finalizedOrder } = buildFinalizedOrder();
+        if (await onCorrectAndPairOriginWeighbridge(finalizedOrder, correctedWeighbridgeDoId)) {
+          onClose();
+        } else {
+          setSaveError('ยังแก้ประเภทและจับคู่ไม่ได้ กรุณาตรวจสอบข้อความแจ้งเตือนแล้วลองอีกครั้ง');
+        }
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : 'แก้ประเภทและจับคู่ไม่สำเร็จ');
+      } finally {
+        setIsSaving(false);
+      }
       return;
     }
 
@@ -1086,7 +1138,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         setShowDocTypeSwitcher(false);
                       }}
                       className={`p-2 rounded-lg text-left border transition cursor-pointer ${
-                        selectedDocType === 'delivery_order' || selectedDocType === 'weighbridge' || selectedDocType === 'concrete'
+                        selectedDocType === 'delivery_order' ||
+                        selectedDocType === 'concrete' ||
+                        (selectedDocType === 'weighbridge' && !isCorrectingStoredWeighbridge)
                           ? 'bg-sky-50 border-sky-500 text-sky-950 shadow-xs ring-1 ring-sky-500'
                           : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                       }`}
@@ -1097,6 +1151,29 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                       </div>
                       <div className="text-[10px] text-slate-500 mt-0.5 truncate">DO หรือ ตั๋วชั่งต้นทาง (ช่อง 13–15)</div>
                     </button>
+
+                    {isExistingOrder && canCorrectStoredDocumentToOriginTicket && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleDocTypeSelect('weighbridge');
+                            setShowDocTypeSwitcher(false);
+                          }}
+                          className={`col-span-2 rounded-lg border p-2 text-left transition ${
+                            selectedDocType === 'weighbridge'
+                              ? 'border-emerald-500 bg-emerald-50 text-emerald-950 ring-1 ring-emerald-500'
+                              : 'border-emerald-200 bg-white text-emerald-900 hover:bg-emerald-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 text-xs font-bold">
+                            <Scale className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+                            <span>แก้เป็นตั๋วชั่งต้นทางที่จำแนกผิด</span>
+                          </div>
+                          <div className="mt-0.5 text-[10px] text-slate-600">
+                            ตรวจเลขตั๋วและน้ำหนักจากภาพ แล้วเลือก DO ที่ยืนยันแล้วเพื่อจับคู่
+                          </div>
+                        </button>
+                      )}
 
                     {/* 2. Tax Invoice */}
                     <button
@@ -1155,7 +1232,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         setShowDocTypeSwitcher(false);
                       }}
                       className={`p-2 rounded-lg text-left border transition cursor-pointer ${
-                        selectedDocType === 'dest_weighbridge' || selectedDocType === 'weighbridge'
+                        selectedDocType === 'dest_weighbridge'
                           ? 'bg-teal-50 border-teal-500 text-teal-950 shadow-xs ring-1 ring-teal-500'
                           : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                       }`}
@@ -1181,6 +1258,50 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     ✕
                   </button>
                 </div>
+              )}
+              {isCorrectingStoredWeighbridge && (
+                <section className="space-y-2 rounded-xl border border-amber-300 bg-amber-50 p-3" aria-label="แก้ประเภทและจับคู่ตั๋วชั่งต้นทาง">
+                  <p className="text-xs font-bold text-amber-950">
+                    ตรวจภาพว่าเป็นตั๋วชั่งต้นทางก่อนดำเนินการ
+                  </p>
+                  <p className="text-[11px] leading-relaxed text-amber-900">
+                    จะเปลี่ยนประเภทของระเบียนเดิมและผูกเข้ากับ DO ที่เลือกเท่านั้น ไม่สร้างเอกสารซ้ำ ระบบไม่จับคู่ให้อัตโนมัติ และไม่รับตั๋วชั่งปลายทางในขั้นตอนนี้
+                  </p>
+                  <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-white p-2.5 text-xs leading-relaxed text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={confirmOriginWeighbridgeCorrection}
+                      onChange={event => setConfirmOriginWeighbridgeCorrection(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-emerald-700"
+                    />
+                    <span>ยืนยันว่าตรวจภาพแล้ว และเอกสารนี้เป็นตั๋วชั่งต้นทาง ไม่ใช่ใบส่งของ ใบกำกับภาษี หรือตั๋วชั่งปลายทาง</span>
+                  </label>
+                  <label className="block text-xs font-semibold text-slate-800" htmlFor="corrected-weighbridge-do">
+                    เลือก DO ที่ตรวจสอบแล้ว
+                  </label>
+                  <select
+                    id="corrected-weighbridge-do"
+                    value={correctedWeighbridgeDoId}
+                    onChange={event => {
+                      setCorrectedWeighbridgeDoId(event.target.value);
+                      setConfirmOriginWeighbridgeCorrection(false);
+                    }}
+                    className="min-h-11 w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-slate-900"
+                    required
+                  >
+                    <option value="">เลือกเลข TR · เลข DO · ร้านค้า...</option>
+                    {eligibleOriginWeighbridgeDOs.map(order => (
+                      <option key={order.id} value={order.id}>
+                        {order.col1} · DO {order.col6} · {order.col8 || 'ไม่ทราบร้าน'}
+                      </option>
+                    ))}
+                  </select>
+                  {eligibleOriginWeighbridgeDOs.length === 0 && (
+                    <p className="text-[11px] font-medium text-rose-800" role="status">
+                      ไม่มี DO ที่ยืนยันแล้วพร้อมเลข TR ให้เลือก ต้องตรวจรับ DO ก่อนจึงจับคู่ย้อนหลังได้
+                    </p>
+                  )}
+                </section>
               )}
             </div>
 
@@ -1410,30 +1531,15 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
               {/* ==================== 1. TAILORED FORM FOR DELIVERY ORDER (DO / CONCRETE) ==================== */}
               {!showAllCols && isDeliveryOrder && (
                 <div className="space-y-3">
-                  {form.lineInboxId && !isExistingOrder && (
-                    <div className="border border-emerald-200 rounded-xl p-3 bg-emerald-50/50 space-y-2">
-                      <div className="font-bold text-emerald-950 text-xs flex items-center gap-2">
-                        <Scale className="w-4 h-4" />
-                        <span>แนบตั๋วชั่งต้นทางจากกล่องพัก LINE (ถ้ามี)</span>
+                  {form.lineInboxId && !isExistingOrder && pairedWeighbridgeInboxItem && (
+                    <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+                      <div className="flex items-center gap-2 text-xs font-bold text-emerald-950">
+                        <Scale className="h-4 w-4" />
+                        <span>ชุดเอกสารจากกล่องพัก LINE</span>
                       </div>
-                      <select
-                        value={pairedWeighbridgeInboxId}
-                        onChange={event => handlePairWeighbridgeSelection(event.target.value)}
-                        className="w-full rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800"
-                        aria-label="เลือกตั๋วชั่งต้นทางที่จะจับคู่กับใบส่งของ"
-                      >
-                        <option value="">ไม่แนบตั๋วชั่ง</option>
-                        {availableWeighbridgeInboxItems.map(item => (
-                          <option key={item.id} value={item.id}>
-                            {item.extractedData.col6 || 'ไม่ทราบเลขตั๋ว'} · {item.extractedData.col8 || 'ไม่ทราบร้าน'} · {(Number(item.extractedData.col15) || Math.max(0, (Number(item.extractedData.col13) || 0) - (Number(item.extractedData.col14) || 0))).toLocaleString()} กก. · {item.lineSenderName}
-                          </option>
-                        ))}
-                      </select>
-                      {pairedWeighbridgeInboxItem && (
-                        <p className="text-[11px] leading-relaxed text-emerald-900">
-                          เลือกตั๋วชั่ง {pairedWeighbridgeInboxItem.extractedData.col6 || '(ไม่มีเลขที่)'} แล้ว ระบบจะบันทึกตั๋วชั่งเป็นเอกสารแยก ผูกกับใบส่งของนี้ และใช้ค่า {(Number(pairedWeighbridgeInboxItem.extractedData.col15) || Math.max(0, (Number(pairedWeighbridgeInboxItem.extractedData.col13) || 0) - (Number(pairedWeighbridgeInboxItem.extractedData.col14) || 0))).toLocaleString()} กก. เติมน้ำหนักต้นทางให้ตรวจทาน
-                        </p>
-                      )}
+                      <p className="text-[11px] leading-relaxed text-emerald-900">
+                        จับคู่ตั๋วชั่ง {pairedWeighbridgeInboxItem.extractedData.col6 || '(ไม่มีเลขที่)'} จากกล่องพักแล้ว ระบบจะเก็บเป็นเอกสารแยกในชุดเดียวกับ DO นี้ ปริมาณตามใบส่งของคงเดิม; น้ำหนักใน DO ที่มีอยู่จะไม่ถูกเขียนทับ และถ้าช่องน้ำหนักว่างจะใช้ค่าตั๋วเป็นค่าเริ่มต้นให้ตรวจทาน
+                      </p>
                     </div>
                   )}
                   {/* Card 1: Document Reference & Site */}
@@ -3603,14 +3709,18 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                     <span>
                       {isSaving
                             ? isExistingOrder
-                              ? 'กำลังบันทึกการแก้ไข...'
+                              ? isCorrectingStoredWeighbridge
+                                ? 'กำลังแก้ประเภทและจับคู่...'
+                                : 'กำลังบันทึกการแก้ไข...'
                           : form.lineInboxId
                             ? selectedDocType === 'dest_weighbridge'
                               ? 'กำลังย้ายรูปตั๋วชั่งปลายทางและบันทึก...'
                               : 'กำลังย้ายรูปและบันทึก...'
                             : 'กำลังบันทึกเอกสาร...'
                         : isExistingOrder
-                            ? 'บันทึกการแก้ไข'
+                            ? isCorrectingStoredWeighbridge
+                              ? 'แก้ประเภทและจับคู่ DO'
+                              : 'บันทึกการแก้ไข'
                             : form.lineInboxId
                               ? 'ยืนยันตรวจรับและบันทึกเอกสาร'
                               : 'บันทึกเอกสาร'}

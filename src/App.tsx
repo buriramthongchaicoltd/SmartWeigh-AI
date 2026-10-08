@@ -1743,15 +1743,18 @@ export default function App() {
       if (!ticketNumber || net <= 0) {
         throw new Error('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิให้ครบก่อนจับคู่');
       }
+      const doHasOriginWeight = [
+          pendingInboxDO.extractedData.col13,
+          pendingInboxDO.extractedData.col14,
+          pendingInboxDO.extractedData.col15
+      ].some(value => Number(value) > 0);
       await handleOpenVerifyFromInbox({
-        ...pendingInboxDO,
-        extractedData: {
-          ...pendingInboxDO.extractedData,
-          pairedWeighbridgeInboxId: inboxItem.id,
-          col13: gross,
-          col14: tare,
-          col15: net
-        }
+          ...pendingInboxDO,
+          extractedData: {
+            ...pendingInboxDO.extractedData,
+            pairedWeighbridgeInboxId: inboxItem.id,
+            ...(doHasOriginWeight ? {} : { col13: gross, col14: tare, col15: net })
+          }
       });
       return;
     }
@@ -1991,6 +1994,213 @@ export default function App() {
     if (hasDOWeights) {
       showToast('จับคู่ตั๋วชั่งแล้ว; ใบส่งของมีน้ำหนักเดิม ระบบจึงไม่เขียนทับน้ำหนักเดิม', 'info');
     }
+  };
+
+  const handleCorrectAndPairOriginWeighbridge = async (
+    inputTicket: OrderRecord,
+    doOrderId: string
+  ): Promise<boolean> => {
+    if (!currentPermissions.canEditOrder) {
+      throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์แก้ไขบิล`);
+    }
+    const previousTicket = orders.find(item => item.id === inputTicket.id);
+    const targetDO = orders.find(item => item.id === doOrderId);
+    const correctableDocTypes = ['delivery_order', 'concrete', 'full_logistics', 'tax_invoice'];
+    if (
+      !previousTicket ||
+      !correctableDocTypes.includes(previousTicket.docType || '') ||
+      previousTicket.status !== 'verified'
+    ) {
+      throw new Error('เอกสารนี้ไม่ใช่รายการที่รองรับการแก้เป็นตั๋วชั่งต้นทาง หรือยังไม่ได้ตรวจรับ');
+    }
+    if (
+      !targetDO ||
+      targetDO.id === previousTicket.id ||
+      targetDO.status !== 'verified' ||
+      !targetDO.col1.trim() ||
+      !isDeliveryOrderPairingCandidate(targetDO)
+    ) {
+      throw new Error('ไม่พบใบส่งของที่ยืนยันแล้วพร้อมเลข TR และเลข DO ครบ');
+    }
+    if (
+      previousTicket.matchedOriginDoId ||
+      previousTicket.matchedDestTicketId ||
+      previousTicket.linkedViaDocNo?.trim() ||
+      previousTicket.destMatchStatus === 'verified' ||
+      previousTicket.destMatchStatus === 'auto_flagged'
+    ) {
+      throw new Error('เอกสารนี้มีความสัมพันธ์กับ DO/ตั๋วปลายทางอยู่แล้ว กรุณายกเลิกความสัมพันธ์เดิมก่อนแก้ประเภท');
+    }
+
+    const ticketNumber = inputTicket.col6.trim();
+    const gross = Number(inputTicket.col13) || 0;
+    const tare = Number(inputTicket.col14) || 0;
+    const net = Number(inputTicket.col15) || Math.max(0, gross - tare);
+    if (!ticketNumber || net <= 0 || !previousTicket.driveFileId) {
+      throw new Error('ต้องมีเลขตั๋ว น้ำหนักสุทธิ และรูปใน Google Drive ก่อนจับคู่ย้อนหลัง');
+    }
+    const duplicateTicket = checkDuplicateOrder(
+      { ...inputTicket, docType: 'weighbridge' },
+      orders.filter(item => item.id !== previousTicket.id),
+      inputTicket.image
+    ).find(duplicate => duplicate.level === 'exact' || duplicate.level === 'suspected');
+    if (duplicateTicket) {
+      throw new Error(`พบตั๋วชั่งที่อาจซ้ำกับ ${duplicateTicket.matchedOrder.col6 || duplicateTicket.matchedOrder.id} กรุณาตรวจรายการเดิมก่อน`);
+    }
+
+    const driveResponse = await fetch('/api/drive/rename-and-move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: previousTicket.driveFileId,
+        docType: 'weighbridge',
+        docDate: inputTicket.col7 || previousTicket.col7 || targetDO.col7,
+        docNumber: ticketNumber,
+        bundleTrNumber: targetDO.col1,
+        bundleDoNumber: targetDO.col6,
+        reorganizationOrderId: targetDO.id,
+        reorganizationRecordId: previousTicket.id,
+        reclassifyOriginWeighbridgeOrderId: previousTicket.id
+      }),
+      signal: AbortSignal.timeout(55_000)
+    });
+    const driveResult = await driveResponse.json() as {
+      success?: boolean;
+      targetZone?: string;
+      targetFolderId?: string;
+      error?: string;
+    };
+    if (
+      !driveResponse.ok ||
+      !driveResult.success ||
+      driveResult.targetZone !== 'zone_02' ||
+      !driveResult.targetFolderId
+    ) {
+      throw new Error(driveResult.error || `ย้ายรูปตั๋วชั่งเข้าชุด TR/DO ไม่สำเร็จ (HTTP ${driveResponse.status})`);
+    }
+
+    const now = new Date().toISOString();
+    const correctedTicket = normalizeOrderWeights({
+      ...previousTicket,
+      ...inputTicket,
+      id: previousTicket.id,
+      docType: 'weighbridge',
+      docTypeEvidence: [
+        previousTicket.docTypeEvidence,
+        `ผู้ใช้ยืนยันจากภาพว่าเป็นตั๋วชั่งต้นทาง (แก้จาก ${previousTicket.docType})`
+      ].filter(Boolean).join(' | '),
+      col1: '',
+      col6: ticketNumber,
+      col13: gross,
+      col14: tare,
+      col15: net,
+      col16: '',
+      col17: '',
+      col18: 0,
+      col19: 0,
+      col20: 0,
+      col21: 0,
+      referenceDocNo: targetDO.col6,
+      referenceSource: 'form_field',
+      linkedViaDocNo: targetDO.col6,
+      matchedOriginDoId: targetDO.id,
+      matchedDestTicketId: undefined,
+      destMatchStatus: undefined,
+      driveFileId: previousTicket.driveFileId,
+      driveFolderId: driveResult.targetFolderId,
+      driveFileLocation: 'zone_02',
+      image: previousTicket.image || inputTicket.image,
+      status: 'verified',
+      autoActionFlags: [
+        ...new Set([
+          ...(previousTicket.autoActionFlags || []),
+          `🛠️ ผู้ใช้แก้ประเภทจาก ${previousTicket.docType} และจับคู่ตั๋วชั่งต้นทางกับ DO ${targetDO.col6}`
+        ])
+      ],
+      autoFlagsVerified: true,
+      autoFlagsVerifiedBy: currentUser.fullName,
+      autoFlagsVerifiedAt: now,
+      updatedBy: currentUser.fullName
+    });
+    const hasDOWeights = [targetDO.col13, targetDO.col14, targetDO.col15]
+      .some(value => Number(value) > 0);
+    const updatedDO: OrderRecord = {
+      ...targetDO,
+      ...(hasDOWeights ? {} : { col13: gross, col14: tare, col15: net }),
+      updatedBy: currentUser.fullName
+    };
+    const persistRecord = async (
+      record: OrderRecord,
+      originTicketCorrection = false
+    ): Promise<void> => {
+      const response = await fetch('/api/database/save-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          table: 'orders',
+          record,
+          ...(originTicketCorrection ? { originTicketCorrection: true } : {})
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `บันทึกเอกสารไม่สำเร็จ (HTTP ${response.status})`);
+      }
+    };
+
+    let ticketWriteAttempted = false;
+    let doWriteAttempted = false;
+    try {
+      ticketWriteAttempted = true;
+      await persistRecord(correctedTicket, true);
+      doWriteAttempted = true;
+      await persistRecord(updatedDO);
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (doWriteAttempted) {
+        try {
+          await persistRecord(targetDO);
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : 'ย้อนข้อมูล DO ไม่สำเร็จ');
+        }
+      }
+      if (ticketWriteAttempted) {
+        try {
+          await persistRecord({
+            ...previousTicket,
+            driveFileLocation: 'zone_02',
+            driveFolderId: driveResult.targetFolderId
+          });
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : 'ย้อนข้อมูลเอกสารเดิมไม่สำเร็จ');
+        }
+      }
+      const detail = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      throw new Error(
+        rollbackErrors.length
+          ? `บันทึกการจับคู่ไม่สำเร็จ (${detail}); ย้อนข้อมูลไม่ครบ: ${rollbackErrors.join(' | ')}. รูปอยู่ในโฟลเดอร์ TR/DO แล้ว กรุณาตรวจสอบก่อนลองใหม่`
+          : `${detail}. รูปถูกย้ายเข้าชุด TR/DO แล้ว แต่ข้อมูลเดิมยังไม่เปลี่ยนประเภท กรุณาลองบันทึกอีกครั้ง`
+      );
+    }
+
+    setOrders(previous => {
+      const nextOrders = previous.map(item =>
+        item.id === correctedTicket.id
+          ? correctedTicket
+          : item.id === updatedDO.id
+            ? updatedDO
+            : item
+      );
+      setStores(previousStores => syncStoreFinancials(previousStores, nextOrders));
+      return nextOrders;
+    });
+    setActiveTab('orders');
+    showToast(
+      hasDOWeights
+        ? 'แก้ประเภทและจับคู่ตั๋วชั่งแล้ว; น้ำหนักเดิมของ DO ไม่ถูกเขียนทับ'
+        : 'แก้ประเภทเดิมเป็นตั๋วชั่งต้นทางและจับคู่กับ DO แล้ว'
+    );
+    return true;
   };
 
   // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
@@ -4571,6 +4781,7 @@ export default function App() {
         lineInboxItems={lineInbox}
         onClose={() => setIsVerifyOpen(false)}
         onSaveOrder={handleSaveOrder}
+        onCorrectAndPairOriginWeighbridge={handleCorrectAndPairOriginWeighbridge}
         onSwitchToPO={handleSwitchVerifyToPO}
         onRecoverLineImage={handleRecoverOrderImageFromLine}
       /></React.Suspense>}

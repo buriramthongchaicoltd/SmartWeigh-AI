@@ -432,6 +432,7 @@ function handleRenameAndMoveFile(payload) {
   var subfolderName = payload.subfolderName; // optional sub-folder inside zone (e.g. TR-xxx_DO-xxx)
   var preserveOriginalName = payload.preserveOriginalName === true;
   var reorganizeExistingDo = payload.reorganizeExistingDo === true;
+  var allowOriginTicketCorrection = payload.allowOriginTicketCorrection === true;
 
   if (!fileId || !newFileName) {
     return jsonResponse({ success: false, error: 'ระบุ fileId และ newFileName ไม่ครบ' });
@@ -454,17 +455,23 @@ function handleRenameAndMoveFile(payload) {
       if (reorganizeExistingDo) {
         var zone02Folder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_02);
         var inboxFolder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_00);
+        var allowedSourceFolderIds = [inboxFolder.getId(), zone02Folder.getId()];
+        if (allowOriginTicketCorrection) {
+          ['ZONE_01', 'ZONE_03', 'ZONE_04'].forEach(function(zoneKey) {
+            allowedSourceFolderIds.push(getOrCreateSubfolder(rootFolder, ZONE_NAMES[zoneKey]).getId());
+          });
+        }
         var parents = file.getParents();
         var allowedSource = false;
         while (parents.hasNext()) {
           var parent = parents.next();
-          if (parent.getId() === inboxFolder.getId() || parent.getId() === zone02Folder.getId()) {
+          if (allowedSourceFolderIds.indexOf(parent.getId()) >= 0) {
             allowedSource = true;
             break;
           }
           var grandparents = parent.getParents();
           while (grandparents.hasNext()) {
-            if (grandparents.next().getId() === zone02Folder.getId()) {
+            if (allowedSourceFolderIds.indexOf(grandparents.next().getId()) >= 0) {
               allowedSource = true;
               break;
             }
@@ -472,7 +479,7 @@ function handleRenameAndMoveFile(payload) {
           if (allowedSource) break;
         }
         if (!allowedSource) {
-          return jsonResponse({ success: false, error: 'ไฟล์ไม่ได้อยู่ใน LINE Inbox หรือโซน 02 ที่อนุญาต จึงหยุดก่อนย้าย' });
+          return jsonResponse({ success: false, error: 'ไฟล์ไม่ได้อยู่ในโฟลเดอร์เอกสารมาตรฐานที่อนุญาต จึงหยุดก่อนย้าย' });
         }
       }
       var zoneName   = ZONE_NAMES[ZONE_KEY_MAP[targetZone]];
