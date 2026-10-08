@@ -4,6 +4,17 @@
 
 ---
 
+## [2026-10-08] แก้ batch sync ปฏิเสธเลข TR เดิม
+
+### การเปลี่ยนแปลง
+- ภาพจากระบบจริงแสดง `save-batch` ถูก PostgreSQL trigger ปฏิเสธด้วยกฎเลข TR ถาวร; พบว่า server guard trim ค่า `col1` ก่อนเทียบ แต่ trigger เทียบค่าดิบแบบ exact ทำให้ค่าเดิมที่มี whitespace/stale state ผ่าน guard แล้วถูกปฏิเสธตอน upsert
+- batch save จะใช้ค่า TR ที่อ่านจากฐานข้อมูลแบบ exact สำหรับแถวเดิม และคงการห้ามกำหนด TR ใหม่จาก autosave/batch
+- API ส่งค่าที่ซ่อมกลับให้ client อัปเดต state เพื่อไม่ให้ส่งค่าเดิมที่ไม่ตรงซ้ำในการ sync รอบถัดไป
+- อัปเดต Handover และ Blueprint ให้ระบุค่า authoritative และการคงกฎ TR เดิม
+
+### การตรวจสอบ
+- รัน lint, build และ `git diff --check`
+
 ## [2026-10-08] ระบุเมนูที่พบเลขซ้ำและแก้การค้นซ้ำ PO
 
 ### การเปลี่ยนแปลง

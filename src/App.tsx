@@ -648,6 +648,28 @@ export default function App() {
             if (!response.ok || !result?.success) {
               throw new Error(result?.error || `HTTP ${response.status}`);
             }
+            if (table === 'orders' && Array.isArray(result.correctedTrNumbers)) {
+              const corrections = new Map<string, string>(
+                result.correctedTrNumbers
+                  .filter((entry: unknown): entry is { id: string; col1: string } =>
+                    typeof entry === 'object' &&
+                    entry !== null &&
+                    'id' in entry &&
+                    typeof entry.id === 'string' &&
+                    'col1' in entry &&
+                    typeof entry.col1 === 'string'
+                  )
+                  .map((entry: { id: string; col1: string }) => [entry.id, entry.col1])
+              );
+              if (corrections.size > 0) {
+                setOrders(previous => previous.map(order => {
+                  const col1 = corrections.get(order.id);
+                  return col1 !== undefined && order.col1 !== col1
+                    ? { ...order, col1 }
+                    : order;
+                }));
+              }
+            }
           });
           const inFlight = dbSyncInFlightRef.current[table] || new Set<Promise<void>>();
           inFlight.add(request);

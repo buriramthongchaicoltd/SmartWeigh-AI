@@ -592,7 +592,7 @@ async function preserveRestrictedOrderFields(
 async function enforceImmutableTrNumbers(
   client: NonNullable<ReturnType<typeof getSupabaseClient>>,
   rows: Record<string, any>[]
-): Promise<void> {
+): Promise<Array<{ id: string; col1: string }>> {
   const existingRows = new Map<string, string>();
   for (let index = 0; index < rows.length; index += 500) {
     const ids = rows.slice(index, index + 500).map(row => row.id).filter(Boolean);
@@ -600,10 +600,11 @@ async function enforceImmutableTrNumbers(
     const { data, error } = await client.from('orders').select('id,col1').in('id', ids);
     if (error) throw error;
     for (const row of data || []) {
-      existingRows.set(String(row.id), String(row.col1 || '').trim());
+      existingRows.set(String(row.id), typeof row.col1 === 'string' ? row.col1 : '');
     }
   }
 
+  const correctedTrNumbers: Array<{ id: string; col1: string }> = [];
   for (const row of rows) {
     const id = String(row.id || '');
     if (!existingRows.has(id)) {
@@ -615,10 +616,20 @@ async function enforceImmutableTrNumbers(
       }
       continue;
     }
-    if (String(row.col1 || '').trim() !== existingRows.get(id)) {
-      throw new Error(`เลข TR ของเอกสาร ${id} เป็นข้อมูลถาวรและไม่สามารถแก้ไขได้`);
+    const persistedTrNumber = existingRows.get(id)!;
+    if (persistedTrNumber.trim()) {
+      if (row.col1 !== persistedTrNumber) {
+        console.warn(`[TR Guard] Restoring immutable TR from database for order ${id}`);
+        row.col1 = persistedTrNumber;
+        correctedTrNumbers.push({ id, col1: persistedTrNumber });
+      }
+      continue;
+    }
+    if (String(row.col1 || '').trim()) {
+      throw new Error(`เลข TR ของเอกสาร ${id} ต้องกำหนดผ่านการยืนยันใบส่งของเท่านั้น`);
     }
   }
+  return correctedTrNumbers;
 }
 
 async function prepareDoOrder(
@@ -4866,10 +4877,11 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
         }
       }
     }
+    let correctedTrNumbers: Array<{ id: string; col1: string }> = [];
     if (targetTable === 'orders') {
       const authenticatedUser = getAuthenticatedUser(req);
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, rows);
-      await enforceImmutableTrNumbers(client, rows);
+      correctedTrNumbers = await enforceImmutableTrNumbers(client, rows);
     }
     const chunkSize = 50;
     for (let i = 0; i < rows.length; i += chunkSize) {
@@ -4889,7 +4901,11 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
       if (error) throw error;
     }
 
-    return res.json({ success: true, count: rows.length });
+    return res.json({
+      success: true,
+      count: rows.length,
+      ...(correctedTrNumbers.length ? { correctedTrNumbers } : {})
+    });
   } catch (err: any) {
     if (err instanceof DuplicateDocumentError) {
       return res.status(409).json({ success: false, error: err.message });
