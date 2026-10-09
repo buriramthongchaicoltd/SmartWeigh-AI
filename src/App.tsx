@@ -21,7 +21,8 @@ import {
   SystemSettings,
   SystemBackupPayload,
   BillingNoteRecord,
-  ContractorChargeDocument
+  ContractorChargeDocument,
+  DocumentSaveProgressUpdate
 } from './types';
 import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge, isDeliveryOrderPairingCandidate, getOccupiedOriginWeighbridgeDoIds, getOriginWeighbridgeMismatchWarning, resolveOriginWeighbridgePairs } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
@@ -2229,8 +2230,14 @@ export default function App() {
   };
 
   // Save a verified order and any explicitly confirmed destination-ticket match.
-  const handleSaveOrder = async (inputOrder: OrderRecord, storeToSave?: StoreMerchant): Promise<boolean> => {
+  const handleSaveOrder = async (
+    inputOrder: OrderRecord,
+    storeToSave?: StoreMerchant,
+    onProgress?: (update: DocumentSaveProgressUpdate) => void
+  ): Promise<boolean> => {
     const order = { ...inputOrder };
+    const reportProgress = (update: DocumentSaveProgressUpdate) => onProgress?.(update);
+    reportProgress({ stepId: 'validation', status: 'running', detail: 'ตรวจข้อมูลเอกสารและข้อมูลอ้างอิง' });
     const persistVerifiedInboxItem = async (
       item: LineBillInboxItem,
       errorPrefix: string,
@@ -2260,6 +2267,7 @@ export default function App() {
         return true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+        reportProgress({ stepId: 'save_record', status: 'error', detail: `${errorPrefix}: ${reason}` });
         showToast(`${errorPrefix}: ${reason}`, 'error');
         return false;
       }
@@ -2269,6 +2277,7 @@ export default function App() {
     if (order.lineInboxId && !isExistingRecord) {
       const inboxItem = lineInbox.find(item => item.id === order.lineInboxId);
       if (!inboxItem) {
+        reportProgress({ stepId: 'validation', status: 'error', detail: 'ไม่พบรายการต้นทางในกล่องพัก LINE กรุณาโหลดรายการใหม่ก่อนบันทึก' });
         showToast('ไม่พบรายการต้นทางในกล่องพัก LINE กรุณาโหลดรายการใหม่ก่อนบันทึก', 'error');
         return false;
       }
@@ -2278,10 +2287,12 @@ export default function App() {
           ? order.col4
           : order.col6;
       if (!billNo?.trim() || !order.col8?.trim()) {
+        reportProgress({ stepId: 'validation', status: 'error', detail: 'กรุณาระบุประเภทเอกสาร เลขที่เอกสาร และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ' });
         showToast('กรุณาระบุประเภทเอกสาร เลขที่เอกสาร และชื่อร้านให้ครบก่อนตรวจบิลซ้ำ', 'info');
         return false;
       }
     }
+    reportProgress({ stepId: 'validation', status: 'success', detail: 'ข้อมูลเอกสารและรายการต้นทางครบถ้วน' });
 
     let verifiedLineItem: LineBillInboxItem | undefined;
     let verifiedLineTargetZone: OrderRecord['driveFileLocation'];
@@ -2338,7 +2349,31 @@ export default function App() {
       return inboxItem;
     };
 
-    if (!isExistingRecord && (order.lineInboxId || order.pairedWeighbridgeInboxId)) {
+    const needsDriveFiles = !isExistingRecord && Boolean(order.lineInboxId || order.pairedWeighbridgeInboxId);
+    if (needsDriveFiles) {
+      reportProgress({ stepId: 'drive_check', status: 'running', detail: 'ตรวจสอบ URL deployment และสิทธิ์ Google Drive' });
+      try {
+        const response = await fetch('/api/drive/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.error || `ทดสอบ Google Drive ไม่สำเร็จ (HTTP ${response.status})`);
+        }
+        reportProgress({
+          stepId: 'drive_check',
+          status: 'success',
+          detail: result.message || `เชื่อมต่อ Google Drive สำเร็จ${result.rootFolderName ? `: ${result.rootFolderName}` : ''}`
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'ทดสอบการเชื่อมต่อ Google Drive ไม่สำเร็จ';
+        reportProgress({ stepId: 'drive_check', status: 'error', detail: reason });
+        showToast(`ยังไม่ได้บันทึกเอกสาร: ทดสอบ Google Drive ไม่ผ่าน — ${reason}`, 'error');
+        return false;
+      }
+      reportProgress({ stepId: 'prepare_files', status: 'running', detail: 'กำลังตรวจรูปต้นทางและซิงก์รูปเข้า Google Drive หากยังไม่มีไฟล์' });
       try {
         if (order.lineInboxId) {
           verifiedLineItem = await ensureInboxDriveFile(order.lineInboxId);
@@ -2383,13 +2418,19 @@ export default function App() {
           order.col14 = ticketWeights.col14;
           order.col15 = ticketWeights.col15;
         }
+        reportProgress({ stepId: 'prepare_files', status: 'success', detail: 'เตรียมรูปเอกสารและรูปตั๋วชั่งที่เลือกแล้ว' });
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+        reportProgress({ stepId: 'prepare_files', status: 'error', detail: reason });
         showToast(`ยังไม่ได้บันทึกเอกสาร: ${reason}`, 'error');
         return false;
       }
+    } else {
+      reportProgress({ stepId: 'drive_check', status: 'skipped', detail: 'รายการนี้ไม่ต้องย้ายรูปจาก LINE' });
+      reportProgress({ stepId: 'prepare_files', status: 'skipped', detail: 'ไม่มีรูปจาก LINE ที่ต้องเตรียม' });
     }
 
+    reportProgress({ stepId: 'duplicate_check', status: 'running', detail: 'ตรวจรายการซ้ำในกล่องพัก LINE และทะเบียนเอกสาร' });
     if (order.lineInboxId && !isExistingRecord) {
       const billNo = order.docType === 'dest_weighbridge'
         ? order.col17
@@ -2403,9 +2444,15 @@ export default function App() {
           billNo || '',
           order.col8 || ''
         )) {
+          reportProgress({ stepId: 'duplicate_check', status: 'success', detail: 'นำรายการ LINE ซ้ำออกแล้ว ไม่ได้สร้างเอกสารซ้ำ' });
+          reportProgress({ stepId: 'reserve_tr', status: 'skipped', detail: 'ไม่มีการสร้างเอกสารใหม่' });
+          reportProgress({ stepId: 'move_files', status: 'skipped', detail: 'ไม่มีไฟล์ใหม่ที่ต้องย้าย' });
+          reportProgress({ stepId: 'save_record', status: 'skipped', detail: 'เอกสารเดิมมีอยู่แล้ว' });
           return true;
         }
       } catch (error: any) {
+        const reason = error?.message || 'กรุณาลองอีกครั้ง';
+        reportProgress({ stepId: 'duplicate_check', status: 'error', detail: `พบข้อมูลซ้ำแต่ลบรายการออกจากกล่องพัก LINE ไม่สำเร็จ: ${reason}` });
         showToast(`พบข้อมูลซ้ำแต่ลบรายการออกจากกล่องพัก LINE ไม่สำเร็จ จึงยังไม่บันทึกเอกสาร: ${error?.message || 'กรุณาลองอีกครั้ง'}`, 'error');
         return false;
       }
@@ -2420,11 +2467,13 @@ export default function App() {
             ''
           );
           if (duplicate) {
+            reportProgress({ stepId: 'duplicate_check', status: 'error', detail: `พบเอกสารซ้ำ: ${duplicate.reason}` });
             showToast(`บล็อกการบันทึก: พบเอกสารซ้ำ ${duplicate.reason}`, 'error');
             return false;
           }
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'กรุณาลองอีกครั้ง';
+          reportProgress({ stepId: 'duplicate_check', status: 'error', detail: reason });
           showToast(`ตรวจบิลซ้ำก่อนบันทึกไม่สำเร็จ: ${reason}`, 'error');
           return false;
         }
@@ -2436,10 +2485,16 @@ export default function App() {
         d => d.level === 'exact' || d.level === 'suspected'
       );
       if (blockingDups.length > 0) {
+        reportProgress({
+          stepId: 'duplicate_check',
+          status: 'error',
+          detail: `พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาแก้เลขที่เอกสารหรือข้อมูลร้าน`
+        });
         showToast(`บล็อกการบันทึก: พบรายการที่อาจซ้ำกับ ${blockingDups[0].matchedOrder.col1} กรุณาแก้เลขที่เอกสารหรือข้อมูลร้านให้ถูกต้องก่อนลองใหม่`, 'error');
         return false;
       }
     }
+    reportProgress({ stepId: 'duplicate_check', status: 'success', detail: 'ไม่พบเอกสารซ้ำที่ขัดขวางการบันทึก' });
 
     if (verifiedLineItem?.driveFileId) {
       verifiedLineFileId = verifiedLineItem.driveFileId;
@@ -2534,10 +2589,16 @@ export default function App() {
       }
     };
 
-    if (
+    const needsTrReservation = (
       (!isExistingRecord || !String(order.col1 || '').trim()) &&
       ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || '')
-    ) {
+    );
+    reportProgress({
+      stepId: 'reserve_tr',
+      status: needsTrReservation ? 'running' : 'skipped',
+      detail: needsTrReservation ? 'กำลังจองเลข TR สำหรับ DO' : 'เอกสารนี้ไม่ต้องจองเลข TR'
+    });
+    if (needsTrReservation) {
       try {
         const response = await fetch('/api/orders/prepare-do', {
           method: 'POST',
@@ -2559,14 +2620,29 @@ export default function App() {
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+        reportProgress({ stepId: 'reserve_tr', status: 'error', detail: reason });
         showToast(`ยังไม่ได้ดำเนินการต่อ เพราะจัดคิวใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${reason}`, 'error');
         return false;
       }
     }
+    if (needsTrReservation) {
+      reportProgress({ stepId: 'reserve_tr', status: 'success', detail: `จองเลข TR ${order.col1} สำเร็จ` });
+    }
 
+    const needsDriveMove = !isExistingRecord && Boolean(order.lineInboxId || order.pairedWeighbridgeInboxId);
+    reportProgress({
+      stepId: 'move_files',
+      status: needsDriveMove ? 'running' : 'skipped',
+      detail: needsDriveMove ? 'กำลังย้ายรูปไปโฟลเดอร์เอกสารที่ตรงประเภท' : 'ไม่มีไฟล์ใหม่ที่ต้องย้าย'
+    });
     if (!isExistingRecord && order.pairedWeighbridgeInboxId) {
       if (!pairedWeighbridgeInboxItem?.driveFileId) {
         const rollbackWarning = await rollbackPreparedDoReservation();
+        reportProgress({
+          stepId: 'move_files',
+          status: 'error',
+          detail: `ไม่พบรูปตั๋วชั่งต้นทางใน Google Drive${rollbackWarning ? ` — ${rollbackWarning}` : ''}`
+        });
         showToast(
           `จับคู่ไม่ได้: ไม่พบรูปตั๋วชั่งต้นทางใน Google Drive${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
           'error'
@@ -2582,6 +2658,11 @@ export default function App() {
         );
       if (!pairedTicketNumber || pairedTicketNet <= 0) {
         const rollbackWarning = await rollbackPreparedDoReservation();
+        reportProgress({
+          stepId: 'move_files',
+          status: 'error',
+          detail: `กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิจากภาพให้ครบก่อน${rollbackWarning ? ` — ${rollbackWarning}` : ''}`
+        });
         showToast(
           `จับคู่ไม่ได้: กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิจากภาพให้ครบก่อน${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
           'info'
@@ -2624,6 +2705,7 @@ export default function App() {
       } catch (error) {
         const rollbackWarning = await rollbackPreparedDoReservation();
         const reason = error instanceof Error ? `: ${error.message}` : '';
+        reportProgress({ stepId: 'move_files', status: 'error', detail: `ย้ายรูปตั๋วชั่งต้นทางไม่สำเร็จ${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}` });
         showToast(
           `ยังไม่ได้บันทึกใบส่งของ เพราะย้ายรูปตั๋วชั่งไม่สำเร็จ${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
           'error'
@@ -2645,6 +2727,11 @@ export default function App() {
           `ยังบันทึกใบตรวจรับไม่ได้: ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
           'info'
         );
+        reportProgress({
+          stepId: 'move_files',
+          status: 'error',
+          detail: `ไม่พบรูปที่จัดเก็บใน Google Drive กรุณาซิงก์รูปให้สำเร็จก่อน${rollbackWarning ? ` — ${rollbackWarning}` : ''}`
+        });
         return false;
       }
       verifiedLineFileId = verifiedLineItem.driveFileId;
@@ -2729,9 +2816,17 @@ export default function App() {
             `ยังไม่ได้บันทึกใบตรวจรับ เพราะย้ายรูปใน Google Drive ไม่สำเร็จ: ${err?.message || 'ตรวจสอบการเชื่อมต่อ Drive'}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
             'error'
           );
+          reportProgress({
+            stepId: 'move_files',
+            status: 'error',
+            detail: `ย้ายรูปใน Google Drive ไม่สำเร็จ: ${err?.message || 'ตรวจสอบการเชื่อมต่อ Drive'}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`
+          });
           return false;
         }
       }
+    }
+    if (needsDriveMove) {
+      reportProgress({ stepId: 'move_files', status: 'success', detail: 'ย้ายรูปเอกสารที่เลือกไปยังโฟลเดอร์ปลายทางแล้ว' });
     }
 
     let autoMatchedNote = '';
@@ -2826,6 +2921,7 @@ export default function App() {
       }
     }
 
+    reportProgress({ stepId: 'save_record', status: 'running', detail: 'กำลังบันทึกทะเบียนเอกสารและยืนยันสถานะ LINE' });
     setOrders(prev => {
       let workingList = [...prev];
       const previousOrder = isExistingRecord ? orders.find(existing => existing.id === order.id) : undefined;
@@ -3259,6 +3355,11 @@ export default function App() {
               `ผลยืนยัน DO ยังไม่ชัดเจน; ไม่ได้คืนหรือยกเลิกรายการอัตโนมัติเพื่อป้องกันข้อมูลขัดแย้ง: ${reason} กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง`,
               'error'
             );
+            reportProgress({
+              stepId: 'save_record',
+              status: 'error',
+              detail: `ผลยืนยัน DO ยังไม่ชัดเจน กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง: ${reason}`
+            });
             return false;
           }
         }
@@ -3274,6 +3375,11 @@ export default function App() {
             `ยังไม่ยืนยันใบส่งของในฐานข้อมูล: ${firstReason}; ตรวจซ้ำอีกครั้งไม่สำเร็จ: ${retryReason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`,
             'error'
           );
+          reportProgress({
+            stepId: 'save_record',
+            status: 'error',
+            detail: `ยืนยันใบส่งของในฐานข้อมูลไม่สำเร็จ: ${firstReason}; ตรวจซ้ำอีกครั้ง: ${retryReason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`
+          });
           return false;
         }
       }
@@ -3475,6 +3581,7 @@ export default function App() {
       showToast('บันทึกข้อมูลตั๋วชั่ง/คำสั่งซื้อเรียบร้อยแล้ว!');
     }
     movedInboxFiles.length = 0;
+    reportProgress({ stepId: 'save_record', status: 'success', detail: 'บันทึกทะเบียนและสถานะเอกสารสำเร็จ' });
     return true;
   };
 

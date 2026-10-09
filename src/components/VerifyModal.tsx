@@ -19,9 +19,24 @@ import {
   MessageSquare,
   SlidersHorizontal,
   Upload,
-  Download
+  Download,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  AlertCircle
 } from 'lucide-react';
-import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem, OrderItemDetail } from '../types';
+import {
+  OrderRecord,
+  StoreMerchant,
+  DocumentType,
+  PurchaseOrder,
+  ProjectRecord,
+  LineBillInboxItem,
+  OrderItemDetail,
+  DocumentSaveProgressStepId,
+  DocumentSaveProgressStatus,
+  DocumentSaveProgressUpdate
+} from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
 import { getOccupiedOriginWeighbridgeDoIds, isDeliveryOrderPairingCandidate, isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
@@ -30,6 +45,23 @@ import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTarget
 import { optimizeImageForAI } from '../utils/imageProcessing';
 
 type AIRescanZone = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+
+const SAVE_PROGRESS_STEPS: Array<{ id: DocumentSaveProgressStepId; title: string }> = [
+  { id: 'validation', title: 'ตรวจข้อมูลเอกสารและข้อมูลอ้างอิง' },
+  { id: 'drive_check', title: 'ทดสอบการเชื่อมต่อ Google Drive' },
+  { id: 'prepare_files', title: 'เตรียมรูปเอกสารจาก LINE' },
+  { id: 'duplicate_check', title: 'ตรวจเอกสารซ้ำในทะเบียน' },
+  { id: 'reserve_tr', title: 'จัดคิว DO และสำรองเลข TR' },
+  { id: 'move_files', title: 'ย้ายรูปไปยังโฟลเดอร์เอกสาร' },
+  { id: 'save_record', title: 'บันทึกทะเบียนและยืนยันรายการ LINE' }
+];
+
+interface SaveProgressStep {
+  id: DocumentSaveProgressStepId;
+  title: string;
+  status: DocumentSaveProgressStatus;
+  detail?: string;
+}
 
 const AI_RESCAN_ZONE_FIELDS: Record<AIRescanZone, Array<keyof OrderRecord>> = {
   1: ['col3', 'col4', 'col6'],
@@ -81,7 +113,11 @@ interface VerifyModalProps {
   existingOrders?: OrderRecord[];
   lineInboxItems?: LineBillInboxItem[];
   onClose: () => void;
-  onSaveOrder: (order: OrderRecord, storeToSave?: StoreMerchant) => boolean | Promise<boolean>;
+  onSaveOrder: (
+    order: OrderRecord,
+    storeToSave?: StoreMerchant,
+    onProgress?: (update: DocumentSaveProgressUpdate) => void
+  ) => boolean | Promise<boolean>;
   onCorrectAndPairOriginWeighbridge?: (ticket: OrderRecord, doOrderId: string) => Promise<boolean>;
   onSwitchToPO?: (draftPO: Partial<PurchaseOrder>) => void;
   onRecoverLineImage?: (orderId: string) => Promise<{
@@ -112,6 +148,9 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
   const [saveToStoreDirectory, setSaveToStoreDirectory] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [showSaveProgress, setShowSaveProgress] = useState(false);
+  const [saveCompleted, setSaveCompleted] = useState(false);
+  const [saveProgress, setSaveProgress] = useState<SaveProgressStep[]>([]);
   const [selectedDocType, setSelectedDocType] = useState<DocumentType>('delivery_order');
   const [showAllCols, setShowAllCols] = useState(false);
   const [showDocTypeSwitcher, setShowDocTypeSwitcher] = useState(false);
@@ -959,14 +998,38 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     const { finalizedOrder, storeToSave } = buildFinalizedOrder();
     setIsSaving(true);
     setSaveError('');
+    setSaveCompleted(false);
+    setShowSaveProgress(true);
+    setSaveProgress(SAVE_PROGRESS_STEPS.map(step => ({
+      ...step,
+      status: 'pending'
+    })));
+    const reportProgress = (update: DocumentSaveProgressUpdate) => {
+      setSaveProgress(previous => previous.map(step =>
+        step.id === update.stepId
+          ? { ...step, status: update.status, detail: update.detail }
+          : step
+      ));
+    };
     try {
-      if (await onSaveOrder(finalizedOrder, storeToSave)) {
-        onClose();
+      if (await onSaveOrder(finalizedOrder, storeToSave, reportProgress)) {
+        setSaveCompleted(true);
       } else {
         setSaveError('ยังบันทึกไม่ได้ กรุณาตรวจสอบข้อความแจ้งเตือนแล้วลองอีกครั้ง');
+        setSaveProgress(previous => previous.map(step =>
+          step.status === 'running'
+            ? { ...step, status: 'error', detail: 'ขั้นตอนนี้ไม่สำเร็จ ตรวจสอบข้อความแจ้งเตือนและลองอีกครั้ง' }
+            : step
+        ));
       }
     } catch (err: any) {
-      setSaveError(err?.message || 'บันทึกข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง');
+      const message = err?.message || 'บันทึกข้อมูลไม่สำเร็จ กรุณาลองอีกครั้ง';
+      setSaveError(message);
+      setSaveProgress(previous => previous.map(step =>
+        step.status === 'running'
+          ? { ...step, status: 'error', detail: message }
+          : step
+      ));
     } finally {
       setIsSaving(false);
     }
@@ -3738,6 +3801,82 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
         </div>
 
       </div>
+      {showSaveProgress && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4" role="dialog" aria-modal="true" aria-labelledby="save-progress-title">
+          <section className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <header className={`rounded-t-2xl border-b px-5 py-4 ${saveProgress.some(step => step.status === 'error') ? 'border-red-200 bg-red-50' : saveCompleted ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="flex items-start gap-3">
+                {saveProgress.some(step => step.status === 'error')
+                  ? <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                  : saveCompleted
+                    ? <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" />
+                    : <Loader2 className="mt-0.5 h-5 w-5 shrink-0 animate-spin text-blue-600" />}
+                <div>
+                  <h2 id="save-progress-title" className="text-base font-bold text-slate-900">
+                    {saveProgress.some(step => step.status === 'error')
+                      ? 'ตรวจพบขั้นตอนที่ไม่สำเร็จ'
+                      : saveCompleted
+                        ? 'ดำเนินการเสร็จสิ้น'
+                        : 'กำลังตรวจสอบและบันทึกเอกสาร'}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {saveProgress.some(step => step.status === 'error')
+                      ? 'ตรวจดูขั้นตอนที่ผิดพลาดก่อนกลับไปแก้ไข ระบบยังเก็บข้อมูลที่กรอกไว้'
+                      : saveCompleted
+                        ? 'ตรวจผลการบันทึก แล้วกดยืนยันเพื่อปิดหน้าต่าง'
+                        : 'กำลังทำงานตามลำดับ กรุณาอย่าปิดหน้าต่างระหว่างบันทึก'}
+                  </p>
+                </div>
+              </div>
+            </header>
+            <ol className="max-h-[55vh] space-y-2 overflow-y-auto p-5">
+              {saveProgress.map(step => (
+                <li key={step.id} className={`flex gap-3 rounded-xl border p-3 ${step.status === 'error' ? 'border-red-200 bg-red-50' : step.status === 'success' ? 'border-emerald-200 bg-emerald-50/60' : 'border-slate-200 bg-white'}`}>
+                  <span className="mt-0.5 shrink-0" aria-hidden="true">
+                    {step.status === 'running'
+                      ? <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                      : step.status === 'success'
+                        ? <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                        : step.status === 'error'
+                          ? <AlertCircle className="h-5 w-5 text-red-600" />
+                          : <Circle className={`h-5 w-5 ${step.status === 'skipped' ? 'text-slate-300' : 'text-slate-400'}`} />}
+                  </span>
+                  <div className="min-w-0">
+                    <p className={`text-sm font-semibold ${step.status === 'error' ? 'text-red-800' : 'text-slate-800'}`}>{step.title}</p>
+                    {step.detail && <p className={`mt-1 break-words text-xs leading-relaxed ${step.status === 'error' ? 'text-red-700' : 'text-slate-600'}`}>{step.detail}</p>}
+                    {step.status === 'error' && step.id === 'drive_check' && (
+                      <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs leading-relaxed text-amber-900">
+                        หากพบ HTTP 404 ให้ตรวจ Settings → Google Drive ว่า URL เป็น Web App deployment ที่ยังใช้งานและลงท้ายด้วย /exec จากนั้นกดทดสอบ Google Drive แล้วกลับมาลองใหม่
+                      </p>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            {!isSaving && (
+              <footer className="flex justify-end gap-2 border-t border-slate-200 p-4">
+                {saveCompleted ? (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="min-h-11 rounded-xl bg-emerald-600 px-5 py-2 text-sm font-bold text-white transition hover:bg-emerald-700"
+                  >
+                    ยืนยันผลและปิดหน้าต่าง
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowSaveProgress(false)}
+                    className="min-h-11 rounded-xl bg-slate-800 px-5 py-2 text-sm font-bold text-white transition hover:bg-slate-700"
+                  >
+                    รับทราบ กลับไปแก้ไข
+                  </button>
+                )}
+              </footer>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 };

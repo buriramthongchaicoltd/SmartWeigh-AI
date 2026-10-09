@@ -11,6 +11,23 @@ export type DocumentType =
   | 'purchase_order'    // ใบสั่งซื้อสินค้า (PO)
   | 'full_logistics';   // โลจิสติกส์ 39 คอลัมน์เต็มรูปแบบ
 
+export type DocumentSaveProgressStepId =
+  | 'validation'
+  | 'drive_check'
+  | 'prepare_files'
+  | 'duplicate_check'
+  | 'reserve_tr'
+  | 'move_files'
+  | 'save_record';
+
+export type DocumentSaveProgressStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped';
+
+export interface DocumentSaveProgressUpdate {
+  stepId: DocumentSaveProgressStepId;
+  status: DocumentSaveProgressStatus;
+  detail?: string;
+}
+
 export type DocumentIssuerRole = 'supplier_issued' | 'buyer_company_issued' | 'uncertain';
 
 export interface OrderItemDetail {
