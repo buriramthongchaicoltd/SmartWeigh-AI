@@ -60,7 +60,7 @@ type AuthenticatedAppUser = {
 };
 
 const AUTH_COOKIE_NAME = 'smartweigh_session';
-const AUTH_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const AUTH_SESSION_TTL_MS = 30 * 60 * 1000;
 const SYSTEM_MASTER_USERNAME = 'Admin';
 const SYSTEM_MASTER_INITIAL_PASSWORD = (process.env.SYSTEM_MASTER_ADMIN_PASSWORD || '').trim();
 const INTERNAL_API_TOKEN = crypto.randomBytes(32).toString('hex');
@@ -349,6 +349,39 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[Auth] Session lookup failed:', error);
     return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
+  }
+});
+
+app.post('/api/auth/activity', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const authenticated = await getAuthenticatedSession(req);
+    if (!authenticated) {
+      return res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบใหม่ก่อนใช้งาน' });
+    }
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมใช้งานสำหรับต่ออายุ session' });
+    }
+    const expiresAt = Date.now() + AUTH_SESSION_TTL_MS;
+    const { error } = await client.from('system_config').upsert({
+      config_key: getSessionConfigKey(authenticated.token),
+      config_value: {
+        userId: authenticated.session.user.id,
+        expiresAt: new Date(expiresAt).toISOString(),
+        firstPasswordChangePending: authenticated.session.firstPasswordChangePending
+      },
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'config_key' });
+    if (error) throw error;
+
+    authenticated.session.expiresAt = expiresAt;
+    authSessions.set(authenticated.token, authenticated.session);
+    setSessionCookie(res, authenticated.token, Math.floor(AUTH_SESSION_TTL_MS / 1000));
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Auth] Failed to refresh active session:', error);
+    return res.status(503).json({ success: false, error: 'ต่ออายุ session ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง' });
   }
 });
 

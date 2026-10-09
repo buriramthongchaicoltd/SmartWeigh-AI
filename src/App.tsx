@@ -539,6 +539,46 @@ export default function App() {
 
   useEffect(() => {
     if (!authenticatedUser) return;
+
+    let lastRefreshAt = 0;
+    const refreshSession = () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < 5 * 60 * 1000) return;
+      lastRefreshAt = now;
+      void fetch('/api/auth/activity', { method: 'POST' })
+        .then(async response => {
+          if (response.status === 401) {
+            await handleLogout();
+            return;
+          }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          authSessionWarningRef.current = false;
+        })
+        .catch(error => {
+          console.error('[Auth] Could not refresh active session:', error);
+        });
+    };
+
+    refreshSession();
+    const activityEvents: (keyof WindowEventMap)[] = [
+      'pointerdown',
+      'pointermove',
+      'keydown',
+      'touchstart',
+      'wheel'
+    ];
+    activityEvents.forEach(eventName =>
+      window.addEventListener(eventName, refreshSession, { passive: true })
+    );
+    return () => {
+      activityEvents.forEach(eventName =>
+        window.removeEventListener(eventName, refreshSession)
+      );
+    };
+  }, [authenticatedUser]);
+
+  useEffect(() => {
+    if (!authenticatedUser) return;
     const timer = setInterval(async () => {
       try {
         const response = await fetch('/api/auth/me');
