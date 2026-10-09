@@ -5131,9 +5131,27 @@ app.post('/api/orders/rollback-verification', async (req: Request, res: Response
 
 app.post('/api/orders/update-do', async (req: Request, res: Response) => {
   const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const expectedTrNumber = typeof req.body?.expectedTrNumber === 'string'
+    ? req.body.expectedTrNumber.trim()
+    : '';
+  const expectedDoNumber = typeof req.body?.expectedDoNumber === 'string'
+    ? req.body.expectedDoNumber.trim()
+    : '';
   const record = req.body?.record;
-  if (!orderId || !record || typeof record !== 'object' || Array.isArray(record) || record.id !== orderId) {
-    return res.status(400).json({ success: false, error: 'ข้อมูล DO สำหรับบันทึกไม่ครบหรือ ID ไม่ตรงกัน' });
+  if (
+    !orderId ||
+    !expectedTrNumber ||
+    !expectedDoNumber ||
+    !record ||
+    typeof record !== 'object' ||
+    Array.isArray(record) ||
+    record.id !== orderId ||
+    String(record.col1 || '').trim() !== expectedTrNumber
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: 'ต้องระบุ ID, เลข TR เดิม และเลข DO เดิมให้ครบ และเลข TR ในข้อมูลที่แก้ต้องตรงกัน'
+    });
   }
   const requestedDriveFolderUpdates = Array.isArray(req.body?.driveFolderUpdates)
     ? req.body.driveFolderUpdates as Array<{ id?: unknown; driveFolderId?: unknown }>
@@ -5182,6 +5200,15 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
     if (doLookupError) throw doLookupError;
     if (!existingDo || !['delivery_order', 'concrete', 'full_logistics'].includes(String(existingDo.doc_type))) {
       return res.status(404).json({ success: false, error: 'ไม่พบ DO ที่ต้องการแก้ไขในทะเบียน' });
+    }
+    if (
+      String(existingDo.col1 || '').trim() !== expectedTrNumber ||
+      String(existingDo.col6 || '').trim() !== expectedDoNumber
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: `ข้อมูล DO เปลี่ยนไปแล้ว: คำขอระบุ TR ${expectedTrNumber} / DO ${expectedDoNumber} แต่ข้อมูลปัจจุบันในฐานข้อมูลไม่ตรง กรุณาโหลดข้อมูลใหม่ก่อนแก้ไข`
+      });
     }
 
     const dbRow = mapOrderToSupabase(record);
@@ -5318,9 +5345,14 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
       .from('orders')
       .update(doUpdate)
       .eq('id', orderId)
+      .eq('col1', expectedTrNumber)
+      .eq('col6', expectedDoNumber)
       .select('*')
-      .single();
+      .maybeSingle();
     if (doUpdateError) throw doUpdateError;
+    if (!savedDo) {
+      throw new Error(`ไม่อัปเดต DO: แถว TR ${expectedTrNumber} / DO ${expectedDoNumber} เปลี่ยนระหว่างบันทึก`);
+    }
     savedDoId = String(savedDo.id);
 
     return res.json({

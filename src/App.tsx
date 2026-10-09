@@ -764,7 +764,8 @@ export default function App() {
 
     const sendDoUpdate = async (
       updatedRecord: OrderRecord,
-      driveFolderUpdates: Array<{ id: string; driveFolderId: string | null }> = []
+      driveFolderUpdates: Array<{ id: string; driveFolderId: string | null }> = [],
+      expectedRecord: Pick<OrderRecord, 'col1' | 'col6'> = updatedRecord
     ) => {
       const response = await fetch('/api/orders/update-do', {
         method: 'POST',
@@ -772,7 +773,9 @@ export default function App() {
         body: JSON.stringify({
           orderId: updatedRecord.id,
           record: updatedRecord,
-          driveFolderUpdates
+          driveFolderUpdates,
+          expectedTrNumber: expectedRecord.col1.trim(),
+          expectedDoNumber: expectedRecord.col6.trim()
         })
       });
       const result = await response.json();
@@ -822,7 +825,12 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           updatingExistingDo
-            ? { orderId: normalizedRecord.id, record: normalizedRecord }
+            ? {
+                orderId: normalizedRecord.id,
+                record: normalizedRecord,
+                expectedTrNumber: previousRecord?.col1.trim() || '',
+                expectedDoNumber: previousRecord?.col6.trim() || ''
+              }
             : { table: 'orders', record: normalizedRecord }
         )
       }
@@ -957,7 +965,10 @@ export default function App() {
           try {
             const previousLinkedFolders = changedLinkedDriveFiles
               .map(file => ({ id: file.id, driveFolderId: file.driveFolderId || null }));
-            await sendDoUpdate(previousRecord, previousLinkedFolders);
+            await sendDoUpdate(previousRecord, previousLinkedFolders, {
+              col1: previousRecord.col1,
+              col6: normalizedRecord.col6
+            });
           } catch (rollbackError) {
             rollbackErrors.push(
               rollbackError instanceof Error ? rollbackError.message : 'ย้อนข้อมูล DO ในฐานข้อมูลไม่สำเร็จ'
