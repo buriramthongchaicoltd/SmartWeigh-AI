@@ -2596,9 +2596,31 @@ export default function App() {
     reportProgress({
       stepId: 'reserve_tr',
       status: needsTrReservation ? 'running' : 'skipped',
-      detail: needsTrReservation ? 'กำลังจองเลข TR สำหรับ DO' : 'เอกสารนี้ไม่ต้องจองเลข TR'
+      detail: needsTrReservation ? 'รอ autosave เก่าจบ แล้วจองเลข TR สำหรับ DO' : 'เอกสารนี้ไม่ต้องจองเลข TR'
     });
     if (needsTrReservation) {
+      if (saveDbTimerRef.current.orders) {
+        clearTimeout(saveDbTimerRef.current.orders);
+        saveDbTimerRef.current.orders = undefined;
+      }
+      dbSyncGenerationRef.current.orders = (dbSyncGenerationRef.current.orders || 0) + 1;
+      protectedPreparedOrderIdsRef.current.add(order.id);
+      if (pairedWeighbridgeInboxItem) {
+        protectedPreparedOrderIdsRef.current.add(
+          orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+          `line-wb-${pairedWeighbridgeInboxItem.id}`
+        );
+      }
+      while (dbSyncInFlightRef.current.orders?.size) {
+        await Promise.all(
+          [...dbSyncInFlightRef.current.orders].map(request => request.catch(() => undefined))
+        );
+      }
+      reportProgress({
+        stepId: 'reserve_tr',
+        status: 'running',
+        detail: 'autosave เก่าจบแล้ว กำลังจองเลข TR โดยไม่ให้คำขอเก่าเขียนทับ'
+      });
       try {
         const response = await fetch('/api/orders/prepare-do', {
           method: 'POST',
@@ -2611,13 +2633,6 @@ export default function App() {
         }
         order.col1 = result.trNumber;
         preparedDoReservation = { orderId: order.id, trNumber: result.trNumber };
-        protectedPreparedOrderIdsRef.current.add(order.id);
-        if (pairedWeighbridgeInboxItem) {
-          protectedPreparedOrderIdsRef.current.add(
-            orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
-            `line-wb-${pairedWeighbridgeInboxItem.id}`
-          );
-        }
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
         reportProgress({ stepId: 'reserve_tr', status: 'error', detail: reason });
