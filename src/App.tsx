@@ -2875,8 +2875,18 @@ export default function App() {
           const eligibleDeliveryOrders = workingList.filter(order =>
             order.id !== orderToSave.id &&
             isDeliveryOrderPairingCandidate(order) &&
+            order.status === 'verified' &&
+            Boolean(order.col1.trim() && order.col6.trim()) &&
+            !order.matchedDestTicketId &&
+            !order.col17 &&
             Number(order.col18) === 0 &&
-            Number(order.col20) === 0
+            Number(order.col19) === 0 &&
+            Number(order.col20) === 0 &&
+            !workingList.some(ticket =>
+              ticket.docType === 'dest_weighbridge' &&
+              (ticket.matchedDestTicketId === order.id ||
+                Boolean(ticket.linkedViaDocNo && isExactDocNumberReference(ticket.linkedViaDocNo, order.col6)))
+            )
           );
           const referenceMatches = (docNo?: string) =>
             Boolean(docNo && refCandidates.some(ref => isExactDocNumberReference(docNo, ref)));
@@ -2906,12 +2916,6 @@ export default function App() {
               return;
             }
 
-            const sameTrOrders = eligibleDeliveryOrders.filter(order =>
-              Boolean(ticket.col1?.trim() && order.col1.trim() === ticket.col1.trim())
-            );
-            if (sameTrOrders.length === 1) {
-              matchingDeliveryOrders.set(sameTrOrders[0].id, sameTrOrders[0]);
-            }
           });
 
           if (matchingDeliveryOrders.size === 1) {
@@ -2954,21 +2958,43 @@ export default function App() {
       }
 
       // 1B. Case 2 (Reverse Direction): Saving an Origin DO -> Check if an unlinked Destination Weighbridge ticket is waiting with a matching DO Reference!
-      if (orderToSave.docType !== 'dest_weighbridge' && orderToSave.docType !== 'tax_invoice') {
-        if (Number(orderToSave.col18) === 0 && Number(orderToSave.col20) === 0 && orderToSave.col6) {
+      if (
+        isDeliveryOrderPairingCandidate(orderToSave) &&
+        orderToSave.status === 'verified' &&
+        !orderToSave.matchedDestTicketId &&
+        !orderToSave.col17 &&
+        Number(orderToSave.col18) === 0 &&
+        Number(orderToSave.col19) === 0 &&
+        Number(orderToSave.col20) === 0 &&
+        orderToSave.col6
+      ) {
+        const alreadyPairedDestTickets = workingList.filter(ticket =>
+          ticket.docType === 'dest_weighbridge' &&
+          (ticket.matchedDestTicketId === orderToSave.id ||
+            Boolean(ticket.linkedViaDocNo && isExactDocNumberReference(ticket.linkedViaDocNo, orderToSave.col6)))
+        );
+        if (alreadyPairedDestTickets.length === 0) {
           const doTextRefs = extractDocReferences(orderToSave.col38);
-          const waitingDestIdx = workingList.findIndex(ticket => {
-            if (ticket.id === orderToSave.id || ticket.docType !== 'dest_weighbridge' || ticket.linkedViaDocNo) return false;
+          const waitingDestTickets = workingList.filter(ticket => {
+            if (
+              ticket.id === orderToSave.id ||
+              ticket.docType !== 'dest_weighbridge' ||
+              ticket.status !== 'verified' ||
+              ticket.linkedViaDocNo ||
+              ticket.destMatchStatus === 'verified'
+            ) return false;
             const ticketTextRefs = extractDocReferences(ticket.col38);
             const ticketRefsToDO = [ticket.referenceDocNo, ...ticketTextRefs.doNumbers].filter(Boolean) as string[];
             const matchesDO = ticketRefsToDO.some(ref => isExactDocNumberReference(orderToSave.col6, ref));
             const doRefsToTicket = [orderToSave.col17, ...doTextRefs.doNumbers].filter(Boolean) as string[];
-            const matchesTicketNo = Boolean(ticket.col17 && doRefsToTicket.some(ref => isExactDocNumberReference(ticket.col17, ref)));
+            const ticketNumber = ticket.col17 || ticket.col6 || ticket.col1;
+            const matchesTicketNo = Boolean(ticketNumber && doRefsToTicket.some(ref => isExactDocNumberReference(ticketNumber, ref)));
             return matchesDO || matchesTicketNo;
           });
 
-          if (waitingDestIdx >= 0) {
-            const waitingTicket = workingList[waitingDestIdx];
+          if (waitingDestTickets.length === 1) {
+            const waitingTicket = waitingDestTickets[0];
+            const waitingDestIdx = workingList.findIndex(ticket => ticket.id === waitingTicket.id);
             const grossD = Number(waitingTicket.col18) || 0;
             const tareD = Number(waitingTicket.col19) || 0;
             const netD = Number(waitingTicket.col20) || Math.max(0, grossD - tareD);
@@ -3003,7 +3029,9 @@ export default function App() {
             autoMatchedNote = `🚩 ดึงตั๋วชั่งปลายทาง #${destTicketNo} มาชนเข้า DO ${orderToSave.col6} อัตโนมัติแล้ว (ติดธงรอตรวจสอบยืนยัน)`;
           }
         }
+      }
 
+      if (isDeliveryOrderPairingCandidate(orderToSave)) {
         // 1C. Auto-Match Origin DO with Purchase Order (PO — Zone 1 Col 4) strictly by Reference PO Number
         const doTextRefs = extractDocReferences(orderToSave.col38);
         const poRefCandidates = [

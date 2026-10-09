@@ -219,7 +219,14 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
       if (projectFilter !== 'all' && (o.col2 || '') !== projectFilter) {
         return false;
       }
-      const hasWeights = Number(o.col15) > 0 || Number(o.col20) > 0 || o.docType === 'weighbridge';
+      const hasWeights =
+        Number(o.col13) > 0 ||
+        Number(o.col14) > 0 ||
+        Number(o.col15) > 0 ||
+        Number(o.col18) > 0 ||
+        Number(o.col19) > 0 ||
+        Number(o.col20) > 0 ||
+        o.docType === 'weighbridge';
       if (doWeighTypeFilter === 'general_non_weighed' && hasWeights) return false;
       if (doWeighTypeFilter === 'weighed' && !hasWeights) return false;
       if (dateFrom && (o.col7 || '') < dateFrom) return false;
@@ -420,14 +427,12 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
       if (weightBasis === 'none_qty') {
         chosenWeightKg = 0;
       } else if (weightBasis === 'origin') {
-        chosenWeightKg = originKg > 0 ? originKg : destKg;
+        chosenWeightKg = originKg;
       } else if (weightBasis === 'dest') {
-        chosenWeightKg = destKg > 0 ? destKg : originKg;
+        chosenWeightKg = destKg;
       } else if (weightBasis === 'min') {
         if (originKg > 0 && destKg > 0) {
           chosenWeightKg = Math.min(originKg, destKg);
-        } else {
-          chosenWeightKg = originKg > 0 ? originKg : destKg;
         }
       }
 
@@ -441,11 +446,23 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
         // For single-item weighed DO, convert chosenWeightKg -> Ton/Kg if applicable.
         // For multi-item DOs (or 'none_qty'), use each sub-item's quantity directly.
         let defaultQty = Number(sub.qty) || (subIdx === 0 ? Number(ord.col22) || 0 : 0);
-        if (!isMultiItemDO && weightBasis !== 'none_qty' && chosenWeightKg > 0) {
-          if (unitLower.includes('ตัน') || unitLower.includes('ton')) {
-            defaultQty = Number((chosenWeightKg / 1000).toFixed(3));
-          } else if (unitLower.includes('กก') || unitLower.includes('กิโล') || unitLower.includes('kg')) {
-            defaultQty = chosenWeightKg;
+        if (!isMultiItemDO && weightBasis !== 'none_qty') {
+          const isWeighedOrder =
+            originKg > 0 ||
+            destKg > 0 ||
+            Number(ord.col13) > 0 ||
+            Number(ord.col14) > 0 ||
+            Number(ord.col18) > 0 ||
+            Number(ord.col19) > 0;
+          if (isWeighedOrder) {
+            defaultQty = 0;
+            if (chosenWeightKg > 0) {
+              if (unitLower.includes('ตัน') || unitLower.includes('ton')) {
+                defaultQty = Number((chosenWeightKg / 1000).toFixed(3));
+              } else if (unitLower.includes('กก') || unitLower.includes('กิโล') || unitLower.includes('kg')) {
+                defaultQty = chosenWeightKg;
+              }
+            }
           }
         }
 
@@ -528,6 +545,30 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
     weightBasis,
     billingScope
   ]);
+
+  const missingWeightBasisOrders = useMemo(() => {
+    if (!weightBasis || weightBasis === 'none_qty') return [];
+
+    return selectedOrderIds
+      .map(id => orders.find(order => order.id === id))
+      .filter((order): order is OrderRecord => Boolean(order))
+      .filter(order => {
+        const originKg = Number(order.col15) || 0;
+        const destKg = Number(order.col20) || 0;
+        const hasWeighingData =
+          originKg > 0 ||
+          destKg > 0 ||
+          Number(order.col13) > 0 ||
+          Number(order.col14) > 0 ||
+          Number(order.col18) > 0 ||
+          Number(order.col19) > 0;
+        if (!hasWeighingData) return false;
+
+        if (weightBasis === 'origin') return originKg <= 0;
+        if (weightBasis === 'dest') return destKg <= 0;
+        return originKg <= 0 || destKg <= 0;
+      });
+  }, [selectedOrderIds, orders, weightBasis]);
 
   // Distinct product/material groups across selected DOs (for setting different prices per product type)
   const distinctProductGroups = useMemo(() => {
@@ -972,6 +1013,18 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
     }
     if (!vatMode) {
       showToast('กรุณาเลือก "การคิดภาษีมูลค่าเพิ่ม (VAT)" ในหัวข้อที่ 2 ก่อนสร้างชุดรับวางบิล', 'info');
+      return;
+    }
+    if (missingWeightBasisOrders.length > 0) {
+      const missingDoNumbers = missingWeightBasisOrders
+        .map(order => order.col6 || order.col1)
+        .filter(Boolean)
+        .join(', ');
+      const basisLabel =
+        weightBasis === 'origin' ? 'น้ำหนักต้นทาง' :
+        weightBasis === 'dest' ? 'น้ำหนักปลายทาง' :
+        'น้ำหนักต้นทางและปลายทางสำหรับ MIN';
+      showToast(`${basisLabel}ไม่ครบสำหรับ DO: ${missingDoNumbers || 'รายการที่เลือก'} กรุณาตรวจน้ำหนักหรือเปลี่ยนเกณฑ์ก่อนบันทึก`, 'info');
       return;
     }
     const inferredSupplier =
@@ -2947,10 +3000,15 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
               </button>
 
               <div className="text-xs font-semibold text-slate-700 flex items-center gap-2">
-                {weightBasis && billingScope && vatMode ? (
+                {weightBasis && billingScope && vatMode && missingWeightBasisOrders.length === 0 ? (
                   <span className="text-emerald-700 font-semibold flex items-center gap-1.5">
                     <CheckCircle className="w-4 h-4 text-emerald-600" />
                     <span>กำหนดเกณฑ์และภาษีครบถ้วน พร้อมตรวจยอดรวม</span>
+                  </span>
+                ) : weightBasis && missingWeightBasisOrders.length > 0 ? (
+                  <span className="text-rose-800 font-semibold flex items-center gap-1.5">
+                    <AlertCircle className="w-4 h-4 text-rose-600" />
+                    <span>ไม่มีน้ำหนักตามเกณฑ์ที่เลือกใน DO บางรายการ</span>
                   </span>
                 ) : (
                   <span className="text-amber-800 font-semibold flex items-center gap-1.5">
@@ -2975,11 +3033,15 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
                     showToast('กรุณาเลือกการคิดภาษีมูลค่าเพิ่ม (VAT) ก่อน', 'info');
                     return;
                   }
+                  if (missingWeightBasisOrders.length > 0) {
+                    showToast('DO บางรายการไม่มีน้ำหนักตามเกณฑ์ที่เลือก กรุณาตรวจสอบก่อนดำเนินการต่อ', 'info');
+                    return;
+                  }
                   setWizardStep(4);
                 }}
-                disabled={!weightBasis || !billingScope || !vatMode}
+                disabled={!weightBasis || !billingScope || !vatMode || missingWeightBasisOrders.length > 0}
                 className={`px-6 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 shadow-xs cursor-pointer ${
-                  weightBasis && billingScope && vatMode
+                  weightBasis && billingScope && vatMode && missingWeightBasisOrders.length === 0
                     ? 'bg-teal-700 hover:bg-teal-800 text-white'
                     : 'bg-slate-300 text-slate-500 cursor-not-allowed'
                 }`}
@@ -3300,9 +3362,9 @@ export const PurchasingBillingView: React.FC<PurchasingBillingViewProps> = ({
                 <button
                   type="button"
                   onClick={handleSaveStep1BillingNote}
-                  disabled={selectedOrderIds.length === 0 || !weightBasis || !billingScope || !vatMode}
+                  disabled={selectedOrderIds.length === 0 || !weightBasis || !billingScope || !vatMode || missingWeightBasisOrders.length > 0}
                   className={`px-7 py-3 rounded-xl font-black text-sm transition flex items-center gap-2.5 shadow-md cursor-pointer ${
-                    selectedOrderIds.length > 0 && weightBasis && billingScope && vatMode
+                    selectedOrderIds.length > 0 && weightBasis && billingScope && vatMode && missingWeightBasisOrders.length === 0
                       ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20'
                       : 'bg-slate-800 text-slate-500 cursor-not-allowed'
                   }`}

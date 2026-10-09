@@ -407,9 +407,9 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
         source
       };
 
-      // If this direct order is a Delivery Order (DO), record its DO number
+      // Only delivery orders establish the reference chain used for PO quantity reconciliation.
       const doNum = normalizeDocNumber(ord.col6);
-      if (doNum) {
+      if (doNum && isDeliveryOrderPairingCandidate(ord)) {
         knownDONumbers.set(doNum, ord);
       }
     }
@@ -486,7 +486,7 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
   allLinkedOrders.forEach(ord => {
     if (processedOrderIds.has(ord.id)) return;
 
-    const isDO = ord.docType === 'delivery_order' || ord.docType === 'concrete' || (!ord.docType && Number(ord.col13) === 0);
+    const isDO = isDeliveryOrderPairingCandidate(ord);
     const doNum = normalizeDocNumber(ord.col6);
     const directDONum = ord.col6;
 
@@ -511,24 +511,27 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
         processedOrderIds.add(ord.id);
         matchingWBs.forEach(wb => processedOrderIds.add(wb.id));
 
-        const totalWbNetKg = matchingWBs.reduce((sum, wb) => sum + (Number(wb.col15) || Number(wb.col20) || 0), 0);
         const doQty = Number(ord.col22) || 0;
-        const effectiveUnit = primaryPOUnit || ord.col23 || 'ตัน';
-        
-        // Effective quantity: prefer certified weighbridge net weight if ton/kg, otherwise DO qty
+        const doNetKg = Number(ord.col15) || 0;
+        const effectiveUnit =
+          normalizeUnit(po.items?.[0]?.unit) ||
+          normalizeUnit(ord.col23) ||
+          (doNetKg > 0 ? 'ตัน' : 'ชิ้น');
         let effectiveQty = doQty;
-        if (effectiveUnit === 'ตัน' && totalWbNetKg > 0 && doQty === 0) {
-          effectiveQty = Number((totalWbNetKg / 1000).toFixed(3));
-        } else if (effectiveUnit === 'ตัน' && totalWbNetKg > 0 && matchingWBs.some(w => w.docType !== 'dest_weighbridge')) {
-          effectiveQty = Number((totalWbNetKg / 1000).toFixed(3));
-        } else if (effectiveUnit === 'กก.' && totalWbNetKg > 0) {
-          effectiveQty = totalWbNetKg;
-        } else if (effectiveQty === 0 && totalWbNetKg > 0) {
-          effectiveQty = Number((totalWbNetKg / 1000).toFixed(3));
+        const doQtyUnit = normalizeUnit(ord.col23) || effectiveUnit;
+        if (doQty > 0) {
+          if (doQtyUnit === 'กก.' && effectiveUnit === 'ตัน') {
+            effectiveQty = Number((doQty / 1000).toFixed(3));
+          } else if (doQtyUnit === 'ตัน' && effectiveUnit === 'กก.') {
+            effectiveQty = doQty * 1000;
+          }
+        } else if (doNetKg > 0) {
+          effectiveQty = effectiveUnit === 'กก.'
+            ? doNetKg
+            : Number((doNetKg / 1000).toFixed(3));
         }
 
-        const wbSumAmount = matchingWBs.reduce((sum, wb) => sum + (Number(wb.col29) || Number(wb.col25) || 0), 0);
-        let effectiveAmount = Number(ord.col29) || Number(ord.col25) || wbSumAmount || 0;
+        let effectiveAmount = Number(ord.col29) || Number(ord.col25) || 0;
         
         // If neither DO nor WB has price on physical slip, derive from PO unit price (Bridge to RR)
         if (effectiveAmount === 0 && effectiveQty > 0 && po.items && po.items.length > 0) {
@@ -564,31 +567,35 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
   // Process remaining unpaired orders
   allLinkedOrders.forEach(ord => {
     if (processedOrderIds.has(ord.id)) return;
-    // Skip dest_weighbridge if it was already merged into a DO
-    if (ord.docType === 'dest_weighbridge' && ord.linkedViaDocNo && hasPhysicalDeliveries) {
-      processedOrderIds.add(ord.id);
-      return;
-    }
+    // PO delivery progress is based on DOs only; scale tickets and other references are supporting evidence.
+    if (!isDeliveryOrderPairingCandidate(ord)) return;
     processedOrderIds.add(ord.id);
 
-    const isWB = ord.docType === 'weighbridge' || ord.docType === 'dest_weighbridge' || Number(ord.col13) > 0 || Number(ord.col15) > 0 || Number(ord.col18) > 0 || Number(ord.col20) > 0;
-    const netWeightKg = Number(ord.col15) || Number(ord.col20) || 0;
+    const netWeightKg = Number(ord.col15) || 0;
     const rawQty = Number(ord.col22) || 0;
-    const effectiveUnit = primaryPOUnit || ord.col23 || (isWB ? 'ตัน' : 'ชิ้น');
+    const hasOriginWeight =
+      Number(ord.col13) > 0 ||
+      Number(ord.col14) > 0 ||
+      netWeightKg > 0;
+    const effectiveUnit =
+      normalizeUnit(po.items?.[0]?.unit) ||
+      normalizeUnit(ord.col23) ||
+      (hasOriginWeight ? 'ตัน' : 'ชิ้น');
 
     let effectiveQty = rawQty;
-    if (effectiveUnit === 'ตัน') {
-      if (rawQty === 0 && netWeightKg > 0) {
-        effectiveQty = Number((netWeightKg / 1000).toFixed(3));
-      } else if (ord.col23 === 'กก.' || (!ord.col23 && rawQty > 1000)) {
+    const doQtyUnit = normalizeUnit(ord.col23) || effectiveUnit;
+    if (rawQty > 0) {
+      if (doQtyUnit === 'กก.' && effectiveUnit === 'ตัน') {
         effectiveQty = Number((rawQty / 1000).toFixed(3));
+      } else if (doQtyUnit === 'ตัน' && effectiveUnit === 'กก.') {
+        effectiveQty = rawQty * 1000;
       }
-    } else if (effectiveUnit === 'กก.') {
-      if (rawQty === 0 && netWeightKg > 0) {
+    } else if (netWeightKg > 0) {
+      if (effectiveUnit === 'กก.') {
         effectiveQty = netWeightKg;
+      } else if (effectiveUnit === 'ตัน') {
+        effectiveQty = Number((netWeightKg / 1000).toFixed(3));
       }
-    } else if (effectiveQty === 0 && netWeightKg > 0) {
-      effectiveQty = Number((netWeightKg / 1000).toFixed(3));
     }
 
     let effectiveAmount = Number(ord.col29) || Number(ord.col25) || 0;
@@ -606,13 +613,11 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
 
     pairedShipments.push({
       id: `shipment-${ord.id}`,
-      doOrder: !isWB ? ord : undefined,
-      weighbridgeOrder: isWB ? ord : undefined,
-      weighbridgeOrders: isWB ? [ord] : undefined,
+      doOrder: ord,
       effectiveQty,
       effectiveUnit,
       effectiveAmount,
-      matchType: isWB ? 'weighbridge_only' : 'do_only',
+      matchType: 'do_only',
       referenceDocNo: ord.referenceDocNo || ord.col6,
       linkedViaDocNo: ord.linkedViaDocNo,
       referenceSource: ord.referenceSource || (ord.col4 ? 'form_field' : 'notes')

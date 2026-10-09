@@ -20,7 +20,13 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { OrderRecord, PurchaseOrder, StoreMerchant } from '../types';
-import { isDocNumberMatch, extractDocReferences, resolveOriginWeighbridgePairs } from '../utils/poReconciliation';
+import {
+  isDocNumberMatch,
+  isExactDocNumberReference,
+  isDeliveryOrderPairingCandidate,
+  extractDocReferences,
+  resolveOriginWeighbridgePairs
+} from '../utils/poReconciliation';
 import { hasUnverifiedAutoActions, getOrderAutoFlagSummary } from '../utils/systemConfig';
 
 const extractGoogleDriveFileId = (imageUrl?: string | null): string | undefined => {
@@ -313,30 +319,66 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
   const candidateDOsForDestMatch = useMemo(() => {
     if (!matchingDestTicket) return [];
-    const destPlate = (matchingDestTicket.col10 || '').replace(/[^0-9ก-ฮa-zA-Z]/g, '');
-    const destRef = (matchingDestTicket.referenceDocNo || '').trim();
-    
-    // Sort candidates: candidate with matching referenceDocNo or same plate first, then other orders without dest weights
+    const ticketRefs = [
+      matchingDestTicket.referenceDocNo,
+      ...extractDocReferences(matchingDestTicket.col38).doNumbers
+    ].filter(Boolean) as string[];
     return orders
-      .filter(o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice' && Number(o.col18) === 0)
+      .filter(order => {
+        if (
+          !isDeliveryOrderPairingCandidate(order) ||
+          order.status !== 'verified' ||
+          !order.col1.trim() ||
+          !order.col6.trim()
+        ) {
+          return false;
+        }
+        const isCurrentAutoCandidate =
+          matchingDestTicket.destMatchStatus === 'auto_flagged' &&
+          order.matchedDestTicketId === matchingDestTicket.id;
+        if (
+          !isCurrentAutoCandidate &&
+          (order.matchedDestTicketId ||
+            order.col17 ||
+            Number(order.col18) > 0 ||
+            Number(order.col19) > 0 ||
+            Number(order.col20) > 0)
+        ) {
+          return false;
+        }
+        return !allDestTickets.some(ticket =>
+          ticket.id !== matchingDestTicket.id &&
+          (ticket.matchedDestTicketId === order.id ||
+            Boolean(ticket.linkedViaDocNo && isExactDocNumberReference(ticket.linkedViaDocNo, order.col6)))
+        );
+      })
       .sort((a, b) => {
-        const aRefMatch = Boolean(destRef && (isDocNumberMatch(destRef, a.col6) || isDocNumberMatch(destRef, a.col1)));
-        const bRefMatch = Boolean(destRef && (isDocNumberMatch(destRef, b.col6) || isDocNumberMatch(destRef, b.col1)));
+        const aRefMatch = ticketRefs.some(ref => isExactDocNumberReference(ref, a.col6));
+        const bRefMatch = ticketRefs.some(ref => isExactDocNumberReference(ref, b.col6));
         if (aRefMatch && !bRefMatch) return -1;
         if (!aRefMatch && bRefMatch) return 1;
-
-        const aPlate = (a.col10 || '').replace(/[^0-9ก-ฮa-zA-Z]/g, '');
-        const bPlate = (b.col10 || '').replace(/[^0-9ก-ฮa-zA-Z]/g, '');
-        const aMatch = destPlate && aPlate && (aPlate === destPlate || aPlate.includes(destPlate));
-        const bMatch = destPlate && bPlate && (bPlate === destPlate || bPlate.includes(destPlate));
-        if (aMatch && !bMatch) return -1;
-        if (!aMatch && bMatch) return 1;
         return 0;
       });
-  }, [orders, matchingDestTicket]);
+  }, [allDestTickets, orders, matchingDestTicket]);
+
+  const candidateDestTicketsForDO = useMemo(() => {
+    if (!matchingDOForDest) return [];
+    return allDestTickets.filter(ticket =>
+      !ticket.linkedViaDocNo ||
+      (ticket.destMatchStatus === 'auto_flagged' &&
+        ticket.matchedDestTicketId === matchingDOForDest.id)
+    );
+  }, [allDestTickets, matchingDOForDest]);
 
   const handleExecuteManualMatchDest = async (targetDO: OrderRecord) => {
     if (!matchingDestTicket) return;
+    if (
+      matchingDestTicket.status !== 'verified' ||
+      !candidateDOsForDestMatch.some(candidate => candidate.id === targetDO.id)
+    ) {
+      onNotifyError('จับคู่ไม่ได้: กรุณาเลือกใบ DO ที่ตรวจรับแล้วและยังไม่มีตั๋วปลายทางผูกอยู่');
+      return;
+    }
     const snap = matchingDestTicket.rawAiSnapshot;
     let grossD = Number(matchingDestTicket.col18) || Number(matchingDestTicket.col13) || Number(snap?.rawGrossWeightKg) || 0;
     let tareD = Number(matchingDestTicket.col19) || Number(matchingDestTicket.col14) || Number(snap?.rawTareWeightKg) || 0;
@@ -392,6 +434,23 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   // Reverse Manual Match: User clicks "ชนตั๋วปลายทาง" from a DO row in Zone 4 and picks an unlinked Dest Ticket
   const handleExecuteManualMatchDOToDest = async (destTicket: OrderRecord) => {
     if (!matchingDOForDest) return;
+    if (
+      !isDeliveryOrderPairingCandidate(matchingDOForDest) ||
+      matchingDOForDest.status !== 'verified' ||
+      !matchingDOForDest.col1.trim() ||
+      !matchingDOForDest.col6.trim() ||
+      !candidateDestTicketsForDO.some(ticket => ticket.id === destTicket.id)
+    ) {
+      onNotifyError('จับคู่ไม่ได้: ต้องเลือก DO ที่ตรวจรับแล้ว และตั๋วปลายทางที่ยังไม่ถูกผูกกับ DO อื่น');
+      return;
+    }
+    if (
+      matchingDOForDest.matchedDestTicketId &&
+      matchingDOForDest.matchedDestTicketId !== destTicket.id
+    ) {
+      onNotifyError('DO นี้มีตั๋วปลายทางผูกอยู่แล้ว กรุณายกเลิกคู่เดิมก่อนเลือกตั๋วใบใหม่');
+      return;
+    }
     const snap = destTicket.rawAiSnapshot;
     let grossD = Number(destTicket.col18) || Number(destTicket.col13) || Number(snap?.rawGrossWeightKg) || 0;
     let tareD = Number(destTicket.col19) || Number(destTicket.col14) || Number(snap?.rawTareWeightKg) || 0;
@@ -2828,11 +2887,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 🔗 เลขที่ DO อ้างอิงตรงกัน
                               </span>
                             )}
-                            {isPlateMatch && (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                                💡 ข้อมูลช่วยสังเกต (ชนมือ): ทะเบียนตรงกัน
-                              </span>
-                            )}
                           </div>
                           <div className="text-[11px] text-slate-600 flex flex-wrap gap-x-3 gap-y-0.5">
                             <span>วันที่: {cand.col7}</span>
@@ -3048,19 +3102,23 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
             </div>
 
             <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-              {allDestTickets.length === 0 ? (
+              {candidateDestTicketsForDO.length === 0 ? (
                 <div className="p-6 text-center bg-slate-50 rounded-xl border border-slate-200 text-slate-400 text-xs">
-                  ยังไม่มีตั๋วชั่งน้ำหนักปลายทางในระบบ (สามารถสแกนเพิ่มได้จากปุ่มสแกนบิลด้านบน)
+                  ไม่มีตั๋วปลายทางที่ยังไม่ถูกผูกกับ DO อื่น
                 </div>
               ) : (
-                allDestTickets.map(ticket => {
+                candidateDestTicketsForDO.map(ticket => {
                   const ticketRefs = extractDocReferences(ticket.col38);
                   const refList = [ticket.referenceDocNo, ...ticketRefs.doNumbers].filter(Boolean) as string[];
-                  const isRefMatch = Boolean(matchingDOForDest.col6 && refList.some(r => isDocNumberMatch(matchingDOForDest.col6, r)));
+                  const isRefMatch = Boolean(
+                    matchingDOForDest.col6 &&
+                    refList.some(ref => isExactDocNumberReference(matchingDOForDest.col6, ref))
+                  );
                   const isPlateMatch = Boolean(
                     matchingDOForDest.col10 &&
                     ticket.col10 &&
-                    matchingDOForDest.col10.replace(/[^0-9ก-ฮa-zA-Z]/g, '') === ticket.col10.replace(/[^0-9ก-ฮa-zA-Z]/g, '')
+                    matchingDOForDest.col10.replace(/[^0-9ก-ฮa-zA-Z]/g, '') ===
+                      ticket.col10.replace(/[^0-9ก-ฮa-zA-Z]/g, '')
                   );
                   return (
                     <div
@@ -3068,8 +3126,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                       className={`p-3 rounded-xl border transition flex flex-wrap items-center justify-between gap-2 text-xs ${
                         isRefMatch
                           ? 'bg-blue-50/80 border-blue-400 ring-1 ring-blue-300'
-                          : isPlateMatch
-                          ? 'bg-emerald-50/70 border-emerald-300'
                           : 'bg-white border-slate-200 hover:border-slate-300'
                       }`}
                     >
