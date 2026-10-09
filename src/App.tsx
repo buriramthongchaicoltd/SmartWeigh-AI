@@ -895,12 +895,18 @@ export default function App() {
         for (const file of moves) {
           const folderId = await moveDriveFile(file, normalizedRecord.col6);
           folderUpdates.push({ id: file.orderId, driveFolderId: folderId });
-          if (file.orderId === normalizedRecord.id) {
-            savedOrder = { ...savedOrder, driveFolderId: folderId, driveFileLocation: 'zone_02' };
-          }
         }
 
         if (folderUpdates.length > 0) {
+          const destinationFolderId = folderUpdates[0].driveFolderId;
+          if (folderUpdates.some(update => update.driveFolderId !== destinationFolderId)) {
+            throw new Error('ไฟล์ชุดเดียวกันถูกย้ายไปคนละโฟลเดอร์ Google Drive; ยกเลิกการบันทึกเพื่อป้องกัน Folder ID ไม่ตรงกัน');
+          }
+          savedOrder = {
+            ...savedOrder,
+            driveFolderId: destinationFolderId,
+            driveFileLocation: 'zone_02'
+          };
           const folderResult = await sendDoUpdate(savedOrder, folderUpdates.filter(update =>
             update.id !== normalizedRecord.id
           ));
