@@ -5115,6 +5115,168 @@ app.post('/api/orders/rollback-verification', async (req: Request, res: Response
   }
 });
 
+app.post('/api/orders/update-do', async (req: Request, res: Response) => {
+  const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const record = req.body?.record;
+  if (!orderId || !record || typeof record !== 'object' || Array.isArray(record) || record.id !== orderId) {
+    return res.status(400).json({ success: false, error: 'ข้อมูล DO สำหรับบันทึกไม่ครบหรือ ID ไม่ตรงกัน' });
+  }
+
+  const client = getSupabaseClient();
+  if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมบันทึกการแก้ไข DO' });
+
+  const updatedLinkedRows: Array<{
+    id: string;
+    previousLinkedViaDocNo: string | null;
+    linked_via_doc_no: string | null;
+  }> = [];
+  let savedDoId: string | undefined;
+  let oldDoNumber = '';
+  try {
+    const { data: existingDo, error: doLookupError } = await client
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (doLookupError) throw doLookupError;
+    if (!existingDo || !['delivery_order', 'concrete', 'full_logistics'].includes(String(existingDo.doc_type))) {
+      return res.status(404).json({ success: false, error: 'ไม่พบ DO ที่ต้องการแก้ไขในทะเบียน' });
+    }
+
+    const dbRow = mapOrderToSupabase(record);
+    const newDoNumber = String(dbRow.col6 || '').trim();
+    oldDoNumber = String(existingDo.col6 || '').trim();
+    if (!newDoNumber) return res.status(400).json({ success: false, error: 'กรุณาระบุเลขที่ DO / ใบส่งของก่อนบันทึก' });
+    dbRow.col6 = newDoNumber;
+    await assertNoDuplicateDocumentWrite(client, 'orders', dbRow);
+    const { data: duplicateDo, error: duplicateDoError } = await client
+      .from('orders')
+      .select('id')
+      .eq('doc_type', existingDo.doc_type)
+      .eq('col6', newDoNumber)
+      .eq('col8', existingDo.col8)
+      .neq('id', orderId)
+      .limit(1)
+      .maybeSingle();
+    if (duplicateDoError) throw duplicateDoError;
+    if (duplicateDo) {
+      return res.status(409).json({ success: false, error: `เลข DO ${newDoNumber} มีอยู่แล้วในทะเบียนของร้านนี้` });
+    }
+
+    await enforceImmutableTrNumbers(client, [dbRow]);
+    const { col1: _immutableTrNumber, created_at: _createdAt, ...doUpdate } = dbRow;
+
+    const plannedLinkedUpdates = new Map<string, {
+      previousLinkedViaDocNo: string | null;
+      linkedViaDocNo: string;
+    }>();
+    for (let offset = 0; ; offset += 500) {
+      const { data: linkedRows, error: linkedLookupError } = await client
+        .from('orders')
+        .select('id,doc_type,linked_via_doc_no,matched_dest_ticket_id,matched_origin_do_id')
+        .in('doc_type', ['weighbridge', 'dest_weighbridge', 'tax_invoice'])
+        .order('id', { ascending: true })
+        .range(offset, offset + 499);
+      if (linkedLookupError) throw linkedLookupError;
+      if (!linkedRows?.length) break;
+      for (const linkedRow of linkedRows) {
+        const linkedViaDocNo = typeof linkedRow.linked_via_doc_no === 'string'
+          ? linkedRow.linked_via_doc_no
+          : '';
+        const linkedById =
+          (linkedRow.doc_type === 'dest_weighbridge' && linkedRow.matched_dest_ticket_id === orderId) ||
+          (linkedRow.doc_type === 'weighbridge' && linkedRow.matched_origin_do_id === orderId);
+        let nextLinkedViaDocNo = linkedViaDocNo;
+        if (linkedRow.doc_type === 'tax_invoice') {
+          const references = linkedViaDocNo.split(',');
+          let changed = false;
+          nextLinkedViaDocNo = references.map(reference => {
+            if (oldDoNumber && reference.trim() === oldDoNumber) {
+              changed = true;
+              return reference.replace(reference.trim(), newDoNumber);
+            }
+            return reference;
+          }).join(',');
+          if (!changed) continue;
+        } else if (linkedById || (oldDoNumber && linkedViaDocNo.trim() === oldDoNumber)) {
+          nextLinkedViaDocNo = newDoNumber;
+        } else {
+          continue;
+        }
+        if (nextLinkedViaDocNo !== linkedViaDocNo) {
+          plannedLinkedUpdates.set(String(linkedRow.id), {
+            previousLinkedViaDocNo: typeof linkedRow.linked_via_doc_no === 'string'
+              ? linkedRow.linked_via_doc_no
+              : null,
+            linkedViaDocNo: nextLinkedViaDocNo
+          });
+        }
+      }
+      if (linkedRows.length < 500) break;
+    }
+
+    for (const [linkedId, linkedUpdate] of plannedLinkedUpdates) {
+      const { data: updatedRow, error: linkedUpdateError } = await client
+        .from('orders')
+        .update({ linked_via_doc_no: linkedUpdate.linkedViaDocNo, updated_at: new Date().toISOString() })
+        .eq('id', linkedId)
+        .select('id,linked_via_doc_no')
+        .maybeSingle();
+      if (linkedUpdateError) throw linkedUpdateError;
+      if (!updatedRow) throw new Error(`บันทึกเลขอ้างอิงของเอกสารที่เชื่อมโยง ${linkedId} ไม่สำเร็จ`);
+      updatedLinkedRows.push({
+        id: String(updatedRow.id),
+        previousLinkedViaDocNo: linkedUpdate.previousLinkedViaDocNo,
+        linked_via_doc_no: updatedRow.linked_via_doc_no || null
+      });
+    }
+
+    const { data: savedDo, error: doUpdateError } = await client
+      .from('orders')
+      .update(doUpdate)
+      .eq('id', orderId)
+      .select('*')
+      .single();
+    if (doUpdateError) throw doUpdateError;
+    savedDoId = String(savedDo.id);
+
+    return res.json({
+      success: true,
+      order: mapSupabaseToOrder(savedDo),
+      updatedLinkedOrders: updatedLinkedRows.map(row => ({
+        id: row.id,
+        linkedViaDocNo: row.linked_via_doc_no || ''
+      }))
+    });
+  } catch (error: any) {
+    const rollbackErrors: string[] = [];
+    for (const updatedRow of [...updatedLinkedRows].reverse()) {
+      const { error: rollbackError } = await client
+        .from('orders')
+        .update({
+          linked_via_doc_no: updatedRow.previousLinkedViaDocNo,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', updatedRow.id);
+      if (rollbackError) rollbackErrors.push(`${updatedRow.id}: ${rollbackError.message}`);
+    }
+    if (savedDoId) {
+      const { error: doRollbackError } = await client
+        .from('orders')
+        .update({ col6: oldDoNumber || null, updated_at: new Date().toISOString() })
+        .eq('id', savedDoId);
+      if (doRollbackError) rollbackErrors.push(`DO ${savedDoId}: ${doRollbackError.message}`);
+    }
+    console.error('[DO Update] Failed to save DO and linked references:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: rollbackErrors.length
+        ? `บันทึกแก้ไข DO ไม่ครบ และย้อนเลขอ้างอิงบางรายการไม่สำเร็จ: ${rollbackErrors.join(' | ')}`
+        : `บันทึกแก้ไข DO ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
 app.post('/api/orders/prepared-do-status', async (req: Request, res: Response) => {
   const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
   const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';

@@ -727,6 +727,48 @@ export default function App() {
     }
   }, [showToast]);
 
+  const persistOrderEdit = React.useCallback(async (
+    record: OrderRecord,
+    previousRecord?: OrderRecord
+  ): Promise<{ order: OrderRecord; linkedOrders: Array<{ id: string; linkedViaDocNo: string }> }> => {
+    const isDo = ['delivery_order', 'concrete', 'full_logistics'].includes(record.docType || '');
+    const normalizedRecord = isDo ? { ...record, col6: record.col6.trim() } : record;
+    const doNumberChanged = Boolean(
+      previousRecord &&
+      isDo &&
+      previousRecord.col6.trim() !== normalizedRecord.col6
+    );
+    const response = await fetch(
+      doNumberChanged ? '/api/orders/update-do' : '/api/database/save-record',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          doNumberChanged
+            ? { orderId: normalizedRecord.id, record: normalizedRecord }
+            : { table: 'orders', record: normalizedRecord }
+        )
+      }
+    );
+    const result = await response.json();
+    if (!response.ok || !result?.success) {
+      throw new Error(result?.error || `บันทึกการแก้ไขไม่สำเร็จ (HTTP ${response.status})`);
+    }
+    const linkedOrders = (Array.isArray(result.updatedLinkedOrders) ? result.updatedLinkedOrders : [])
+      .filter((linked: unknown): linked is { id: string; linkedViaDocNo: string } =>
+        typeof linked === 'object' &&
+        linked !== null &&
+        'id' in linked &&
+        typeof linked.id === 'string' &&
+        'linkedViaDocNo' in linked &&
+        typeof linked.linkedViaDocNo === 'string'
+      );
+    return {
+      order: doNumberChanged && result.order ? result.order as OrderRecord : normalizedRecord,
+      linkedOrders
+    };
+  }, []);
+
   const deleteLineInboxItem = React.useCallback(async (id: string): Promise<void> => {
     if (!currentPermissions.canDeleteOrder) {
       throw new Error(`บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์ลบรายการในกล่องพัก`);
@@ -2272,7 +2314,8 @@ export default function App() {
       }
     };
 
-    const isExistingRecord = orders.some(o => o.id === order.id);
+    const existingOrder = orders.find(o => o.id === order.id);
+    const isExistingRecord = Boolean(existingOrder);
     if (order.lineInboxId && !isExistingRecord) {
       const inboxItem = lineInbox.find(item => item.id === order.lineInboxId);
       if (!inboxItem) {
@@ -3065,16 +3108,6 @@ export default function App() {
     };
     const pairedOrderForConfirm = buildPairedWeighbridgeOrder(order);
 
-    // Zero-Junk Cleanup: Detect if image was replaced or deleted, and trash the old Google Drive file
-    if (isExistingRecord) {
-      const prevOrder = orders.find(o => o.id === order.id);
-      if (prevOrder && prevOrder.driveFileId) {
-        if (!order.image || (order.image && order.image !== prevOrder.image)) {
-          triggerDriveCleanup({ mode: 'delete_old_file', oldFileId: prevOrder.driveFileId });
-        }
-      }
-    }
-
     let stagedOrderForSave: OrderRecord | undefined;
     let savedOrdersForFinancials = orders;
     reportProgress({ stepId: 'save_record', status: 'running', detail: 'กำลังบันทึกทะเบียนเอกสารและยืนยันสถานะ LINE' });
@@ -3559,6 +3592,42 @@ export default function App() {
         const fullReason = `${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`;
         reportProgress({ stepId: 'save_record', status: 'error', detail: fullReason });
         showToast(`ขั้นตอนบันทึกไม่ครบ: ${fullReason}`, 'error');
+        return false;
+      }
+    }
+
+    if (isExistingRecord && existingOrder && stagedOrderForSave) {
+      try {
+        const persisted = await persistOrderEdit(stagedOrderForSave, existingOrder);
+        stagedOrderForSave = persisted.order;
+        const linkedUpdates = new Map(
+          persisted.linkedOrders.map(linked => [linked.id, linked.linkedViaDocNo])
+        );
+        savedOrdersForFinancials = reconcileAndHealOrders(savedOrdersForFinancials.map(item => {
+          if (item.id === persisted.order.id) return persisted.order;
+          const linkedViaDocNo = linkedUpdates.get(item.id);
+          return linkedViaDocNo !== undefined ? { ...item, linkedViaDocNo } : item;
+        }));
+        if (persisted.linkedOrders.length > 0) {
+          setOrders(previous => reconcileAndHealOrders(previous.map(item => {
+            if (item.id === persisted.order.id) return persisted.order;
+            const linkedViaDocNo = linkedUpdates.get(item.id);
+            return linkedViaDocNo !== undefined ? { ...item, linkedViaDocNo } : item;
+          })));
+        }
+        if (
+          existingOrder.driveFileId &&
+          (!order.image || order.image !== existingOrder.image)
+        ) {
+          triggerDriveCleanup({ mode: 'delete_old_file', oldFileId: existingOrder.driveFileId });
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'บันทึกการแก้ไขไม่สำเร็จ';
+        setOrders(previous => previous.map(item =>
+          item.id === existingOrder.id ? existingOrder : item
+        ));
+        reportProgress({ stepId: 'save_record', status: 'error', detail: reason });
+        showToast(`บันทึกการแก้ไขไม่ได้: ${reason} ข้อมูลเดิมยังคงอยู่`, 'error');
         return false;
       }
     }
@@ -4110,21 +4179,41 @@ export default function App() {
   };
 
   // Update order inline
-  const handleUpdateOrder = (updatedOrder: OrderRecord) => {
+  const handleUpdateOrder = async (updatedOrder: OrderRecord): Promise<void> => {
     if (!currentPermissions.canEditOrder) {
       showToast(`🚫 บัญชีของคุณ (${currentPermissions.label}) ไม่มีสิทธิ์แก้ไขบิล`, 'info');
       return;
     }
-    setOrders(prev => {
-      const nextOrders = reconcileAndHealOrders(
-        prev.map(o =>
-          o.id === updatedOrder.id ? { ...updatedOrder, updatedBy: currentUser.fullName } : o
-        )
+    const previousOrder = orders.find(order => order.id === updatedOrder.id);
+    if (!previousOrder) {
+      showToast('ไม่พบเอกสารเดิมในทะเบียน จึงบันทึกการแก้ไขไม่ได้ กรุณาโหลดข้อมูลใหม่', 'error');
+      return;
+    }
+
+    try {
+      const orderToSave = { ...updatedOrder, updatedBy: currentUser.fullName };
+      const persisted = await persistOrderEdit(orderToSave, previousOrder);
+      const savedOrder = persisted.order;
+      const linkedReferenceUpdates = new Map<string, string>(
+        persisted.linkedOrders.map(linked => [linked.id, linked.linkedViaDocNo])
       );
-      setStores(prevStores => syncStoreFinancials(prevStores, nextOrders));
-      return nextOrders;
-    });
-    showToast('อัปเดตรายการเรียบร้อยแล้ว');
+      setOrders(previous => {
+        const nextOrders = reconcileAndHealOrders(previous.map(order => {
+          if (order.id === savedOrder.id) return savedOrder;
+          const linkedViaDocNo = linkedReferenceUpdates.get(order.id);
+          return linkedViaDocNo !== undefined ? { ...order, linkedViaDocNo } : order;
+        }));
+        setStores(prevStores => syncStoreFinancials(prevStores, nextOrders));
+        return nextOrders;
+      });
+      showToast(savedOrder.col6 !== previousOrder.col6
+        ? `แก้เลขที่ DO เป็น ${savedOrder.col6} และอัปเดตเอกสารที่เชื่อมโยงแล้ว`
+        : 'อัปเดตและบันทึกรายการเรียบร้อยแล้ว');
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+      console.error('[Order Edit] Failed to persist edited order:', error);
+      showToast(`บันทึกการแก้ไขไม่ได้: ${reason} ข้อมูลเดิมในหน้าจอยังคงอยู่`, 'error');
+    }
   };
 
   // Inspect order in verification modal
