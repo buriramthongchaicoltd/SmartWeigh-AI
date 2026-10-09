@@ -388,8 +388,6 @@ export default function App() {
 
   // Central Database Fetcher: Loads from Supabase Cloud PostgreSQL
   const fetchDatabaseData = React.useCallback(async () => {
-    ordersAutosaveReadyRef.current = false;
-    ordersHydrationSnapshotRef.current = null;
     setIsSyncingDb(true);
     try {
       const res = await fetch('/api/database/sync-all', { method: 'POST' });
@@ -414,8 +412,6 @@ export default function App() {
         // Always load all records directly from Supabase Cloud PostgreSQL
         if (!queryErrors.orders && Array.isArray(d.orders)) {
           const hydratedOrders = reconcileAndHealOrders(d.orders);
-          ordersHydrationSnapshotRef.current = hydratedOrders;
-          ordersAutosaveReadyRef.current = true;
           setOrders(hydratedOrders);
         }
         if (!queryErrors.purchase_orders && Array.isArray(d.pos)) setPos(d.pos);
@@ -457,8 +453,6 @@ export default function App() {
                 throw new Error(migrationResult?.error || `ย้ายข้อมูลเดิมขึ้นฐานข้อมูลไม่สำเร็จ (HTTP ${migrationResponse.status})`);
               }
               const hydratedOrders = reconcileAndHealOrders(localOrders);
-              ordersHydrationSnapshotRef.current = hydratedOrders;
-              ordersAutosaveReadyRef.current = true;
               setOrders(hydratedOrders);
               setStores(localStores);
               setPos(localPos);
@@ -625,8 +619,6 @@ export default function App() {
 
   // Toast Notification
   const failedDbSyncTablesRef = useRef(new Set<string>());
-  const ordersAutosaveReadyRef = useRef(false);
-  const ordersHydrationSnapshotRef = useRef<OrderRecord[] | null>(null);
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
@@ -852,15 +844,6 @@ export default function App() {
     showToast(`พบเลขที่เอกสารซ้ำ (${duplicate.reason}) ลบรายการและรูปออกจากกล่องพัก LINE แล้ว โดยไม่บันทึกเอกสารซ้ำ`, 'info');
     return true;
   }, [checkLineInboxDuplicate, deleteLineInboxItem, showToast]);
-
-  useEffect(() => {
-    if (!isDbLoaded || !ordersAutosaveReadyRef.current) return;
-    if (ordersHydrationSnapshotRef.current) {
-      if (ordersHydrationSnapshotRef.current === orders) return;
-      ordersHydrationSnapshotRef.current = null;
-    }
-    debouncedSyncToDb('orders', orders);
-  }, [orders, isDbLoaded, debouncedSyncToDb]);
 
   useEffect(() => {
     if (!isDbLoaded) return;
@@ -4001,10 +3984,7 @@ export default function App() {
     await Promise.all(
       [...(dbSyncInFlightRef.current.orders || [])].map(request => request.catch(() => undefined))
     );
-    if (!(await deleteRecordFromDb('orders', id))) {
-      debouncedSyncToDb('orders', orders);
-      return;
-    }
+    if (!(await deleteRecordFromDb('orders', id))) return;
     setOrders(prev => {
       const target = prev.find(o => o.id === id);
       let remaining = prev.filter(o => o.id !== id);
@@ -5100,8 +5080,6 @@ export default function App() {
   }) => {
     if (cloudData.orders && Array.isArray(cloudData.orders)) {
       const hydratedOrders = reconcileAndHealOrders(cloudData.orders);
-      ordersHydrationSnapshotRef.current = hydratedOrders;
-      ordersAutosaveReadyRef.current = true;
       setOrders(hydratedOrders);
     }
     if (cloudData.pos && Array.isArray(cloudData.pos)) setPos(cloudData.pos);
