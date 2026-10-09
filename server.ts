@@ -5121,6 +5121,24 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
   if (!orderId || !record || typeof record !== 'object' || Array.isArray(record) || record.id !== orderId) {
     return res.status(400).json({ success: false, error: 'ข้อมูล DO สำหรับบันทึกไม่ครบหรือ ID ไม่ตรงกัน' });
   }
+  const requestedDriveFolderUpdates = Array.isArray(req.body?.driveFolderUpdates)
+    ? req.body.driveFolderUpdates as Array<{ id?: unknown; driveFolderId?: unknown }>
+    : [];
+  const driveFolderUpdates = new Map<string, string | null>();
+  for (const update of requestedDriveFolderUpdates) {
+    if (
+      !update ||
+      typeof update.id !== 'string' ||
+      (update.driveFolderId !== null &&
+        (typeof update.driveFolderId !== 'string' || !update.driveFolderId.trim()))
+    ) {
+      return res.status(400).json({ success: false, error: 'ข้อมูลตำแหน่งโฟลเดอร์ Drive ที่ต้องบันทึกไม่ถูกต้อง' });
+    }
+    driveFolderUpdates.set(
+      update.id,
+      typeof update.driveFolderId === 'string' ? update.driveFolderId.trim() : null
+    );
+  }
 
   const client = getSupabaseClient();
   if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมบันทึกการแก้ไข DO' });
@@ -5129,6 +5147,15 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
     id: string;
     previousLinkedViaDocNo: string | null;
     linked_via_doc_no: string | null;
+    previousDriveFolderId: string | null;
+    drive_folder_id: string | null;
+  }> = [];
+  const linkedDriveFiles: Array<{
+    id: string;
+    driveFileId: string;
+    docNumber: string;
+    docDate: string;
+    driveFolderId?: string | null;
   }> = [];
   let savedDoId: string | undefined;
   let oldDoNumber = '';
@@ -5169,17 +5196,35 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
     const plannedLinkedUpdates = new Map<string, {
       previousLinkedViaDocNo: string | null;
       linkedViaDocNo: string;
+      previousDriveFolderId: string | null;
+      driveFolderId?: string | null;
     }>();
     for (let offset = 0; ; offset += 500) {
       const { data: linkedRows, error: linkedLookupError } = await client
         .from('orders')
-        .select('id,doc_type,linked_via_doc_no,matched_dest_ticket_id,matched_origin_do_id')
+        .select('id,doc_type,col1,col6,col7,drive_file_id,drive_folder_id,linked_via_doc_no,matched_dest_ticket_id,matched_origin_do_id')
         .in('doc_type', ['weighbridge', 'dest_weighbridge', 'tax_invoice'])
         .order('id', { ascending: true })
         .range(offset, offset + 499);
       if (linkedLookupError) throw linkedLookupError;
       if (!linkedRows?.length) break;
       for (const linkedRow of linkedRows) {
+        if (
+          linkedRow.doc_type === 'weighbridge' &&
+          linkedRow.matched_origin_do_id === orderId &&
+          typeof linkedRow.drive_file_id === 'string' &&
+          linkedRow.drive_file_id.trim()
+        ) {
+          linkedDriveFiles.push({
+            id: String(linkedRow.id),
+            driveFileId: linkedRow.drive_file_id,
+            docNumber: String(linkedRow.col6 || linkedRow.col1 || ''),
+            docDate: String(linkedRow.col7 || ''),
+            driveFolderId: typeof linkedRow.drive_folder_id === 'string'
+              ? linkedRow.drive_folder_id
+              : undefined
+          });
+        }
         const linkedViaDocNo = typeof linkedRow.linked_via_doc_no === 'string'
           ? linkedRow.linked_via_doc_no
           : '';
@@ -5203,31 +5248,55 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
         } else {
           continue;
         }
-        if (nextLinkedViaDocNo !== linkedViaDocNo) {
+        const requestedDriveFolderId =
+          linkedRow.doc_type === 'weighbridge' && linkedRow.matched_origin_do_id === orderId
+            ? driveFolderUpdates.get(String(linkedRow.id))
+            : undefined;
+        if (nextLinkedViaDocNo !== linkedViaDocNo || requestedDriveFolderId !== undefined) {
           plannedLinkedUpdates.set(String(linkedRow.id), {
             previousLinkedViaDocNo: typeof linkedRow.linked_via_doc_no === 'string'
               ? linkedRow.linked_via_doc_no
               : null,
-            linkedViaDocNo: nextLinkedViaDocNo
+            linkedViaDocNo: nextLinkedViaDocNo,
+            previousDriveFolderId: typeof linkedRow.drive_folder_id === 'string'
+              ? linkedRow.drive_folder_id
+              : null,
+            driveFolderId: requestedDriveFolderId
           });
         }
       }
       if (linkedRows.length < 500) break;
     }
+    const linkedIdsWithUpdates = new Set(plannedLinkedUpdates.keys());
+    for (const id of driveFolderUpdates.keys()) {
+      if (!linkedIdsWithUpdates.has(id)) {
+        throw new Error(`ไม่พบตั๋วชั่งต้นทาง ${id} ที่เชื่อมกับ DO นี้สำหรับอัปเดตตำแหน่ง Drive`);
+      }
+    }
 
     for (const [linkedId, linkedUpdate] of plannedLinkedUpdates) {
+      const databaseUpdate: Record<string, string | null> = {};
+      if (linkedUpdate.linkedViaDocNo !== linkedUpdate.previousLinkedViaDocNo) {
+        databaseUpdate.linked_via_doc_no = linkedUpdate.linkedViaDocNo;
+      }
+      if (linkedUpdate.driveFolderId !== undefined) {
+        databaseUpdate.drive_folder_id = linkedUpdate.driveFolderId;
+      }
+      databaseUpdate.updated_at = new Date().toISOString();
       const { data: updatedRow, error: linkedUpdateError } = await client
         .from('orders')
-        .update({ linked_via_doc_no: linkedUpdate.linkedViaDocNo, updated_at: new Date().toISOString() })
+        .update(databaseUpdate)
         .eq('id', linkedId)
-        .select('id,linked_via_doc_no')
+        .select('id,linked_via_doc_no,drive_folder_id')
         .maybeSingle();
       if (linkedUpdateError) throw linkedUpdateError;
       if (!updatedRow) throw new Error(`บันทึกเลขอ้างอิงของเอกสารที่เชื่อมโยง ${linkedId} ไม่สำเร็จ`);
       updatedLinkedRows.push({
         id: String(updatedRow.id),
         previousLinkedViaDocNo: linkedUpdate.previousLinkedViaDocNo,
-        linked_via_doc_no: updatedRow.linked_via_doc_no || null
+        linked_via_doc_no: updatedRow.linked_via_doc_no || null,
+        previousDriveFolderId: linkedUpdate.previousDriveFolderId,
+        drive_folder_id: updatedRow.drive_folder_id || null
       });
     }
 
@@ -5245,8 +5314,10 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
       order: mapSupabaseToOrder(savedDo),
       updatedLinkedOrders: updatedLinkedRows.map(row => ({
         id: row.id,
-        linkedViaDocNo: row.linked_via_doc_no || ''
-      }))
+        linkedViaDocNo: row.linked_via_doc_no || '',
+        driveFolderId: row.drive_folder_id || undefined
+      })),
+      linkedDriveFiles
     });
   } catch (error: any) {
     const rollbackErrors: string[] = [];
@@ -5255,6 +5326,7 @@ app.post('/api/orders/update-do', async (req: Request, res: Response) => {
         .from('orders')
         .update({
           linked_via_doc_no: updatedRow.previousLinkedViaDocNo,
+          drive_folder_id: updatedRow.previousDriveFolderId,
           updated_at: new Date().toISOString()
         })
         .eq('id', updatedRow.id);

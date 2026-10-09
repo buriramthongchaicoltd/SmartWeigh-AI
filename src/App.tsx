@@ -730,7 +730,10 @@ export default function App() {
   const persistOrderEdit = React.useCallback(async (
     record: OrderRecord,
     previousRecord?: OrderRecord
-  ): Promise<{ order: OrderRecord; linkedOrders: Array<{ id: string; linkedViaDocNo: string }> }> => {
+  ): Promise<{
+    order: OrderRecord;
+    linkedOrders: Array<{ id: string; linkedViaDocNo: string; driveFolderId?: string }>;
+  }> => {
     const isDo = ['delivery_order', 'concrete', 'full_logistics'].includes(record.docType || '');
     const normalizedRecord = isDo ? { ...record, col6: record.col6.trim() } : record;
     const doNumberChanged = Boolean(
@@ -738,6 +741,79 @@ export default function App() {
       isDo &&
       previousRecord.col6.trim() !== normalizedRecord.col6
     );
+    const attemptedDriveMoves: Array<{
+      fileId: string;
+      docType: string;
+      docDate: string;
+      docNumber: string;
+      bundleTrNumber: string;
+      bundleDoNumber: string;
+      oldDriveFolderId?: string;
+      orderId: string;
+    }> = [];
+    let databaseUpdateMayHaveCommitted = false;
+    let changedLinkedDriveFiles: Array<{
+      id: string;
+      driveFileId: string;
+      docNumber: string;
+      docDate: string;
+      driveFolderId?: string;
+    }> = [];
+    let firstResult: any;
+
+    const sendDoUpdate = async (
+      updatedRecord: OrderRecord,
+      driveFolderUpdates: Array<{ id: string; driveFolderId: string | null }> = []
+    ) => {
+      const response = await fetch('/api/orders/update-do', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orderId: updatedRecord.id,
+          record: updatedRecord,
+          driveFolderUpdates
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || `บันทึกการแก้ไขไม่สำเร็จ (HTTP ${response.status})`);
+      }
+      return result;
+    };
+
+    const moveDriveFile = async (
+      file: {
+        fileId: string;
+        docType: string;
+        docDate: string;
+        docNumber: string;
+        bundleTrNumber: string;
+        bundleDoNumber: string;
+        oldDriveFolderId?: string;
+        orderId: string;
+      },
+      bundleDoNumber: string
+    ): Promise<string> => {
+      attemptedDriveMoves.push(file);
+      const response = await fetch('/api/drive/rename-and-move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileId: file.fileId,
+          docType: file.docType,
+          docDate: file.docDate,
+          docNumber: file.docNumber,
+          bundleTrNumber: file.bundleTrNumber,
+          bundleDoNumber
+        })
+      });
+      const result = await response.json();
+      if (!response.ok || !result?.success || typeof result.targetFolderId !== 'string') {
+        throw new Error(result?.error || `จัดโฟลเดอร์ Google Drive ของ ${file.docNumber} ไม่สำเร็จ`);
+      }
+      return result.targetFolderId;
+    };
+
     const response = await fetch(
       doNumberChanged ? '/api/orders/update-do' : '/api/database/save-record',
       {
@@ -750,21 +826,146 @@ export default function App() {
         )
       }
     );
-    const result = await response.json();
-    if (!response.ok || !result?.success) {
-      throw new Error(result?.error || `บันทึกการแก้ไขไม่สำเร็จ (HTTP ${response.status})`);
+    firstResult = await response.json();
+    if (!response.ok || !firstResult?.success) {
+      throw new Error(firstResult?.error || `บันทึกการแก้ไขไม่สำเร็จ (HTTP ${response.status})`);
     }
-    const linkedOrders = (Array.isArray(result.updatedLinkedOrders) ? result.updatedLinkedOrders : [])
-      .filter((linked: unknown): linked is { id: string; linkedViaDocNo: string } =>
+    if (doNumberChanged) {
+      databaseUpdateMayHaveCommitted = true;
+      changedLinkedDriveFiles = Array.isArray(firstResult.linkedDriveFiles)
+        ? firstResult.linkedDriveFiles.filter((file: unknown): file is {
+            id: string;
+            driveFileId: string;
+            docNumber: string;
+            docDate: string;
+            driveFolderId?: string;
+          } =>
+            typeof file === 'object' &&
+            file !== null &&
+            'id' in file && typeof file.id === 'string' &&
+            'driveFileId' in file && typeof file.driveFileId === 'string' &&
+            'docNumber' in file && typeof file.docNumber === 'string' &&
+            'docDate' in file && typeof file.docDate === 'string'
+          )
+        : [];
+    }
+
+    let savedOrder: OrderRecord = doNumberChanged && firstResult.order
+      ? firstResult.order as OrderRecord
+      : normalizedRecord;
+    let linkedOrders: Array<{ id: string; linkedViaDocNo: string; driveFolderId?: string }> =
+      (Array.isArray(firstResult.updatedLinkedOrders) ? firstResult.updatedLinkedOrders : [])
+      .filter((linked: unknown): linked is { id: string; linkedViaDocNo: string; driveFolderId?: string } =>
         typeof linked === 'object' &&
         linked !== null &&
         'id' in linked &&
         typeof linked.id === 'string' &&
         'linkedViaDocNo' in linked &&
-        typeof linked.linkedViaDocNo === 'string'
+        typeof linked.linkedViaDocNo === 'string' &&
+        (!('driveFolderId' in linked) || typeof linked.driveFolderId === 'string')
       );
+
+    if (doNumberChanged && previousRecord) {
+      try {
+        const moves = [
+          ...(savedOrder.driveFileId
+            ? [{
+                id: savedOrder.id,
+                fileId: savedOrder.driveFileId,
+                docType: savedOrder.docType || 'delivery_order',
+                docDate: savedOrder.col7,
+                docNumber: savedOrder.col6,
+                bundleTrNumber: savedOrder.col1,
+                bundleDoNumber: normalizedRecord.col6,
+                oldDriveFolderId: previousRecord.driveFolderId,
+                orderId: savedOrder.id
+              }]
+            : []),
+          ...changedLinkedDriveFiles.map(file => ({
+            ...file,
+            fileId: file.driveFileId,
+            docType: 'weighbridge',
+            bundleTrNumber: normalizedRecord.col1,
+            bundleDoNumber: normalizedRecord.col6,
+            oldDriveFolderId: file.driveFolderId,
+            orderId: file.id
+          }))
+        ];
+        const folderUpdates: Array<{ id: string; driveFolderId: string }> = [];
+        for (const file of moves) {
+          const folderId = await moveDriveFile(file, normalizedRecord.col6);
+          folderUpdates.push({ id: file.orderId, driveFolderId: folderId });
+          if (file.orderId === normalizedRecord.id) {
+            savedOrder = { ...savedOrder, driveFolderId: folderId, driveFileLocation: 'zone_02' };
+          }
+        }
+
+        if (folderUpdates.length > 0) {
+          const folderResult = await sendDoUpdate(savedOrder, folderUpdates.filter(update =>
+            update.id !== normalizedRecord.id
+          ));
+          savedOrder = folderResult.order ? folderResult.order as OrderRecord : savedOrder;
+          if (Array.isArray(folderResult.updatedLinkedOrders)) {
+            const persistedLinkedOrders = folderResult.updatedLinkedOrders
+              .filter((linked: unknown): linked is { id: string; linkedViaDocNo: string; driveFolderId?: string } =>
+                typeof linked === 'object' &&
+                linked !== null &&
+                'id' in linked &&
+                typeof linked.id === 'string' &&
+                'linkedViaDocNo' in linked &&
+                typeof linked.linkedViaDocNo === 'string' &&
+                (!('driveFolderId' in linked) || typeof linked.driveFolderId === 'string')
+              );
+            const mergedLinks = new Map<string, {
+              id: string;
+              linkedViaDocNo: string;
+              driveFolderId?: string;
+            }>(linkedOrders.map(linked => [linked.id, linked]));
+            for (const linked of persistedLinkedOrders) {
+              const existingLink = mergedLinks.get(linked.id);
+              mergedLinks.set(linked.id, existingLink ? { ...existingLink, ...linked } : linked);
+            }
+            linkedOrders = Array.from(mergedLinks.values());
+          }
+        }
+      } catch (error) {
+        const rollbackErrors: string[] = [];
+        for (const file of [...attemptedDriveMoves].reverse()) {
+          try {
+            const rollbackFile = {
+              ...file,
+              docNumber: file.orderId === normalizedRecord.id
+                ? previousRecord.col6
+                : file.docNumber,
+              bundleDoNumber: previousRecord.col6
+            };
+            await moveDriveFile(rollbackFile, previousRecord.col6);
+          } catch (rollbackError) {
+            rollbackErrors.push(
+              rollbackError instanceof Error ? rollbackError.message : `กู้คืน Google Drive ${file.fileId} ไม่สำเร็จ`
+            );
+          }
+        }
+        if (databaseUpdateMayHaveCommitted) {
+          try {
+            const previousLinkedFolders = changedLinkedDriveFiles
+              .map(file => ({ id: file.id, driveFolderId: file.driveFolderId || null }));
+            await sendDoUpdate(previousRecord, previousLinkedFolders);
+          } catch (rollbackError) {
+            rollbackErrors.push(
+              rollbackError instanceof Error ? rollbackError.message : 'ย้อนข้อมูล DO ในฐานข้อมูลไม่สำเร็จ'
+            );
+          }
+        }
+        const reason = error instanceof Error ? error.message : 'จัดโฟลเดอร์ Google Drive ไม่สำเร็จ';
+        throw new Error(rollbackErrors.length
+          ? `${reason} และย้อนกลับไม่ครบ: ${rollbackErrors.join(' | ')}`
+          : `${reason} ระบบย้อนข้อมูลและไฟล์กลับสถานะเดิมแล้ว`);
+      }
+    }
+
     return {
-      order: doNumberChanged && result.order ? result.order as OrderRecord : normalizedRecord,
+      order: savedOrder,
       linkedOrders
     };
   }, []);
@@ -3601,20 +3802,30 @@ export default function App() {
         const persisted = await persistOrderEdit(stagedOrderForSave, existingOrder);
         stagedOrderForSave = persisted.order;
         const linkedUpdates = new Map(
-          persisted.linkedOrders.map(linked => [linked.id, linked.linkedViaDocNo])
+          persisted.linkedOrders.map(linked => [linked.id, linked])
         );
         savedOrdersForFinancials = reconcileAndHealOrders(savedOrdersForFinancials.map(item => {
           if (item.id === persisted.order.id) return persisted.order;
-          const linkedViaDocNo = linkedUpdates.get(item.id);
-          return linkedViaDocNo !== undefined ? { ...item, linkedViaDocNo } : item;
+          const linked = linkedUpdates.get(item.id);
+          return linked
+            ? {
+                ...item,
+                linkedViaDocNo: linked.linkedViaDocNo,
+                ...(linked.driveFolderId ? { driveFolderId: linked.driveFolderId, driveFileLocation: 'zone_02' as const } : {})
+              }
+            : item;
         }));
-        if (persisted.linkedOrders.length > 0) {
-          setOrders(previous => reconcileAndHealOrders(previous.map(item => {
-            if (item.id === persisted.order.id) return persisted.order;
-            const linkedViaDocNo = linkedUpdates.get(item.id);
-            return linkedViaDocNo !== undefined ? { ...item, linkedViaDocNo } : item;
-          })));
-        }
+        setOrders(previous => reconcileAndHealOrders(previous.map(item => {
+          if (item.id === persisted.order.id) return persisted.order;
+          const linked = linkedUpdates.get(item.id);
+          return linked
+            ? {
+                ...item,
+                linkedViaDocNo: linked.linkedViaDocNo,
+                ...(linked.driveFolderId ? { driveFolderId: linked.driveFolderId, driveFileLocation: 'zone_02' as const } : {})
+              }
+            : item;
+        })));
         if (
           existingOrder.driveFileId &&
           (!order.image || order.image !== existingOrder.image)
@@ -4194,20 +4405,26 @@ export default function App() {
       const orderToSave = { ...updatedOrder, updatedBy: currentUser.fullName };
       const persisted = await persistOrderEdit(orderToSave, previousOrder);
       const savedOrder = persisted.order;
-      const linkedReferenceUpdates = new Map<string, string>(
-        persisted.linkedOrders.map(linked => [linked.id, linked.linkedViaDocNo])
+      const linkedReferenceUpdates = new Map(
+        persisted.linkedOrders.map(linked => [linked.id, linked])
       );
       setOrders(previous => {
         const nextOrders = reconcileAndHealOrders(previous.map(order => {
           if (order.id === savedOrder.id) return savedOrder;
-          const linkedViaDocNo = linkedReferenceUpdates.get(order.id);
-          return linkedViaDocNo !== undefined ? { ...order, linkedViaDocNo } : order;
+          const linked = linkedReferenceUpdates.get(order.id);
+          return linked
+            ? {
+                ...order,
+                linkedViaDocNo: linked.linkedViaDocNo,
+                ...(linked.driveFolderId ? { driveFolderId: linked.driveFolderId, driveFileLocation: 'zone_02' as const } : {})
+              }
+            : order;
         }));
         setStores(prevStores => syncStoreFinancials(prevStores, nextOrders));
         return nextOrders;
       });
       showToast(savedOrder.col6 !== previousOrder.col6
-        ? `แก้เลขที่ DO เป็น ${savedOrder.col6} และอัปเดตเอกสารที่เชื่อมโยงแล้ว`
+        ? `แก้เลขที่ DO เป็น ${savedOrder.col6} และอัปเดตเอกสารกับ Google Drive ที่เชื่อมโยงแล้ว`
         : 'อัปเดตและบันทึกรายการเรียบร้อยแล้ว');
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
