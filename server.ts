@@ -345,7 +345,7 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
         user: authenticated.session.user,
         mustChangePassword: authenticated.session.firstPasswordChangePending
       })
-      : res.status(401).json({ success: false, error: 'กรุณาเข้าสู่ระบบ' });
+      : res.json({ success: true, authenticated: false, user: null });
   } catch (error) {
     console.error('[Auth] Session lookup failed:', error);
     return res.status(503).json({ success: false, error: 'ตรวจสอบ session ไม่ได้ กรุณาลองใหม่อีกครั้ง' });
