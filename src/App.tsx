@@ -615,6 +615,7 @@ export default function App() {
 
   // Toast Notification
   const failedDbSyncTablesRef = useRef(new Set<string>());
+  const ordersAutosaveInitializedRef = useRef(false);
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
@@ -843,6 +844,10 @@ export default function App() {
 
   useEffect(() => {
     if (!isDbLoaded) return;
+    if (!ordersAutosaveInitializedRef.current) {
+      ordersAutosaveInitializedRef.current = true;
+      return;
+    }
     debouncedSyncToDb('orders', orders);
   }, [orders, isDbLoaded, debouncedSyncToDb]);
 
