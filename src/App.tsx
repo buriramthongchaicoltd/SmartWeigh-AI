@@ -388,6 +388,8 @@ export default function App() {
 
   // Central Database Fetcher: Loads from Supabase Cloud PostgreSQL
   const fetchDatabaseData = React.useCallback(async () => {
+    ordersAutosaveReadyRef.current = false;
+    ordersHydrationSnapshotRef.current = null;
     setIsSyncingDb(true);
     try {
       const res = await fetch('/api/database/sync-all', { method: 'POST' });
@@ -410,7 +412,12 @@ export default function App() {
         }
 
         // Always load all records directly from Supabase Cloud PostgreSQL
-        if (!queryErrors.orders && Array.isArray(d.orders)) setOrders(reconcileAndHealOrders(d.orders));
+        if (!queryErrors.orders && Array.isArray(d.orders)) {
+          const hydratedOrders = reconcileAndHealOrders(d.orders);
+          ordersHydrationSnapshotRef.current = hydratedOrders;
+          ordersAutosaveReadyRef.current = true;
+          setOrders(hydratedOrders);
+        }
         if (!queryErrors.purchase_orders && Array.isArray(d.pos)) setPos(d.pos);
         if (!queryErrors.stores && Array.isArray(d.stores)) setStores(d.stores);
         if (!queryErrors.projects && Array.isArray(d.projects)) setProjects(d.projects);
@@ -449,7 +456,10 @@ export default function App() {
               if (!migrationResponse.ok || !migrationResult?.success) {
                 throw new Error(migrationResult?.error || `ย้ายข้อมูลเดิมขึ้นฐานข้อมูลไม่สำเร็จ (HTTP ${migrationResponse.status})`);
               }
-              setOrders(reconcileAndHealOrders(localOrders));
+              const hydratedOrders = reconcileAndHealOrders(localOrders);
+              ordersHydrationSnapshotRef.current = hydratedOrders;
+              ordersAutosaveReadyRef.current = true;
+              setOrders(hydratedOrders);
               setStores(localStores);
               setPos(localPos);
               setProjects(localProjects);
@@ -615,7 +625,8 @@ export default function App() {
 
   // Toast Notification
   const failedDbSyncTablesRef = useRef(new Set<string>());
-  const ordersAutosaveInitializedRef = useRef(false);
+  const ordersAutosaveReadyRef = useRef(false);
+  const ordersHydrationSnapshotRef = useRef<OrderRecord[] | null>(null);
 
   // Database Operations (100% Real Database Persistence - Supabase PostgreSQL)
   const saveDbTimerRef = React.useRef<Record<string, any>>({});
@@ -843,10 +854,10 @@ export default function App() {
   }, [checkLineInboxDuplicate, deleteLineInboxItem, showToast]);
 
   useEffect(() => {
-    if (!isDbLoaded) return;
-    if (!ordersAutosaveInitializedRef.current) {
-      ordersAutosaveInitializedRef.current = true;
-      return;
+    if (!isDbLoaded || !ordersAutosaveReadyRef.current) return;
+    if (ordersHydrationSnapshotRef.current) {
+      if (ordersHydrationSnapshotRef.current === orders) return;
+      ordersHydrationSnapshotRef.current = null;
     }
     debouncedSyncToDb('orders', orders);
   }, [orders, isDbLoaded, debouncedSyncToDb]);
@@ -5087,7 +5098,12 @@ export default function App() {
     users?: AppUser[];
     systemSettings?: SystemSettings;
   }) => {
-    if (cloudData.orders && Array.isArray(cloudData.orders)) setOrders(reconcileAndHealOrders(cloudData.orders));
+    if (cloudData.orders && Array.isArray(cloudData.orders)) {
+      const hydratedOrders = reconcileAndHealOrders(cloudData.orders);
+      ordersHydrationSnapshotRef.current = hydratedOrders;
+      ordersAutosaveReadyRef.current = true;
+      setOrders(hydratedOrders);
+    }
     if (cloudData.pos && Array.isArray(cloudData.pos)) setPos(cloudData.pos);
     if (cloudData.stores && Array.isArray(cloudData.stores)) setStores(cloudData.stores);
     if (cloudData.projects && Array.isArray(cloudData.projects)) setProjects(cloudData.projects);

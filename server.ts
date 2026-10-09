@@ -593,7 +593,8 @@ async function preserveRestrictedOrderFields(
 async function enforceImmutableTrNumbers(
   client: NonNullable<ReturnType<typeof getSupabaseClient>>,
   rows: Record<string, any>[],
-  allowedTrClearIds: Set<string> = new Set()
+  allowedTrClearIds: Set<string> = new Set(),
+  preserveExistingTrOnUpdate?: Set<string>
 ): Promise<Array<{ id: string; col1: string }>> {
   const existingRows = new Map<string, string>();
   for (let index = 0; index < rows.length; index += 500) {
@@ -625,6 +626,12 @@ async function enforceImmutableTrNumbers(
         console.warn(`[TR Guard] Restoring immutable TR from database for order ${id}`);
         row.col1 = persistedTrNumber;
         correctedTrNumbers.push({ id, col1: persistedTrNumber });
+      }
+      if (
+        preserveExistingTrOnUpdate &&
+        ['delivery_order', 'concrete', 'full_logistics'].includes(String(row.doc_type || ''))
+      ) {
+        preserveExistingTrOnUpdate.add(id);
       }
       continue;
     }
@@ -5582,10 +5589,11 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
       }
     }
     let correctedTrNumbers: Array<{ id: string; col1: string }> = [];
+    const immutableTrOrderIds = new Set<string>();
     if (targetTable === 'orders') {
       const authenticatedUser = getAuthenticatedUser(req);
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, rows);
-      correctedTrNumbers = await enforceImmutableTrNumbers(client, rows);
+      correctedTrNumbers = await enforceImmutableTrNumbers(client, rows, new Set(), immutableTrOrderIds);
     }
     const chunkSize = 50;
     for (let i = 0; i < rows.length; i += chunkSize) {
@@ -5601,8 +5609,25 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
         if (updateError) throw updateError;
         continue;
       }
-      const { error } = await client.from(targetTable).upsert(chunk, { onConflict: 'id' });
-      if (error) throw error;
+      if (targetTable === 'orders') {
+        const immutableTrRows = chunk.filter(row => immutableTrOrderIds.has(String(row.id)));
+        const upsertRows = chunk.filter(row => !immutableTrOrderIds.has(String(row.id)));
+        const updateResults = await Promise.all(
+          immutableTrRows.map(row => {
+            const { col1: _immutableTrNumber, ...updateRow } = row;
+            return client.from('orders').update(updateRow).eq('id', row.id);
+          })
+        );
+        const updateError = updateResults.find(result => result.error)?.error;
+        if (updateError) throw updateError;
+        if (upsertRows.length > 0) {
+          const { error } = await client.from(targetTable).upsert(upsertRows, { onConflict: 'id' });
+          if (error) throw error;
+        }
+      } else {
+        const { error } = await client.from(targetTable).upsert(chunk, { onConflict: 'id' });
+        if (error) throw error;
+      }
     }
 
     return res.json({
