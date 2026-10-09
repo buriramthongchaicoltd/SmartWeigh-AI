@@ -586,19 +586,34 @@ function handleVerifyDoFileLocation(payload) {
     var zone02Folder = getOrCreateSubfolder(rootFolder, ZONE_NAMES.ZONE_02);
     var file = DriveApp.getFileById(fileId);
     var parents = file.getParents();
+    var pendingFolders = [];
+    var checkedFolders = {};
     while (parents.hasNext()) {
-      var parent = parents.next();
-      if (parent.getId() === zone02Folder.getId()) {
+      pendingFolders.push({ id: parents.next().getId(), depth: 1 });
+    }
+
+    while (pendingFolders.length) {
+      var current = pendingFolders.shift();
+      if (current.id === zone02Folder.getId()) {
         return jsonResponse({ success: true, fileId: fileId, driveFileLocation: 'zone_02' });
       }
-      var grandparents = parent.getParents();
-      while (grandparents.hasNext()) {
-        if (grandparents.next().getId() === zone02Folder.getId()) {
-          return jsonResponse({ success: true, fileId: fileId, driveFileLocation: 'zone_02' });
-        }
+      if (checkedFolders[current.id] || current.depth >= 10) {
+        continue;
+      }
+      checkedFolders[current.id] = true;
+      var currentFolder = DriveApp.getFolderById(current.id);
+      var ancestors = currentFolder.getParents();
+      while (ancestors.hasNext()) {
+        pendingFolders.push({ id: ancestors.next().getId(), depth: current.depth + 1 });
       }
     }
-    return jsonResponse({ success: false, error: 'ไฟล์ DO ไม่ได้อยู่ในโฟลเดอร์ zone 02' });
+    return jsonResponse({
+      success: false,
+      error: 'ตรวจแล้ว แต่ไฟล์ DO ไม่ได้อยู่ใต้โฟลเดอร์ zone 02',
+      fileId: fileId,
+      zone02FolderId: zone02Folder.getId(),
+      checkedFolderIds: Object.keys(checkedFolders)
+    });
   } catch (e) {
     return jsonResponse({ success: false, error: 'ตรวจสอบตำแหน่งไฟล์ DO ไม่สำเร็จ: ' + e.toString() });
   }

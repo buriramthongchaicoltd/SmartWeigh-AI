@@ -718,7 +718,18 @@ async function verifyDriveFileInZone02(fileId: string): Promise<boolean> {
       rootFolderId: cfg.rootFolderId,
       fileId
     });
-    return Boolean(result?.success && result.driveFileLocation === 'zone_02');
+    if (!result?.success) {
+      throw new Error(
+        result?.error ||
+        'Google Apps Script ไม่รองรับการตรวจตำแหน่งไฟล์ DO; กรุณาอัปเดตและ Deploy Web App เวอร์ชันใหม่'
+      );
+    }
+    if (result.driveFileLocation !== 'zone_02') {
+      throw new Error(
+        `Google Apps Script ยืนยันตำแหน่งไฟล์ไม่ตรงกับ zone 02${result.driveFileLocation ? ` (พบ ${result.driveFileLocation})` : ''}`
+      );
+    }
+    return true;
   }
   if (!token) throw new Error('Google Drive ยังไม่พร้อมตรวจสอบไฟล์ใน zone 02');
 
@@ -731,22 +742,24 @@ async function verifyDriveFileInZone02(fileId: string): Promise<boolean> {
     throw new Error(`ตรวจสอบตำแหน่งไฟล์ใน Google Drive ไม่สำเร็จ: ${await fileResponse.text()}`);
   }
   const file = await fileResponse.json() as { id: string; parents?: string[] };
-  const parents = file.parents || [];
-  if (parents.includes(zones.ZONE_02)) return true;
-
-  for (const parentId of parents) {
+  const pendingFolders = (file.parents || []).map(id => ({ id, depth: 1 }));
+  const checkedFolders = new Set<string>();
+  while (pendingFolders.length > 0) {
+    const current = pendingFolders.shift()!;
+    if (current.id === zones.ZONE_02) return true;
+    if (checkedFolders.has(current.id) || current.depth >= 10) continue;
+    checkedFolders.add(current.id);
     const parentResponse = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(parentId)}?fields=id,mimeType,parents`,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(current.id)}?fields=id,mimeType,parents`,
       { headers: { Authorization: 'Bearer ' + token } }
     );
     if (!parentResponse.ok) {
       throw new Error(`ตรวจสอบโฟลเดอร์ไฟล์ใน Google Drive ไม่สำเร็จ: ${await parentResponse.text()}`);
     }
     const parent = await parentResponse.json() as { id: string; mimeType?: string; parents?: string[] };
-    if (
-      parent.mimeType === 'application/vnd.google-apps.folder' &&
-      (parent.parents || []).includes(zones.ZONE_02)
-    ) return true;
+    for (const ancestorId of parent.parents || []) {
+      pendingFolders.push({ id: ancestorId, depth: current.depth + 1 });
+    }
   }
   return false;
 }
