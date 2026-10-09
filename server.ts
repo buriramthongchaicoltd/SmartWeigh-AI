@@ -5004,12 +5004,116 @@ app.post('/api/orders/cancel-prepared-do', async (req: Request, res: Response) =
   }
 });
 
+app.post('/api/orders/rollback-verification', async (req: Request, res: Response) => {
+  const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+  const docType = typeof req.body?.docType === 'string' ? req.body.docType.trim() : '';
+  const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
+  const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
+  const pairedOrderId = typeof req.body?.pairedOrderId === 'string' ? req.body.pairedOrderId.trim() : '';
+  const pairedInboxId = typeof req.body?.pairedInboxId === 'string' ? req.body.pairedInboxId.trim() : '';
+  const supportedDocTypes: DocumentType[] = [
+    'delivery_order', 'concrete', 'full_logistics', 'dest_weighbridge', 'tax_invoice', 'weighbridge'
+  ];
+  if (!orderId || !supportedDocTypes.includes(docType as DocumentType)) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ Order ID และประเภทเอกสารที่รองรับเพื่อย้อนรายการตรวจรับ' });
+  }
+  if (Boolean(pairedOrderId) !== Boolean(pairedInboxId)) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุทั้ง ID ตั๋วชั่งต้นทางและ LINE Inbox ID คู่กัน' });
+  }
+
+  try {
+    const client = getSupabaseClient();
+    if (!client) {
+      return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมย้อนรายการตรวจรับ' });
+    }
+
+    const { data: existingOrder, error: lookupError } = await client
+      .from('orders')
+      .select('id,doc_type,status,line_inbox_id,col1')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (lookupError) throw lookupError;
+    let existingPair: {
+      id: string;
+      doc_type: string;
+      status: string;
+      line_inbox_id: string | null;
+      matched_origin_do_id: string | null;
+    } | null = null;
+    if (pairedOrderId) {
+      const { data, error } = await client
+        .from('orders')
+        .select('id,doc_type,status,line_inbox_id,matched_origin_do_id')
+        .eq('id', pairedOrderId)
+        .maybeSingle();
+      if (error) throw error;
+      existingPair = data;
+    }
+    if (existingPair && (
+      existingPair.doc_type !== 'weighbridge' ||
+      existingPair.line_inbox_id !== pairedInboxId ||
+      existingPair.matched_origin_do_id !== orderId ||
+      !['pending', 'verified'].includes(String(existingPair.status))
+    )) {
+      return res.status(409).json({
+        success: false,
+        error: 'ไม่ย้อนรายการ: ตั๋วชั่งที่พบไม่ได้เป็นรายการคู่ของ DO นี้'
+      });
+    }
+    if (existingOrder) {
+      if (
+        existingOrder.doc_type !== docType ||
+        existingOrder.line_inbox_id !== (inboxId || null) ||
+        (trNumber && existingOrder.col1 !== trNumber) ||
+        !['pending', 'verified'].includes(String(existingOrder.status))
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: 'ไม่ย้อนรายการ: พบเอกสารที่สถานะหรือข้อมูลอ้างอิงไม่ตรงกับรายการตรวจรับครั้งนี้'
+        });
+      }
+      const { data: deletedOrder, error: deleteOrderError } = await client
+        .from('orders')
+        .delete()
+        .eq('id', orderId)
+        .eq('doc_type', docType)
+        .eq('status', existingOrder.status)
+        .select('id')
+        .maybeSingle();
+      if (deleteOrderError) throw deleteOrderError;
+      if (!deletedOrder) throw new Error('สถานะเอกสารเปลี่ยนระหว่างย้อนข้อมูล กรุณาลองใหม่');
+    }
+    if (existingPair) {
+      const { data: deletedPair, error: deletePairError } = await client
+        .from('orders')
+        .delete()
+        .eq('id', pairedOrderId)
+        .eq('doc_type', 'weighbridge')
+        .eq('line_inbox_id', pairedInboxId)
+        .eq('matched_origin_do_id', orderId)
+        .eq('status', existingPair.status)
+        .select('id')
+        .maybeSingle();
+      if (deletePairError) throw deletePairError;
+      if (!deletedPair) throw new Error('สถานะตั๋วชั่งเปลี่ยนระหว่างย้อนข้อมูล กรุณาลองใหม่');
+    }
+
+    return res.json({ success: true, rolledBack: true, orderId, pairedOrderId: pairedOrderId || undefined });
+  } catch (error: any) {
+    console.error('[Order Rollback] Failed to remove partially verified documents:', error?.message || error);
+    return res.status(500).json({
+      success: false,
+      error: `ย้อนรายการเอกสารที่บันทึกค้างไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+    });
+  }
+});
+
 app.post('/api/orders/prepared-do-status', async (req: Request, res: Response) => {
   const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
   const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
   const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
-  if (!orderId || !trNumber) {
-    return res.status(400).json({ success: false, error: 'ต้องระบุ Order ID และเลข TR เพื่อตรวจสถานะ reservation' });
+  if (!orderId) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุ Order ID เพื่อตรวจสถานะ reservation' });
   }
 
   try {
@@ -5019,19 +5123,19 @@ app.post('/api/orders/prepared-do-status', async (req: Request, res: Response) =
     }
     const { data, error } = await client
       .from('orders')
-      .select('id,doc_type,status,line_inbox_id')
+      .select('id,col1,doc_type,status,line_inbox_id')
       .eq('id', orderId)
-      .eq('col1', trNumber)
       .maybeSingle();
     if (error) throw error;
     if (
       !data ||
+      (trNumber && data.col1 !== trNumber) ||
       !['delivery_order', 'concrete', 'full_logistics'].includes(data.doc_type) ||
       data.line_inbox_id !== (inboxId || null)
     ) {
       return res.status(404).json({ success: false, error: 'ไม่พบ reservation ที่ตรงกับ ID/TR/Inbox' });
     }
-    return res.json({ success: true, id: data.id, trNumber, status: data.status });
+    return res.json({ success: true, id: data.id, trNumber: data.col1, status: data.status });
   } catch (error: any) {
     console.error('[TR Queue] Failed to check prepared DO status:', error?.message || error);
     return res.status(500).json({

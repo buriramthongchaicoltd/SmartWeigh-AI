@@ -2301,6 +2301,7 @@ export default function App() {
     let pairedWeighbridgeInboxItem: LineBillInboxItem | undefined;
     let pairedWeighbridgeDriveLocation: OrderRecord['driveFileLocation'];
     let pairedWeighbridgeDriveFolderId: string | undefined;
+    const originalInboxItems = new Map<string, LineBillInboxItem>();
     const refreshInboxItem = async (inboxId: string): Promise<LineBillInboxItem> => {
       const response = await fetch('/api/line/inbox');
       const result = await response.json();
@@ -2425,6 +2426,10 @@ export default function App() {
         showToast(`ยังไม่ได้บันทึกเอกสาร: ${reason}`, 'error');
         return false;
       }
+      if (verifiedLineItem) originalInboxItems.set(verifiedLineItem.id, verifiedLineItem);
+      if (pairedWeighbridgeInboxItem) {
+        originalInboxItems.set(pairedWeighbridgeInboxItem.id, pairedWeighbridgeInboxItem);
+      }
     } else {
       reportProgress({ stepId: 'drive_check', status: 'skipped', detail: 'รายการนี้ไม่ต้องย้ายรูปจาก LINE' });
       reportProgress({ stepId: 'prepare_files', status: 'skipped', detail: 'ไม่มีรูปจาก LINE ที่ต้องเตรียม' });
@@ -2505,92 +2510,192 @@ export default function App() {
     }
 
     let preparedDoReservation: { orderId: string; trNumber: string } | undefined;
+    let localOrdersStaged = false;
     const movedInboxFiles: Array<{ inboxId: string; fileId: string }> = [];
-    const rollbackPreparedDoReservation = async (): Promise<string | undefined> => {
-      for (const movedFile of [...movedInboxFiles].reverse()) {
-        try {
-          const response = await fetch('/api/drive/restore-line-inbox-file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(movedFile)
-          });
-          const result = await response.json();
-          if (!response.ok || !result?.success || result.driveFileLocation !== 'zone_00') {
-            throw new Error(result?.error || `HTTP ${response.status}`);
+    const rollbackPreparedDoReservation = async (forceDatabaseRollback = false): Promise<string | undefined> => {
+      const rollbackErrors: string[] = [];
+      const mustRollbackDocuments = localOrdersStaged || Boolean(preparedDoReservation) || forceDatabaseRollback;
+      let documentsRolledBack = !mustRollbackDocuments;
+      if (mustRollbackDocuments) {
+        if (saveDbTimerRef.current.orders) {
+          clearTimeout(saveDbTimerRef.current.orders);
+          saveDbTimerRef.current.orders = undefined;
+        }
+        dbSyncGenerationRef.current.orders = (dbSyncGenerationRef.current.orders || 0) + 1;
+        await Promise.all(
+          [...(dbSyncInFlightRef.current.orders || [])].map(request => request.catch(() => undefined))
+        );
+        if (!isExistingRecord) {
+          const pairedOrderId = pairedWeighbridgeInboxItem
+            ? orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+              `line-wb-${pairedWeighbridgeInboxItem.id}`
+            : '';
+          let rollbackFailure = '';
+          for (let attempt = 0; attempt < 3 && !documentsRolledBack; attempt += 1) {
+            try {
+              const response = await fetch('/api/orders/rollback-verification', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  orderId: order.id,
+                  docType: order.docType,
+                  trNumber: preparedDoReservation?.trNumber || order.col1 || '',
+                  inboxId: order.lineInboxId || '',
+                  pairedOrderId,
+                  pairedInboxId: pairedWeighbridgeInboxItem?.id || ''
+                })
+              });
+              const result = await response.json();
+              if (!response.ok || !result?.success) {
+                throw new Error(result?.error || `HTTP ${response.status}`);
+              }
+              documentsRolledBack = true;
+              preparedDoReservation = undefined;
+            } catch (error) {
+              rollbackFailure = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+              if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
+            }
           }
-          const sourceItem = lineInbox.find(item => item.id === movedFile.inboxId);
-          if (!sourceItem) throw new Error('ไม่พบข้อมูลรายการต้นทางสำหรับคืนสถานะ LINE Inbox');
-          const restoredSourceItem: LineBillInboxItem = {
-            ...sourceItem,
-            driveFileLocation: 'zone_00',
-            driveFolderId: undefined
+          if (!documentsRolledBack) rollbackErrors.push(`ลบเอกสารที่บันทึกค้างไม่สำเร็จหลังลอง 3 ครั้ง: ${rollbackFailure}`);
+        }
+      }
+
+      const driveRestoreFailures = new Set<string>();
+      if (documentsRolledBack) {
+        for (const [inboxId, originalItem] of originalInboxItems) {
+          const pendingReviewItem: LineBillInboxItem = {
+            ...originalItem,
+            status: 'pending_review',
+            verifiedOrderId: undefined,
+            verifiedDocumentId: undefined,
+            verifiedBy: undefined,
+            verifiedAt: undefined,
+            driveFileLocation: originalItem.driveFileId ? 'zone_00' : originalItem.driveFileLocation,
+            driveFolderId: undefined,
+            driveSyncStatus: originalItem.driveFileId ? 'synced' : originalItem.driveSyncStatus
           };
-          const inboxResponse = await fetch('/api/database/save-record', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ table: 'line_inbox', record: restoredSourceItem })
-          });
-          const inboxResult = await inboxResponse.json();
-          if (!inboxResponse.ok || !inboxResult?.success) {
-            throw new Error(inboxResult?.error || `คืนสถานะ LINE Inbox ไม่สำเร็จ (HTTP ${inboxResponse.status})`);
+          let restoreFailure = '';
+          let restored = false;
+          for (let attempt = 0; attempt < 3 && !restored; attempt += 1) {
+            try {
+              const inboxResponse = await fetch('/api/database/save-record', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ table: 'line_inbox', record: pendingReviewItem })
+              });
+              const inboxResult = await inboxResponse.json();
+              if (!inboxResponse.ok || !inboxResult?.success) {
+                throw new Error(inboxResult?.error || `HTTP ${inboxResponse.status}`);
+              }
+              restored = true;
+            } catch (error) {
+              restoreFailure = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+              if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
+            }
           }
-          setLineInbox(previous => previous.map(item =>
-            item.id === movedFile.inboxId ? restoredSourceItem : item
-          ));
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-          return `คืนรูป ${movedFile.inboxId} เข้า LINE Inbox ไม่สำเร็จ (${reason}); reservation ยังคงอยู่เพื่อป้องกันข้อมูลคลาดเคลื่อน`;
+          if (!restored) rollbackErrors.push(`คืนรายการ ${inboxId} เป็นรอตรวจรับไม่สำเร็จหลังลอง 3 ครั้ง: ${restoreFailure}`);
+        }
+
+        for (const movedFile of [...movedInboxFiles].reverse()) {
+          let restoreFailure = '';
+          let restored = false;
+          for (let attempt = 0; attempt < 3 && !restored; attempt += 1) {
+            try {
+              const response = await fetch('/api/drive/restore-line-inbox-file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(movedFile)
+              });
+              const result = await response.json();
+              if (!response.ok || !result?.success || result.driveFileLocation !== 'zone_00') {
+                throw new Error(result?.error || `HTTP ${response.status}`);
+              }
+              restored = true;
+            } catch (error) {
+              restoreFailure = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+              if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 500 * (attempt + 1)));
+            }
+          }
+          if (!restored) {
+            driveRestoreFailures.add(movedFile.inboxId);
+            rollbackErrors.push(`คืนรูป ${movedFile.inboxId} เข้า LINE Inbox ไม่สำเร็จหลังลอง 3 ครั้ง: ${restoreFailure}`);
+            const originalItem = originalInboxItems.get(movedFile.inboxId);
+            if (originalItem) {
+              const uncertainDriveItem: LineBillInboxItem = {
+                ...originalItem,
+                status: 'pending_review',
+                verifiedOrderId: undefined,
+                verifiedDocumentId: undefined,
+                verifiedBy: undefined,
+                verifiedAt: undefined,
+                driveFileLocation: undefined,
+                driveFolderId: undefined,
+                driveSyncStatus: 'error'
+              };
+              try {
+                const response = await fetch('/api/database/save-record', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ table: 'line_inbox', record: uncertainDriveItem })
+                });
+                const result = await response.json();
+                if (!response.ok || !result?.success) {
+                  throw new Error(result?.error || `HTTP ${response.status}`);
+                }
+              } catch (error) {
+                rollbackErrors.push(`บันทึกสถานะรูป ${movedFile.inboxId} ที่ยังไม่ทราบตำแหน่งไม่สำเร็จ: ${error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`);
+              }
+            }
+          }
         }
       }
       movedInboxFiles.length = 0;
-      if (!preparedDoReservation) {
-        if (order.lineInboxId) protectedLineInboxIdsRef.current.delete(order.lineInboxId);
-        if (pairedWeighbridgeInboxItem) {
-          protectedLineInboxIdsRef.current.delete(pairedWeighbridgeInboxItem.id);
-        }
+      if (!isExistingRecord && documentsRolledBack) {
         setOrders(previous => previous.filter(item =>
           item.id !== order.id &&
           (!pairedWeighbridgeInboxItem || item.lineInboxId !== pairedWeighbridgeInboxItem.id)
         ));
-        return undefined;
       }
-      try {
-        const response = await fetch('/api/orders/cancel-prepared-do', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...preparedDoReservation,
-            inboxId: order.lineInboxId || '',
-            docType: order.docType
-          })
-        });
-        const result = await response.json();
-        if (!response.ok || !result?.success) {
-          throw new Error(result?.error || `HTTP ${response.status}`);
+      if (documentsRolledBack) {
+        for (const [inboxId, originalItem] of originalInboxItems) {
+          protectedLineInboxIdsRef.current.delete(inboxId);
+          setLineInbox(previous => {
+            const restoredItem: LineBillInboxItem = {
+              ...originalItem,
+              status: 'pending_review',
+              verifiedOrderId: undefined,
+              verifiedDocumentId: undefined,
+              verifiedBy: undefined,
+              verifiedAt: undefined,
+              driveFileLocation: driveRestoreFailures.has(inboxId)
+                ? undefined
+                : originalItem.driveFileId ? 'zone_00' : originalItem.driveFileLocation,
+              driveFolderId: undefined,
+              driveSyncStatus: driveRestoreFailures.has(inboxId)
+                ? 'error'
+                : originalItem.driveFileId ? 'synced' : originalItem.driveSyncStatus
+            };
+            const exists = previous.some(item => item.id === inboxId);
+            return exists
+              ? previous.map(item => item.id === inboxId ? restoredItem : item)
+              : [restoredItem, ...previous];
+          });
         }
-        preparedDoReservation = undefined;
-        protectedPreparedOrderIdsRef.current.delete(order.id);
-        if (order.lineInboxId) protectedLineInboxIdsRef.current.delete(order.lineInboxId);
-        if (pairedWeighbridgeInboxItem) {
-          protectedLineInboxIdsRef.current.delete(pairedWeighbridgeInboxItem.id);
-          protectedPreparedOrderIdsRef.current.delete(
-            orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
-            `line-wb-${pairedWeighbridgeInboxItem.id}`
-          );
-        }
-        setOrders(previous => previous.filter(item =>
-          item.id !== order.id &&
-          (!pairedWeighbridgeInboxItem || item.lineInboxId !== pairedWeighbridgeInboxItem.id)
-        ));
-        return undefined;
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-        return `ยกเลิกเลข TR ที่จองไว้ไม่สำเร็จ (${reason}); กรุณาอย่ากดยืนยันซ้ำและแจ้งผู้ดูแลระบบ`;
       }
+      if (documentsRolledBack) protectedPreparedOrderIdsRef.current.delete(order.id);
+      if (documentsRolledBack && pairedWeighbridgeInboxItem) {
+        protectedPreparedOrderIdsRef.current.delete(
+          orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+          `line-wb-${pairedWeighbridgeInboxItem.id}`
+        );
+      }
+      return rollbackErrors.length > 0
+        ? `ระบบย้อนกลับได้ไม่ครบ: ${rollbackErrors.join(' | ')}`
+        : undefined;
     };
 
     const needsTrReservation = (
-      (!isExistingRecord || !String(order.col1 || '').trim()) &&
+      !isExistingRecord &&
       ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || '')
     );
     reportProgress({
@@ -2635,8 +2740,42 @@ export default function App() {
         preparedDoReservation = { orderId: order.id, trNumber: result.trNumber };
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-        reportProgress({ stepId: 'reserve_tr', status: 'error', detail: reason });
-        showToast(`ยังไม่ได้ดำเนินการต่อ เพราะจัดคิวใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${reason}`, 'error');
+        let rollbackWarning: string | undefined;
+        try {
+          const statusResponse = await fetch('/api/orders/prepared-do-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              orderId: order.id,
+              inboxId: order.lineInboxId || ''
+            })
+          });
+          if (statusResponse.status === 404) {
+            protectedPreparedOrderIdsRef.current.delete(order.id);
+            if (pairedWeighbridgeInboxItem) {
+              protectedPreparedOrderIdsRef.current.delete(
+                orders.find(item => item.lineInboxId === pairedWeighbridgeInboxItem!.id)?.id ||
+                `line-wb-${pairedWeighbridgeInboxItem.id}`
+              );
+            }
+          } else {
+            const statusResult = await statusResponse.json();
+            if (!statusResponse.ok || !statusResult?.success || typeof statusResult.trNumber !== 'string') {
+              throw new Error(statusResult?.error || `ตรวจสถานะ reservation ไม่สำเร็จ (HTTP ${statusResponse.status})`);
+            }
+            preparedDoReservation = { orderId: order.id, trNumber: statusResult.trNumber };
+            rollbackWarning = await rollbackPreparedDoReservation();
+          }
+        } catch (rollbackError) {
+          rollbackWarning = rollbackError instanceof Error
+            ? `ตรวจ/ยกเลิก reservation หลังคำขอผิดพลาดไม่สำเร็จ: ${rollbackError.message}`
+            : 'ตรวจ/ยกเลิก reservation หลังคำขอผิดพลาดไม่สำเร็จ';
+          const cleanupWarning = await rollbackPreparedDoReservation(true);
+          if (cleanupWarning) rollbackWarning = `${rollbackWarning} | ${cleanupWarning}`;
+        }
+        const fullReason = `${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ''}`;
+        reportProgress({ stepId: 'reserve_tr', status: 'error', detail: fullReason });
+        showToast(`ยังไม่ได้ดำเนินการต่อ เพราะจัดคิวใบส่งของและกำหนดเลข TR ไม่สำเร็จ: ${fullReason}`, 'error');
         return false;
       }
     }
@@ -2750,6 +2889,7 @@ export default function App() {
         return false;
       }
       verifiedLineFileId = verifiedLineItem.driveFileId;
+      originalInboxItems.set(verifiedLineItem.id, verifiedLineItem);
 
       const targetZone: NonNullable<OrderRecord['driveFileLocation']> =
         order.docType === 'dest_weighbridge' ? 'zone_03' :
@@ -2936,7 +3076,10 @@ export default function App() {
       }
     }
 
+    let stagedOrderForSave: OrderRecord | undefined;
+    let savedOrdersForFinancials = orders;
     reportProgress({ stepId: 'save_record', status: 'running', detail: 'กำลังบันทึกทะเบียนเอกสารและยืนยันสถานะ LINE' });
+    localOrdersStaged = !isExistingRecord;
     setOrders(prev => {
       let workingList = [...prev];
       const previousOrder = isExistingRecord ? orders.find(existing => existing.id === order.id) : undefined;
@@ -3176,6 +3319,7 @@ export default function App() {
       }
 
       const idx = workingList.findIndex(o => o.id === orderToSave.id);
+      stagedOrderForSave = orderToSave;
       if (idx >= 0) {
         workingList[idx] = orderToSave;
       } else {
@@ -3188,60 +3332,10 @@ export default function App() {
       }
 
       workingList = reconcileAndHealOrders(workingList);
-
-      setStores(prevStores => {
-        let nextStores = [...prevStores];
-        if (storeToSave) {
-          const existingIdx = nextStores.findIndex(s => s.name.trim().toLowerCase() === storeToSave.name.trim().toLowerCase());
-          if (existingIdx >= 0) {
-            const prevGoods = nextStores[existingIdx].primaryGoods || [];
-            const incomingGoods = storeToSave.primaryGoods || (orderToSave.col11 ? [orderToSave.col11] : []);
-            const mergedGoods = Array.from(new Set([...prevGoods, ...incomingGoods.filter(Boolean)]));
-            nextStores[existingIdx] = {
-              ...nextStores[existingIdx],
-              ...storeToSave,
-              primaryGoods: mergedGoods,
-              id: nextStores[existingIdx].id
-            };
-          } else {
-            nextStores = [storeToSave, ...nextStores];
-          }
-        } else if (orderToSave.col8 && orderToSave.col11) {
-          const existingIdx = nextStores.findIndex(s => s.name.trim().toLowerCase() === orderToSave.col8.trim().toLowerCase());
-          if (existingIdx >= 0) {
-            const prevGoods = nextStores[existingIdx].primaryGoods || [];
-            if (!prevGoods.some(g => g.trim().toLowerCase() === orderToSave.col11.trim().toLowerCase())) {
-              nextStores[existingIdx] = {
-                ...nextStores[existingIdx],
-                primaryGoods: [...prevGoods, orderToSave.col11.trim()]
-              };
-            }
-          }
-        }
-        return syncStoreFinancials(nextStores, workingList);
-      });
+      savedOrdersForFinancials = workingList;
 
       return workingList;
     });
-
-    // If user entered a new project name (and didn't pick an existing one), register it as a new project in the database
-    if (order.col2 && order.col2.trim() && order.col2.trim() !== 'โครงการทั่วไป') {
-      const cleanProj = order.col2.trim();
-      setProjects(prev => {
-        const exists = prev.some(p => p.name.trim().toLowerCase() === cleanProj.toLowerCase());
-        if (exists) return prev;
-        return [
-          {
-            id: `proj-${Date.now()}`,
-            name: cleanProj,
-            location: order.col37 || '',
-            status: 'active',
-            createdAt: new Date().toISOString()
-          },
-          ...prev
-        ];
-      });
-    }
 
     if (!isExistingRecord && order.lineInboxId) {
       const sourceInboxItem = lineInbox.find(item => item.id === order.lineInboxId);
@@ -3265,7 +3359,7 @@ export default function App() {
         if (!await persistVerifiedInboxItem(
           verifiedInboxItem,
           'ยืนยันสถานะรายการในกล่องพัก LINE ไม่สำเร็จ',
-          Boolean(preparedDoReservation)
+          true
         )) {
           const rollbackWarning = await rollbackPreparedDoReservation();
           if (rollbackWarning) showToast(rollbackWarning, 'error');
@@ -3297,7 +3391,7 @@ export default function App() {
         if (!await persistVerifiedInboxItem(
           verifiedInboxItem,
           'ยืนยันสถานะตั๋วชั่งต้นทางในกล่องพัก LINE ไม่สำเร็จ',
-          Boolean(preparedDoReservation)
+          true
         )) {
           const rollbackWarning = await rollbackPreparedDoReservation();
           if (rollbackWarning) showToast(rollbackWarning, 'error');
@@ -3366,14 +3460,15 @@ export default function App() {
               : retryConfirmationError instanceof Error
                 ? retryConfirmationError.message
                 : 'ไม่ทราบสถานะ reservation';
+            const rollbackWarning = await rollbackPreparedDoReservation(true);
             showToast(
-              `ผลยืนยัน DO ยังไม่ชัดเจน; ไม่ได้คืนหรือยกเลิกรายการอัตโนมัติเพื่อป้องกันข้อมูลขัดแย้ง: ${reason} กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง`,
+              `ยืนยัน DO ไม่สำเร็จ: ${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`,
               'error'
             );
             reportProgress({
               stepId: 'save_record',
               status: 'error',
-              detail: `ผลยืนยัน DO ยังไม่ชัดเจน กรุณาตรวจสอบสถานะก่อนลองอีกครั้ง: ${reason}`
+              detail: `ยืนยัน DO ไม่สำเร็จ: ${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`
             });
             return false;
           }
@@ -3398,6 +3493,24 @@ export default function App() {
           return false;
         }
       }
+      setOrders(previous => previous.map(item =>
+        item.id === order.id ? { ...item, status: 'verified' } : item
+      ));
+      try {
+        if (order.lineInboxId && !await removeVerifiedLineInboxItem(order.lineInboxId)) {
+          throw new Error(`นำรายการ ${order.lineInboxId} ออกจากกล่องพักไม่สำเร็จ`);
+        }
+        if (pairedWeighbridgeInboxItem && !await removeVerifiedLineInboxItem(pairedWeighbridgeInboxItem.id)) {
+          throw new Error(`นำรายการตั๋วชั่ง ${pairedWeighbridgeInboxItem.id} ออกจากกล่องพักไม่สำเร็จ`);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'นำรายการที่ตรวจรับแล้วออกจากกล่องพักไม่สำเร็จ';
+        const rollbackWarning = await rollbackPreparedDoReservation(true);
+        const fullReason = `${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`;
+        reportProgress({ stepId: 'save_record', status: 'error', detail: fullReason });
+        showToast(`ขั้นตอนบันทึกไม่ครบ: ${fullReason}`, 'error');
+        return false;
+      }
       protectedPreparedOrderIdsRef.current.delete(order.id);
       if (pairedWeighbridgeInboxItem) {
         protectedPreparedOrderIdsRef.current.delete(
@@ -3406,13 +3519,99 @@ export default function App() {
         );
       }
       preparedDoReservation = undefined;
-      setOrders(previous => previous.map(item =>
-        item.id === order.id ? { ...item, status: 'verified' } : item
-      ));
-      if (order.lineInboxId) await removeVerifiedLineInboxItem(order.lineInboxId);
-      if (pairedWeighbridgeInboxItem) {
-        await removeVerifiedLineInboxItem(pairedWeighbridgeInboxItem.id);
+    }
+
+    if (!isExistingRecord && !preparedDoReservation) {
+      if (!stagedOrderForSave) {
+        const rollbackWarning = await rollbackPreparedDoReservation(true);
+        const reason = `เตรียมข้อมูลสำหรับบันทึกทะเบียนไม่สำเร็จ${rollbackWarning ? ` — ${rollbackWarning}` : ''}`;
+        reportProgress({ stepId: 'save_record', status: 'error', detail: reason });
+        showToast(reason, 'error');
+        return false;
       }
+      try {
+        const response = await fetch('/api/database/save-record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ table: 'orders', record: stagedOrderForSave })
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.success) {
+          throw new Error(result?.error || `HTTP ${response.status}`);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'บันทึกทะเบียนเอกสารไม่สำเร็จ';
+        const rollbackWarning = await rollbackPreparedDoReservation(true);
+        const fullReason = `${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`;
+        reportProgress({ stepId: 'save_record', status: 'error', detail: fullReason });
+        showToast(`บันทึกทะเบียนไม่สำเร็จ: ${fullReason}`, 'error');
+        return false;
+      }
+      try {
+        if (order.lineInboxId && !await removeVerifiedLineInboxItem(order.lineInboxId)) {
+          throw new Error(`นำรายการ ${order.lineInboxId} ออกจากกล่องพักไม่สำเร็จ`);
+        }
+        if (pairedWeighbridgeInboxItem && !await removeVerifiedLineInboxItem(pairedWeighbridgeInboxItem.id)) {
+          throw new Error(`นำรายการตั๋วชั่ง ${pairedWeighbridgeInboxItem.id} ออกจากกล่องพักไม่สำเร็จ`);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : 'นำรายการที่ตรวจรับแล้วออกจากกล่องพักไม่สำเร็จ';
+        const rollbackWarning = await rollbackPreparedDoReservation(true);
+        const fullReason = `${reason}${rollbackWarning ? ` — ${rollbackWarning}` : ' ระบบย้อนข้อมูลกลับสถานะเริ่มต้นแล้ว'}`;
+        reportProgress({ stepId: 'save_record', status: 'error', detail: fullReason });
+        showToast(`ขั้นตอนบันทึกไม่ครบ: ${fullReason}`, 'error');
+        return false;
+      }
+    }
+
+    setStores(prevStores => {
+      let nextStores = [...prevStores];
+      if (storeToSave) {
+        const existingIdx = nextStores.findIndex(s => s.name.trim().toLowerCase() === storeToSave.name.trim().toLowerCase());
+        if (existingIdx >= 0) {
+          const prevGoods = nextStores[existingIdx].primaryGoods || [];
+          const incomingGoods = storeToSave.primaryGoods || (stagedOrderForSave?.col11 ? [stagedOrderForSave.col11] : []);
+          const mergedGoods = Array.from(new Set([...prevGoods, ...incomingGoods.filter(Boolean)]));
+          nextStores[existingIdx] = {
+            ...nextStores[existingIdx],
+            ...storeToSave,
+            primaryGoods: mergedGoods,
+            id: nextStores[existingIdx].id
+          };
+        } else {
+          nextStores = [storeToSave, ...nextStores];
+        }
+      } else if (stagedOrderForSave?.col8 && stagedOrderForSave.col11) {
+        const existingIdx = nextStores.findIndex(
+          s => s.name.trim().toLowerCase() === stagedOrderForSave!.col8.trim().toLowerCase()
+        );
+        if (existingIdx >= 0) {
+          const prevGoods = nextStores[existingIdx].primaryGoods || [];
+          if (!prevGoods.some(g => g.trim().toLowerCase() === stagedOrderForSave!.col11.trim().toLowerCase())) {
+            nextStores[existingIdx] = {
+              ...nextStores[existingIdx],
+              primaryGoods: [...prevGoods, stagedOrderForSave.col11.trim()]
+            };
+          }
+        }
+      }
+      return syncStoreFinancials(nextStores, savedOrdersForFinancials);
+    });
+    if (order.col2 && order.col2.trim() && order.col2.trim() !== 'โครงการทั่วไป') {
+      const cleanProj = order.col2.trim();
+      setProjects(prev => {
+        if (prev.some(project => project.name.trim().toLowerCase() === cleanProj.toLowerCase())) return prev;
+        return [
+          {
+            id: `proj-${Date.now()}`,
+            name: cleanProj,
+            location: order.col37 || '',
+            status: 'active',
+            createdAt: new Date().toISOString()
+          },
+          ...prev
+        ];
+      });
     }
 
     // If this order was verified from the LINE OA Bot Inbox, mark the inbox item as verified
