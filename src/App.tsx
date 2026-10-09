@@ -741,6 +741,7 @@ export default function App() {
       isDo &&
       previousRecord.col6.trim() !== normalizedRecord.col6
     );
+    const updatingExistingDo = Boolean(previousRecord && isDo);
     const attemptedDriveMoves: Array<{
       fileId: string;
       docType: string;
@@ -815,12 +816,12 @@ export default function App() {
     };
 
     const response = await fetch(
-      doNumberChanged ? '/api/orders/update-do' : '/api/database/save-record',
+      updatingExistingDo ? '/api/orders/update-do' : '/api/database/save-record',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          doNumberChanged
+          updatingExistingDo
             ? { orderId: normalizedRecord.id, record: normalizedRecord }
             : { table: 'orders', record: normalizedRecord }
         )
@@ -850,7 +851,7 @@ export default function App() {
         : [];
     }
 
-    let savedOrder: OrderRecord = doNumberChanged && firstResult.order
+    let savedOrder: OrderRecord = updatingExistingDo && firstResult.order
       ? firstResult.order as OrderRecord
       : normalizedRecord;
     let linkedOrders: Array<{ id: string; linkedViaDocNo: string; driveFolderId?: string }> =
