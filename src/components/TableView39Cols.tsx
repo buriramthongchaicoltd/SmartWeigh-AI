@@ -29,6 +29,63 @@ import {
 } from '../utils/poReconciliation';
 import { hasUnverifiedAutoActions, getOrderAutoFlagSummary } from '../utils/systemConfig';
 
+const DOC_PREVIEW_CACHE_LIMIT_BYTES = 48 * 1024 * 1024;
+const docPreviewImageCache = new Map<string, { objectUrl: string; byteLength: number }>();
+const docPreviewImageRequests = new Map<string, Promise<string>>();
+let docPreviewImageCacheBytes = 0;
+
+const getCachedDocPreviewImage = (source: string) => {
+  const cached = docPreviewImageCache.get(source);
+  if (!cached) return undefined;
+  docPreviewImageCache.delete(source);
+  docPreviewImageCache.set(source, cached);
+  return cached.objectUrl;
+};
+
+const loadDocPreviewImage = (source: string) => {
+  const cachedUrl = getCachedDocPreviewImage(source);
+  if (cachedUrl) return Promise.resolve(cachedUrl);
+  const existingRequest = docPreviewImageRequests.get(source);
+  if (existingRequest) return existingRequest;
+
+  const request = fetch(source, { signal: AbortSignal.timeout(60000) })
+    .then(async response => {
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        throw new Error(result?.error || `โหลดภาพไม่สำเร็จ (HTTP ${response.status})`);
+      }
+      const image = await response.blob();
+      if (!image.type.startsWith('image/')) {
+        throw new Error(`ข้อมูลที่ได้รับไม่ใช่รูปภาพ (${image.type || 'ไม่ทราบชนิดไฟล์'})`);
+      }
+      return image;
+    })
+    .then(image => {
+      const objectUrl = URL.createObjectURL(image);
+      while (docPreviewImageCache.size && docPreviewImageCacheBytes + image.size > DOC_PREVIEW_CACHE_LIMIT_BYTES) {
+        const oldestSource = docPreviewImageCache.keys().next().value;
+        if (!oldestSource) break;
+        const oldestImage = docPreviewImageCache.get(oldestSource);
+        docPreviewImageCache.delete(oldestSource);
+        if (oldestImage) {
+          docPreviewImageCacheBytes -= oldestImage.byteLength;
+          URL.revokeObjectURL(oldestImage.objectUrl);
+        }
+      }
+      if (image.size <= DOC_PREVIEW_CACHE_LIMIT_BYTES) {
+        docPreviewImageCache.set(source, { objectUrl, byteLength: image.size });
+        docPreviewImageCacheBytes += image.size;
+      }
+      return objectUrl;
+    })
+    .finally(() => {
+      docPreviewImageRequests.delete(source);
+    });
+
+  docPreviewImageRequests.set(source, request);
+  return request;
+};
+
 const extractGoogleDriveFileId = (imageUrl?: string | null): string | undefined => {
   if (!imageUrl) return undefined;
   try {
@@ -212,34 +269,23 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       return;
     }
 
-    const controller = new AbortController();
-    let objectUrl: string | undefined;
-    setProxyImageUrl(null);
+    let active = true;
     setProxyImageError('');
+    const cachedImageUrl = getCachedDocPreviewImage(sourceUrl);
+    if (cachedImageUrl) {
+      setProxyImageUrl(cachedImageUrl);
+      return () => {
+        active = false;
+      };
+    }
+    setProxyImageUrl(null);
 
-    const requestSignal = AbortSignal.any([
-      controller.signal,
-      AbortSignal.timeout(25000)
-    ]);
-    fetch(sourceUrl, { signal: requestSignal })
-      .then(async response => {
-        if (!response.ok) {
-          const result = await response.json().catch(() => null);
-          throw new Error(result?.error || `โหลดภาพไม่สำเร็จ (HTTP ${response.status})`);
-        }
-        const image = await response.blob();
-        if (!image.type.startsWith('image/')) {
-          throw new Error(`ข้อมูลที่ได้รับไม่ใช่รูปภาพ (${image.type || 'ไม่ทราบชนิดไฟล์'})`);
-        }
-        return image;
-      })
-      .then(image => {
-        if (controller.signal.aborted) return;
-        objectUrl = URL.createObjectURL(image);
-        setProxyImageUrl(objectUrl);
+    loadDocPreviewImage(sourceUrl)
+      .then(objectUrl => {
+        if (active) setProxyImageUrl(objectUrl);
       })
       .catch(error => {
-        if (controller.signal.aborted) return;
+        if (!active) return;
         if (hoveredDocPreview?.imageUrl === sourceUrl && hoveredDocPreview.fallbackImageUrl) {
           setHoveredDocPreview(current => current?.imageUrl === sourceUrl
             ? {
@@ -256,8 +302,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       });
 
     return () => {
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      active = false;
     };
   }, [hoveredDocPreview?.imageUrl, hoveredDocPreview?.fallbackImageUrl]);
 
@@ -267,6 +312,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   ) => {
     const r = e.currentTarget.getBoundingClientRect();
     const imageUrl = getDocPreviewImageUrl(payload.driveFileId, payload.imageUrl);
+    setProxyImageUrl(imageUrl?.startsWith('/api/drive/image/')
+      ? getCachedDocPreviewImage(imageUrl) || null
+      : null);
     setHoveredDocPreview({
       ...payload,
       imageUrl,
@@ -852,22 +900,22 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         const imageData = pending.shift();
         if (!imageData) continue;
         activeLoads += 1;
-        const image = new Image();
-        let triedFallback = false;
         const finish = () => {
           activeLoads -= 1;
           loadNext();
         };
-        image.onload = finish;
-        image.onerror = () => {
-          if (imageData.fallback && !triedFallback) {
-            triedFallback = true;
-            image.src = imageData.fallback;
-            return;
-          }
-          finish();
-        };
-        image.src = imageData.src;
+        const fallbackUrl = imageData.fallback;
+        loadDocPreviewImage(imageData.src)
+          .catch(() => {
+            if (!fallbackUrl) return;
+            return new Promise<void>(resolve => {
+              const image = new Image();
+              image.onload = () => resolve();
+              image.onerror = () => resolve();
+              image.src = fallbackUrl;
+            });
+          })
+          .finally(finish);
       }
     };
 
