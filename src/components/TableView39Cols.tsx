@@ -51,10 +51,14 @@ const getDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | 
 const getDocPreviewFallbackImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
   const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
   if (!fileId) return undefined;
-  const proxyUrl = getDocPreviewImageUrl(fileId, imageUrl);
-  return imageUrl && imageUrl !== proxyUrl
-    ? imageUrl
-    : `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+  return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+};
+
+const getDocPreviewAlternateImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
+  const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
+  return fileId
+    ? `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1200`
+    : undefined;
 };
 
 const getPreloadableDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
@@ -179,6 +183,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     driveFileId?: string;
     imageUrl?: string | null;
     fallbackImageUrl?: string | null;
+    alternateImageUrl?: string | null;
     imageLoadFailed?: boolean;
     matchStatus?: 'auto_flagged' | 'verified' | 'manual';
     referenceNote?: string;
@@ -202,7 +207,11 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
     setProxyImageUrl(null);
     setProxyImageError('');
 
-    fetch(sourceUrl, { signal: controller.signal })
+    const requestSignal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(15000)
+    ]);
+    fetch(sourceUrl, { signal: requestSignal })
       .then(async response => {
         if (!response.ok) {
           const result = await response.json().catch(() => null);
@@ -226,7 +235,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
             ? {
                 ...current,
                 imageUrl: current.fallbackImageUrl,
-                fallbackImageUrl: undefined,
+                fallbackImageUrl: current.alternateImageUrl,
+                alternateImageUrl: undefined,
                 imageLoadFailed: false
               }
             : current);
@@ -253,6 +263,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       fallbackImageUrl:
         getDocPreviewFallbackImageUrl(payload.driveFileId, payload.imageUrl) ||
         payload.fallbackImageUrl,
+      alternateImageUrl: getDocPreviewAlternateImageUrl(payload.driveFileId, payload.imageUrl),
       rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
     });
   };
@@ -3250,7 +3261,12 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   onError={() => {
                     if (hoveredDocPreview.fallbackImageUrl) {
                       setHoveredDocPreview(current => current
-                        ? { ...current, imageUrl: current.fallbackImageUrl, fallbackImageUrl: undefined }
+                        ? {
+                            ...current,
+                            imageUrl: current.fallbackImageUrl,
+                            fallbackImageUrl: current.alternateImageUrl,
+                            alternateImageUrl: undefined
+                          }
                         : current);
                       return;
                     }
