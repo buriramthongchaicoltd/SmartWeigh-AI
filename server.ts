@@ -6490,32 +6490,51 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
     }
 
     const isGasMode = driveCfg.connectionMode === 'gas';
-    const token = isGasMode ? null : await getDriveAccessToken();
+    let token = isGasMode ? null : await getDriveAccessToken();
     const shouldUseGasFallback = !token && Boolean(driveCfg.gasWebAppUrl);
     const useGas = isGasMode || shouldUseGasFallback;
     if (useGas) {
       if (!driveCfg.gasWebAppUrl) {
         return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script Web App URL' });
       }
-      const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-        action: 'get_image',
-        fileId,
-        rootFolderId: driveCfg.rootFolderId
-      });
-      if (!result?.success || typeof result.base64Data !== 'string') {
-        throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
+      try {
+        const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+          action: 'get_image',
+          fileId,
+          rootFolderId: driveCfg.rootFolderId
+        });
+        if (!result?.success || typeof result.base64Data !== 'string') {
+          throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
+        }
+        const contentType = String(result.mimeType || '');
+        if (!contentType.startsWith('image/')) {
+          return res.status(415).json({ success: false, error: 'ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ' });
+        }
+        const imageBytes = Buffer.from(result.base64Data, 'base64');
+        if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
+          return res.status(imageBytes.length ? 413 : 422).json({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
+        }
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        return res.send(imageBytes);
+      } catch (error) {
+        if (isGasMode && !token) {
+          try {
+            token = await getDriveAccessToken();
+          } catch (tokenError) {
+            const gasMessage = error instanceof Error ? error.message : String(error);
+            const tokenMessage = tokenError instanceof Error ? tokenError.message : String(tokenError);
+            throw new Error(`Google Apps Script อ่านภาพไม่สำเร็จ: ${gasMessage}; Google Drive API สำรองใช้งานไม่ได้: ${tokenMessage}`);
+          }
+        }
+        if (!token) {
+          throw error;
+        }
+        console.warn('[Drive Image] GAS image request failed; trying Drive API fallback', {
+          fileId,
+          message: error instanceof Error ? error.message : String(error)
+        });
       }
-      const contentType = String(result.mimeType || '');
-      if (!contentType.startsWith('image/')) {
-        return res.status(415).json({ success: false, error: 'ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ' });
-      }
-      const imageBytes = Buffer.from(result.base64Data, 'base64');
-      if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
-        return res.status(imageBytes.length ? 413 : 422).json({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
-      }
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Cache-Control', 'private, max-age=300');
-      return res.send(imageBytes);
     }
 
     if (!token) {

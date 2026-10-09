@@ -209,7 +209,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
     const requestSignal = AbortSignal.any([
       controller.signal,
-      AbortSignal.timeout(15000)
+      AbortSignal.timeout(50000)
     ]);
     fetch(sourceUrl, { signal: requestSignal })
       .then(async response => {
