@@ -54,6 +54,8 @@ function doPost(e) {
       return handleRestoreLineInboxFile(payload);
     } else if (action === 'verify_do_file_location') {
       return handleVerifyDoFileLocation(payload);
+    } else if (action === 'cleanup_empty_do_folder') {
+      return handleCleanupEmptyDoFolder(payload);
     } else if (action === 'cleanup') {
       return handleCleanup(payload);
     } else if (action === 'list_zone_files') {
@@ -448,6 +450,7 @@ function handleRenameAndMoveFile(payload) {
   } catch (e) {
     return jsonResponse({ success: false, error: 'ไม่พบไฟล์: ' + e.toString() });
   }
+  var originalFileName = file.getName();
 
   // 2. Move (optional)
   if (rootFolderId && targetZone && ZONE_KEY_MAP[targetZone]) {
@@ -496,6 +499,7 @@ function handleRenameAndMoveFile(payload) {
       return jsonResponse({
         success: true,
         fileId: file.getId(),
+        originalFileName: originalFileName,
         fileName: file.getName(),
         targetFolderId: targetFolder.getId(),
         message: preserveOriginalName ? 'ย้ายไฟล์เข้าโฟลเดอร์ใบงานสำเร็จ' : 'เปลี่ยนชื่อและย้ายไฟล์สำเร็จ'
@@ -509,6 +513,7 @@ function handleRenameAndMoveFile(payload) {
   return jsonResponse({
     success: true,
     fileId: file.getId(),
+    originalFileName: originalFileName,
     fileName: file.getName(),
     message: 'เปลี่ยนชื่อไฟล์สำเร็จ (ไม่ได้ย้ายโฟลเดอร์)'
   });
@@ -517,6 +522,7 @@ function handleRenameAndMoveFile(payload) {
 function handleRestoreLineInboxFile(payload) {
   var rootFolderId = payload.rootFolderId;
   var fileId = payload.fileId;
+  var originalFileName = String(payload.originalFileName || '').trim();
   if (!rootFolderId || !fileId) {
     return jsonResponse({ success: false, error: 'กรุณาระบุ rootFolderId และ fileId เพื่อคืนรูป' });
   }
@@ -563,9 +569,13 @@ function handleRestoreLineInboxFile(payload) {
       });
     }
     if (!inInbox) file.moveTo(inboxFolder);
+    if (originalFileName && file.getName() !== originalFileName) {
+      file.setName(originalFileName);
+    }
     return jsonResponse({
       success: true,
       fileId: file.getId(),
+      originalFileName: file.getName(),
       targetZone: 'zone_00',
       message: inInbox ? 'ไฟล์อยู่ใน LINE Inbox แล้ว' : 'คืนไฟล์เข้า LINE Inbox สำเร็จ'
     });
@@ -616,6 +626,56 @@ function handleVerifyDoFileLocation(payload) {
     });
   } catch (e) {
     return jsonResponse({ success: false, error: 'ตรวจสอบตำแหน่งไฟล์ DO ไม่สำเร็จ: ' + e.toString() });
+  }
+}
+
+function handleCleanupEmptyDoFolder(payload) {
+  var rootFolderId = String(payload.rootFolderId || '');
+  var trNumber = String(payload.trNumber || '').trim();
+  var doNumber = String(payload.doNumber || '').trim();
+  if (!rootFolderId || !trNumber || !doNumber) {
+    return jsonResponse({ success: false, error: 'ต้องระบุ Root Folder ID, เลข TR และเลข DO ก่อนลบโฟลเดอร์ว่าง' });
+  }
+
+  try {
+    var rootFolder = DriveApp.getFolderById(rootFolderId);
+    var zone02Folders = rootFolder.getFoldersByName(ZONE_NAMES.ZONE_02);
+    if (!zone02Folders.hasNext()) {
+      return jsonResponse({ success: true, deleted: false, reason: 'zone_02_not_found' });
+    }
+    var zone02 = zone02Folders.next();
+    if (zone02Folders.hasNext()) {
+      return jsonResponse({ success: false, error: 'พบโฟลเดอร์ zone 02 ซ้ำ จึงไม่ลบโฟลเดอร์ใบงานเพื่อความปลอดภัย' });
+    }
+
+    var folderName = sanitizeDriveName(trNumber) + '_DO-' + sanitizeDriveName(doNumber);
+    var folders = zone02.getFoldersByName(folderName);
+    if (!folders.hasNext()) {
+      return jsonResponse({ success: true, deleted: false, reason: 'bundle_folder_not_found' });
+    }
+    var folder = folders.next();
+    if (folders.hasNext()) {
+      return jsonResponse({ success: false, error: 'พบโฟลเดอร์ใบงานชื่อซ้ำ จึงไม่ลบเพื่อป้องกันข้อมูลผิดชุด' });
+    }
+
+    if (folder.getFiles().hasNext() || folder.getFolders().hasNext()) {
+      return jsonResponse({
+        success: false,
+        error: 'โฟลเดอร์ใบงานยังมีไฟล์หรือโฟลเดอร์ย่อยอยู่ จึงไม่ลบเพื่อป้องกันข้อมูลสูญหาย',
+        folderId: folder.getId(),
+        folderName: folderName
+      });
+    }
+
+    folder.setTrashed(true);
+    return jsonResponse({
+      success: true,
+      deleted: true,
+      folderId: folder.getId(),
+      folderName: folderName
+    });
+  } catch (e) {
+    return jsonResponse({ success: false, error: 'ลบโฟลเดอร์ใบงานว่างไม่สำเร็จ: ' + e.toString() });
   }
 }
 

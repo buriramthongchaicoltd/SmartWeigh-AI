@@ -418,6 +418,7 @@ app.use('/api', async (req: Request, res: Response, next) => {
     '/drive/cleanup-file',
     '/drive/rename-and-move',
     '/drive/restore-line-inbox-file',
+    '/drive/cleanup-empty-do-folder',
     '/drive/sync-verified-move',
     '/drive/quarantine-line-inbox-orphan',
     '/drive/delete-line-inbox-file'
@@ -5412,6 +5413,7 @@ app.post('/api/orders/confirm-prepared-do', async (req: Request, res: Response) 
     if (!client) {
       return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมยืนยันใบส่งของ' });
     }
+    const authenticatedUser = getAuthenticatedUser(req);
     const { data: orderRow, error: orderError } = await client
       .from('orders')
       .select('id,col1,doc_type,status,line_inbox_id,drive_file_id,col2,col6,col8,col9')
@@ -5508,6 +5510,47 @@ app.post('/api/orders/confirm-prepared-do', async (req: Request, res: Response) 
       }
       await assertNoDuplicateDocumentWrite(client, 'orders', candidatePairedOrderRow, false, true);
       pairedOrderRow = candidatePairedOrderRow;
+    }
+
+    const finalRecord = req.body?.record;
+    if (finalRecord !== undefined && finalRecord !== null) {
+      if (
+        typeof finalRecord !== 'object' ||
+        Array.isArray(finalRecord) ||
+        finalRecord.id !== orderId ||
+        String(finalRecord.col1 || '').trim() !== trNumber ||
+        finalRecord.docType !== orderRow.doc_type ||
+        (finalRecord.lineInboxId || null) !== (inboxId || null) ||
+        (finalRecord.driveFileId || null) !== (orderRow.drive_file_id || null)
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: 'ข้อมูลทะเบียนใบส่งของไม่ตรงกับ reservation, เลข TR หรือไฟล์ที่ตรวจสอบแล้ว'
+        });
+      }
+
+      const finalDoRow = mapOrderToSupabase(finalRecord);
+      if (authenticatedUser) {
+        await preserveRestrictedOrderFields(client, authenticatedUser, [finalDoRow]);
+      }
+      const {
+        col1: _immutableTrNumber,
+        status: _reservedStatus,
+        created_at: _createdAt,
+        ...finalDoUpdate
+      } = finalDoRow;
+      const { data: updatedDo, error: finalDoUpdateError } = await client
+        .from('orders')
+        .update(finalDoUpdate)
+        .eq('id', orderId)
+        .eq('col1', trNumber)
+        .eq('status', orderRow.status)
+        .select('id')
+        .maybeSingle();
+      if (finalDoUpdateError) throw finalDoUpdateError;
+      if (!updatedDo) {
+        throw new Error('บันทึกข้อมูลใบส่งของที่ตรวจแล้วไม่สำเร็จ หรือ reservation เปลี่ยนระหว่างบันทึก');
+      }
     }
 
     const { data: confirmedOrder, error: confirmError } = await client.rpc('confirm_prepared_do_order', {
@@ -7362,6 +7405,9 @@ app.post('/api/drive/sync-tax-invoice-links', async (req: Request, res: Response
 app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Response) => {
   const inboxId = typeof req.body?.inboxId === 'string' ? req.body.inboxId.trim() : '';
   const fileId = typeof req.body?.fileId === 'string' ? req.body.fileId.trim() : '';
+  const originalFileName = typeof req.body?.originalFileName === 'string'
+    ? req.body.originalFileName.trim()
+    : '';
   if (!inboxId || !fileId) {
     return res.status(400).json({ success: false, error: 'ต้องระบุ LINE Inbox ID และ Drive File ID เพื่อคืนรูป' });
   }
@@ -7409,7 +7455,8 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
         result = await callGasDriveApi(cfg.gasWebAppUrl, {
           action: 'restore_line_inbox_file',
           rootFolderId: cfg.rootFolderId,
-          fileId
+          fileId,
+          originalFileName
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -7418,14 +7465,24 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
         }
         throw error;
       }
-      if (!result?.success || result.targetZone !== 'zone_00') {
+      if (
+        !result?.success ||
+        result.targetZone !== 'zone_00' ||
+        (originalFileName && result.originalFileName !== originalFileName)
+      ) {
         const message = result?.error || 'Google Apps Script ไม่ยืนยันการคืนรูปเข้า LINE Inbox';
         if (/ไม่รู้จัก action:\s*restore_line_inbox_file/i.test(message)) {
           throw new Error('Google Apps Script ที่ตั้งค่าอยู่ยังไม่มี action restore_line_inbox_file; กรุณา deploy google_apps_script_drive.gs เป็น Web App version ใหม่');
         }
         throw new Error(message);
       }
-      return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
+      return res.json({
+        success: true,
+        restored: true,
+        fileId,
+        originalFileName: result.originalFileName,
+        driveFileLocation: 'zone_00'
+      });
     }
     if (!token) {
       return res.status(503).json({ success: false, error: 'Google Drive ยังไม่พร้อมคืนรูปเข้า LINE Inbox' });
@@ -7433,16 +7490,44 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
 
     const zones = await ensureStandardDriveZones(token, cfg.rootFolderId);
     const fileResponse = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,parents`,
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name,parents`,
       { headers: { Authorization: 'Bearer ' + token } }
     );
     if (!fileResponse.ok) {
       throw new Error(`ตรวจสอบตำแหน่งรูปก่อนคืนไม่สำเร็จ: ${await fileResponse.text()}`);
     }
-    const file = await fileResponse.json() as { id: string; parents?: string[] };
+    const file = await fileResponse.json() as { id: string; name?: string; parents?: string[] };
+    const restoreName = async (currentName?: string): Promise<void> => {
+      if (!originalFileName || currentName === originalFileName) return;
+      const renameResponse = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,name`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ name: originalFileName })
+        }
+      );
+      if (!renameResponse.ok) {
+        throw new Error(`คืนชื่อไฟล์เดิมไม่สำเร็จ: ${await renameResponse.text()}`);
+      }
+      const renamedFile = await renameResponse.json() as { name?: string };
+      if (renamedFile.name !== originalFileName) {
+        throw new Error('Google Drive ไม่ยืนยันการคืนชื่อไฟล์เดิม');
+      }
+    };
     const parents = file.parents || [];
     if (parents.includes(zones.ZONE_00)) {
-      return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
+      await restoreName(file.name);
+      return res.json({
+        success: true,
+        restored: true,
+        fileId,
+        originalFileName: originalFileName || file.name,
+        driveFileLocation: 'zone_00'
+      });
     }
 
     let sourceFolderId: string | undefined;
@@ -7479,6 +7564,7 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
     if (!(movedFile.parents || []).includes(zones.ZONE_00)) {
       throw new Error('Google Drive ยังไม่ยืนยันว่ารูปกลับเข้า LINE Inbox');
     }
+    await restoreName(movedFile.name || file.name);
     return res.json({ success: true, restored: true, fileId, driveFileLocation: 'zone_00' });
   } catch (error: any) {
     console.error('[Drive Restore LINE Inbox Error]', error?.message || error);
@@ -7486,6 +7572,168 @@ app.post('/api/drive/restore-line-inbox-file', async (req: Request, res: Respons
       success: false,
       error: `คืนรูปเข้า LINE Inbox ไม่สำเร็จ: ${error?.message || 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
     });
+  }
+});
+
+app.post('/api/drive/cleanup-empty-do-folder', async (req: Request, res: Response) => {
+  const trNumber = typeof req.body?.trNumber === 'string' ? req.body.trNumber.trim() : '';
+  const doNumber = typeof req.body?.doNumber === 'string' ? req.body.doNumber.trim() : '';
+  if (!trNumber || !doNumber) {
+    return res.status(400).json({ success: false, error: 'ต้องระบุเลข TR และเลข DO ก่อนตรวจลบโฟลเดอร์ว่าง' });
+  }
+
+  try {
+    const cfg = getStoredDriveConfig();
+    if (!cfg.rootFolderId) {
+      return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Root Folder ของ Google Drive' });
+    }
+
+    const token = cfg.connectionMode === 'gas' ? null : await getDriveAccessToken();
+    if (cfg.connectionMode === 'gas' || (!token && cfg.gasWebAppUrl)) {
+      if (!cfg.gasWebAppUrl) {
+        return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script สำหรับลบโฟลเดอร์ว่าง' });
+      }
+      const result = await callGasDriveApi(cfg.gasWebAppUrl, {
+        action: 'cleanup_empty_do_folder',
+        rootFolderId: cfg.rootFolderId,
+        trNumber,
+        doNumber
+      });
+      if (!result?.success) {
+        return res.status(409).json({
+          success: false,
+          error: result?.error || 'Google Apps Script ไม่ยืนยันการลบโฟลเดอร์ใบงานว่าง',
+          folderName: result?.folderName
+        });
+      }
+      return res.json({
+        success: true,
+        deleted: Boolean(result.deleted),
+        folderId: result.folderId || undefined,
+        folderName: result.folderName || undefined,
+        reason: result.reason
+      });
+    }
+    if (!token) {
+      return res.status(503).json({ success: false, error: 'Google Drive ยังไม่พร้อมตรวจและลบโฟลเดอร์ว่าง' });
+    }
+
+    const escapeQueryValue = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const zoneQuery = `'${escapeQueryValue(cfg.rootFolderId)}' in parents and name = '${escapeQueryValue(STANDARD_DRIVE_ZONES.ZONE_02)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const zoneParams = new URLSearchParams({
+      q: zoneQuery,
+      pageSize: '100',
+      fields: 'nextPageToken,files(id)'
+    });
+    const zoneResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files?${zoneParams}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!zoneResponse.ok) {
+      throw new Error(`ค้นหาโฟลเดอร์ zone 02 ไม่สำเร็จ: ${await zoneResponse.text()}`);
+    }
+    const zoneData = await zoneResponse.json() as {
+      files?: Array<{ id: string }>;
+      nextPageToken?: string;
+    };
+    const zoneFolders = zoneData.files || [];
+    if (zoneData.nextPageToken) {
+      return res.status(409).json({
+        success: false,
+        error: 'มีโฟลเดอร์ zone 02 จำนวนมากผิดปกติ จึงไม่ลบโฟลเดอร์ใบงานเพื่อความปลอดภัย'
+      });
+    }
+    if (zoneFolders.length === 0) {
+      return res.json({ success: true, deleted: false, reason: 'zone_02_not_found' });
+    }
+    if (zoneFolders.length > 1) {
+      return res.status(409).json({
+        success: false,
+        error: 'พบโฟลเดอร์ zone 02 ซ้ำ จึงไม่ลบโฟลเดอร์ใบงานเพื่อความปลอดภัย'
+      });
+    }
+    const zone02Id = zoneFolders[0].id;
+    const folderName = `${sanitizeDriveName(trNumber)}_DO-${sanitizeDriveName(doNumber)}`;
+    const folderQuery = `'${escapeQueryValue(zone02Id)}' in parents and name = '${escapeQueryValue(folderName)}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const folderParams = new URLSearchParams({
+      q: folderQuery,
+      pageSize: '100',
+      fields: 'nextPageToken,files(id,name)'
+    });
+    const folderResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files?${folderParams}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!folderResponse.ok) {
+      throw new Error(`ค้นหาโฟลเดอร์ใบงานไม่สำเร็จ: ${await folderResponse.text()}`);
+    }
+    const folderData = await folderResponse.json() as {
+      files?: Array<{ id: string; name: string }>;
+      nextPageToken?: string;
+    };
+    const folders = folderData.files || [];
+    if (folderData.nextPageToken) {
+      return res.status(409).json({
+        success: false,
+        error: `พบโฟลเดอร์ชื่อ ${folderName} จำนวนมากผิดปกติ จึงไม่ลบเพื่อป้องกันข้อมูลผิดชุด`
+      });
+    }
+    if (folders.length === 0) {
+      return res.json({ success: true, deleted: false, reason: 'bundle_folder_not_found' });
+    }
+    if (folders.length > 1) {
+      return res.status(409).json({
+        success: false,
+        error: `พบโฟลเดอร์ชื่อ ${folderName} ซ้ำกัน จึงไม่ลบเพื่อป้องกันข้อมูลผิดชุด`
+      });
+    }
+
+    const folderId = folders[0].id;
+    const childrenQuery = `'${escapeQueryValue(folderId)}' in parents and trashed = false`;
+    const childParams = new URLSearchParams({
+      q: childrenQuery,
+      pageSize: '1000',
+      fields: 'nextPageToken,files(id,mimeType)'
+    });
+    const childResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files?${childParams}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!childResponse.ok) {
+      throw new Error(`ตรวจสอบเนื้อหาในโฟลเดอร์ก่อนลบไม่สำเร็จ: ${await childResponse.text()}`);
+    }
+    const childData = await childResponse.json() as {
+      files?: Array<{ id: string; mimeType?: string }>;
+      nextPageToken?: string;
+    };
+    if (childData.nextPageToken || (childData.files || []).length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: 'โฟลเดอร์ใบงานยังมีไฟล์หรือโฟลเดอร์ย่อยอยู่ จึงไม่ลบเพื่อป้องกันข้อมูลสูญหาย',
+        folderId,
+        folderName
+      });
+    }
+
+    const trashResponse = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ trashed: true })
+      }
+    );
+    if (!trashResponse.ok) {
+      throw new Error(`ย้ายโฟลเดอร์ว่างไปถังขยะไม่สำเร็จ: ${await trashResponse.text()}`);
+    }
+    return res.json({ success: true, deleted: true, folderId, folderName });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
+    console.error('[Drive Empty DO Folder Cleanup] Failed:', reason);
+    return res.status(500).json({ success: false, error: reason });
   }
 });
 
@@ -7720,6 +7968,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
         success: true,
         driveState: 'moved',
         fileId: gasResult.fileId || fileId,
+        originalFileName: gasResult.originalFileName,
         newFileName: gasResult.fileName || newFileName,
         targetZone,
         targetFolderId: gasResult.targetFolderId,
@@ -7880,6 +8129,7 @@ app.post('/api/drive/rename-and-move', async (req: Request, res: Response) => {
       success: true,
       driveState: 'moved',
       fileId,
+      originalFileName: currentFile.name,
       newFileName: renamedData.name,
       targetZone,
       targetFolderId,

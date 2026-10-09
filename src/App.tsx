@@ -2551,6 +2551,15 @@ export default function App() {
     let pairedWeighbridgeDriveLocation: OrderRecord['driveFileLocation'];
     let pairedWeighbridgeDriveFolderId: string | undefined;
     const originalInboxItems = new Map<string, LineBillInboxItem>();
+    const getOriginalInboxFileName = (item: LineBillInboxItem): string => {
+      const date = new Date(item.receivedAt).toISOString().slice(0, 10);
+      const safeInboxId = item.id
+        .trim()
+        .replace(/[/\\?%*:|"<>]/g, '-')
+        .replace(/\s+/g, '_')
+        .slice(-80);
+      return `LINE_${date}_${safeInboxId || 'DOC'}.jpg`;
+    };
     const refreshInboxItem = async (inboxId: string): Promise<LineBillInboxItem> => {
       const response = await fetch('/api/line/inbox');
       const result = await response.json();
@@ -2759,8 +2768,11 @@ export default function App() {
     }
 
     let preparedDoReservation: { orderId: string; trNumber: string } | undefined;
+    let preparedDoConfirmed = false;
     let localOrdersStaged = false;
-    const movedInboxFiles: Array<{ inboxId: string; fileId: string }> = [];
+    const rollbackCreatesDoBundleFolder = !isExistingRecord &&
+      ['delivery_order', 'concrete', 'full_logistics'].includes(order.docType || '');
+    const movedInboxFiles: Array<{ inboxId: string; fileId: string; originalFileName?: string }> = [];
     const rollbackPreparedDoReservation = async (forceDatabaseRollback = false): Promise<string | undefined> => {
       const rollbackErrors: string[] = [];
       const mustRollbackDocuments = localOrdersStaged || Boolean(preparedDoReservation) || forceDatabaseRollback;
@@ -2812,17 +2824,7 @@ export default function App() {
       const driveRestoreFailures = new Set<string>();
       if (documentsRolledBack) {
         for (const [inboxId, originalItem] of originalInboxItems) {
-          const pendingReviewItem: LineBillInboxItem = {
-            ...originalItem,
-            status: 'pending_review',
-            verifiedOrderId: undefined,
-            verifiedDocumentId: undefined,
-            verifiedBy: undefined,
-            verifiedAt: undefined,
-            driveFileLocation: originalItem.driveFileId ? 'zone_00' : originalItem.driveFileLocation,
-            driveFolderId: undefined,
-            driveSyncStatus: originalItem.driveFileId ? 'synced' : originalItem.driveSyncStatus
-          };
+          const pendingReviewItem: LineBillInboxItem = { ...originalItem };
           let restoreFailure = '';
           let restored = false;
           for (let attempt = 0; attempt < 3 && !restored; attempt += 1) {
@@ -2853,10 +2855,24 @@ export default function App() {
               const response = await fetch('/api/drive/restore-line-inbox-file', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(movedFile)
+                body: JSON.stringify({
+                  ...movedFile,
+                  originalFileName: movedFile.originalFileName ||
+                    (originalInboxItems.get(movedFile.inboxId)
+                      ? getOriginalInboxFileName(originalInboxItems.get(movedFile.inboxId)!)
+                      : undefined)
+                })
               });
               const result = await response.json();
-              if (!response.ok || !result?.success || result.driveFileLocation !== 'zone_00') {
+              if (
+                !response.ok ||
+                !result?.success ||
+                result.driveFileLocation !== 'zone_00' ||
+                result.originalFileName !== (movedFile.originalFileName ||
+                  (originalInboxItems.get(movedFile.inboxId)
+                    ? getOriginalInboxFileName(originalInboxItems.get(movedFile.inboxId)!)
+                    : undefined))
+              ) {
                 throw new Error(result?.error || `HTTP ${response.status}`);
               }
               restored = true;
@@ -2872,11 +2888,6 @@ export default function App() {
             if (originalItem) {
               const uncertainDriveItem: LineBillInboxItem = {
                 ...originalItem,
-                status: 'pending_review',
-                verifiedOrderId: undefined,
-                verifiedDocumentId: undefined,
-                verifiedBy: undefined,
-                verifiedAt: undefined,
                 driveFileLocation: undefined,
                 driveFolderId: undefined,
                 driveSyncStatus: 'error'
@@ -2895,6 +2906,31 @@ export default function App() {
                 rollbackErrors.push(`บันทึกสถานะรูป ${movedFile.inboxId} ที่ยังไม่ทราบตำแหน่งไม่สำเร็จ: ${error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`);
               }
             }
+
+          }
+        }
+        if (rollbackCreatesDoBundleFolder && movedInboxFiles.length > 0) {
+          if (driveRestoreFailures.size > 0) {
+            rollbackErrors.push('คงโฟลเดอร์ชุด DO ไว้ก่อน เพราะยังคืนไฟล์เข้า LINE Inbox ไม่ครบ');
+          } else {
+            try {
+              const cleanupResponse = await fetch('/api/drive/cleanup-empty-do-folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  trNumber: preparedDoReservation?.trNumber || order.col1,
+                  doNumber: order.col6
+                })
+              });
+              const cleanupResult = await cleanupResponse.json();
+              if (!cleanupResponse.ok || !cleanupResult?.success) {
+                throw new Error(cleanupResult?.error || `HTTP ${cleanupResponse.status}`);
+              }
+            } catch (error) {
+              rollbackErrors.push(
+                `ลบโฟลเดอร์ชุด DO ที่ว่างไม่สำเร็จ: ${error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ'}`
+              );
+            }
           }
         }
       }
@@ -2909,21 +2945,14 @@ export default function App() {
         for (const [inboxId, originalItem] of originalInboxItems) {
           protectedLineInboxIdsRef.current.delete(inboxId);
           setLineInbox(previous => {
-            const restoredItem: LineBillInboxItem = {
-              ...originalItem,
-              status: 'pending_review',
-              verifiedOrderId: undefined,
-              verifiedDocumentId: undefined,
-              verifiedBy: undefined,
-              verifiedAt: undefined,
-              driveFileLocation: driveRestoreFailures.has(inboxId)
-                ? undefined
-                : originalItem.driveFileId ? 'zone_00' : originalItem.driveFileLocation,
-              driveFolderId: undefined,
-              driveSyncStatus: driveRestoreFailures.has(inboxId)
-                ? 'error'
-                : originalItem.driveFileId ? 'synced' : originalItem.driveSyncStatus
-            };
+            const restoredItem: LineBillInboxItem = driveRestoreFailures.has(inboxId)
+              ? {
+                  ...originalItem,
+                  driveFileLocation: undefined,
+                  driveFolderId: undefined,
+                  driveSyncStatus: 'error'
+                }
+              : originalItem;
             const exists = previous.some(item => item.id === inboxId);
             return exists
               ? previous.map(item => item.id === inboxId ? restoredItem : item)
@@ -3074,8 +3103,10 @@ export default function App() {
       }
       movedInboxFiles.push({
         inboxId: pairedWeighbridgeInboxItem.id,
-        fileId: pairedWeighbridgeInboxItem.driveFileId
+        fileId: pairedWeighbridgeInboxItem.driveFileId,
+        originalFileName: getOriginalInboxFileName(pairedWeighbridgeInboxItem)
       });
+      const movedPairedFile = movedInboxFiles[movedInboxFiles.length - 1];
       try {
         const driveResponse = await fetch('/api/drive/rename-and-move', {
           method: 'POST',
@@ -3093,11 +3124,13 @@ export default function App() {
           success?: boolean;
           targetZone?: string;
           targetFolderId?: string;
+          originalFileName?: string;
           error?: string;
         };
         if (!driveResponse.ok || !driveResult.success || driveResult.targetZone !== 'zone_02' || !driveResult.targetFolderId) {
           throw new Error(driveResult?.error || 'Google Drive ไม่ยืนยันการย้ายรูปตั๋วชั่งไปโซนใบส่งของ');
         }
+        movedPairedFile.originalFileName = driveResult.originalFileName || movedPairedFile.originalFileName;
         pairedWeighbridgeDriveLocation = 'zone_02';
         pairedWeighbridgeDriveFolderId = driveResult.targetFolderId;
         pairedWeighbridgeInboxItem = {
@@ -3148,8 +3181,10 @@ export default function App() {
       if (verifiedLineItem.driveFileId) {
         movedInboxFiles.push({
           inboxId: verifiedLineItem.id,
-          fileId: verifiedLineItem.driveFileId
+          fileId: verifiedLineItem.driveFileId,
+          originalFileName: getOriginalInboxFileName(verifiedLineItem)
         });
+        const movedVerifiedFile = movedInboxFiles[movedInboxFiles.length - 1];
         try {
           const driveResponse = await fetch('/api/drive/rename-and-move', {
             method: 'POST',
@@ -3178,6 +3213,7 @@ export default function App() {
             error?: string;
             targetZone?: string;
             targetFolderId?: string;
+            originalFileName?: string;
           } = {};
           try {
             const parsedResult: unknown = JSON.parse(responseText);
@@ -3187,7 +3223,10 @@ export default function App() {
                 success: resultFields.success === true,
                 error: typeof resultFields.error === 'string' ? resultFields.error : undefined,
                 targetZone: typeof resultFields.targetZone === 'string' ? resultFields.targetZone : undefined,
-                targetFolderId: typeof resultFields.targetFolderId === 'string' ? resultFields.targetFolderId : undefined
+                targetFolderId: typeof resultFields.targetFolderId === 'string' ? resultFields.targetFolderId : undefined,
+                originalFileName: typeof resultFields.originalFileName === 'string'
+                  ? resultFields.originalFileName
+                  : undefined
               };
             }
           } catch {
@@ -3200,6 +3239,7 @@ export default function App() {
               `Google Drive ตอบ HTTP ${driveResponse.status} และไม่ยืนยันการย้ายรูปไป ${targetZone}${responseDetail}`
             );
           }
+          movedVerifiedFile.originalFileName = driveResult.originalFileName || movedVerifiedFile.originalFileName;
           verifiedLineItem = {
             ...verifiedLineItem,
             driveFileLocation: targetZone,
@@ -3646,7 +3686,8 @@ export default function App() {
           body: JSON.stringify({
             ...preparedDoReservation,
             inboxId: order.lineInboxId || '',
-            pairedOrder: pairedOrderForConfirm
+            pairedOrder: pairedOrderForConfirm,
+            record: stagedOrderForSave
           })
         });
         const result = await response.json();
@@ -3735,6 +3776,7 @@ export default function App() {
       setOrders(previous => previous.map(item =>
         item.id === order.id ? { ...item, status: 'verified' } : item
       ));
+      preparedDoConfirmed = true;
       try {
         if (order.lineInboxId && !await removeVerifiedLineInboxItem(order.lineInboxId)) {
           throw new Error(`นำรายการ ${order.lineInboxId} ออกจากกล่องพักไม่สำเร็จ`);
@@ -3760,7 +3802,7 @@ export default function App() {
       preparedDoReservation = undefined;
     }
 
-    if (!isExistingRecord && !preparedDoReservation) {
+    if (!isExistingRecord && !preparedDoReservation && !preparedDoConfirmed) {
       if (!stagedOrderForSave) {
         const rollbackWarning = await rollbackPreparedDoReservation(true);
         const reason = `เตรียมข้อมูลสำหรับบันทึกทะเบียนไม่สำเร็จ${rollbackWarning ? ` — ${rollbackWarning}` : ''}`;
