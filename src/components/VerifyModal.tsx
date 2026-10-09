@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { OrderRecord, StoreMerchant, DocumentType, PurchaseOrder, ProjectRecord, LineBillInboxItem, OrderItemDetail } from '../types';
 import { ImageDocViewer } from './ImageDocViewer';
-import { isDeliveryOrderPairingCandidate, isExactDocNumberReference } from '../utils/poReconciliation';
+import { getOccupiedOriginWeighbridgeDoIds, isDeliveryOrderPairingCandidate, isExactDocNumberReference } from '../utils/poReconciliation';
 import { buildDatabaseCatalog, CatalogOption, inferMaterialCategory } from '../utils/dbLookup';
 import { SmartDatabaseInput } from './SmartDatabaseInput';
 import { remapLineBillToDocType, convertOrderDraftToPODraft, rescanBillForTargetDocType } from '../utils/lineBillRemapper';
@@ -284,10 +284,12 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
     orderData?.docType !== 'weighbridge' &&
     orderData?.docType !== 'dest_weighbridge'
   );
+  const occupiedOriginDoIds = getOccupiedOriginWeighbridgeDoIds(existingOrders);
   const eligibleOriginWeighbridgeDOs = existingOrders.filter(order =>
     order.id !== orderData?.id &&
     order.status === 'verified' &&
     Boolean(order.col1.trim()) &&
+    !occupiedOriginDoIds.has(order.id) &&
     isDeliveryOrderPairingCandidate(order)
   );
   const isContractorChargeOrder = ['delivery_order', 'concrete', 'full_logistics'].includes(selectedDocType);
@@ -1538,7 +1540,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
                         <span>ชุดเอกสารจากกล่องพัก LINE</span>
                       </div>
                       <p className="text-[11px] leading-relaxed text-emerald-900">
-                        จับคู่ตั๋วชั่ง {pairedWeighbridgeInboxItem.extractedData.col6 || '(ไม่มีเลขที่)'} จากกล่องพักแล้ว ระบบจะเก็บเป็นเอกสารแยกในชุดเดียวกับ DO นี้ ปริมาณตามใบส่งของคงเดิม; น้ำหนักใน DO ที่มีอยู่จะไม่ถูกเขียนทับ และถ้าช่องน้ำหนักว่างจะใช้ค่าตั๋วเป็นค่าเริ่มต้นให้ตรวจทาน
+                        แนบตั๋วชั่งต้นทาง {pairedWeighbridgeInboxItem.extractedData.col6 || '(ไม่มีเลขที่)'} กับ DO นี้เป็นเอกสารแยก; ใช้น้ำหนักจากตั๋วในโซน 3 และคงปริมาณตาม DO หากน้ำหนักใน DO ต่างจากตั๋ว ระบบจะแสดงคำเตือนให้ตรวจสอบ
                       </p>
                     </div>
                   )}

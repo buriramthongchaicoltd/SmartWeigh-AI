@@ -108,7 +108,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, RolePermissions> = {
     role: 'manager',
     label: 'ผู้จัดการ / บัญชี (Manager)',
     badgeColor: 'bg-indigo-50 text-indigo-700 border-indigo-200',
-    description: 'ดูแลใบสั่งซื้อ (PO), ตรวจสอบราคา/การเงิน (โซน 5-6), ชนบิลใบกำกับภาษี และออกรายงาน Excel/PDF',
+    description: 'ดูแลใบสั่งซื้อ (PO), ตรวจสอบราคา/การเงิน (โซน 5-6), ทะเบียนใบกำกับภาษีแยก และออกรายงาน Excel/PDF',
     allowedTabs: [
       'line_inbox',
       'orders',
@@ -326,8 +326,12 @@ export function computeSystemNotifications(
     }
   }
 
-  // 4. Unmatched Destination Weighbridge or Tax Invoices
-  const unmatchedDestWB = orders.filter(o => o.docType === 'dest_weighbridge' && !o.linkedViaDocNo);
+  // 4. Unmatched Destination Weighbridge and outstanding Tax Invoices
+  const unmatchedDestWB = orders.filter(
+    o =>
+      o.docType === 'dest_weighbridge' &&
+      (!o.linkedViaDocNo || o.destMatchStatus === 'auto_flagged')
+  );
   if (unmatchedDestWB.length > 0) {
     notifications.push({
       id: `notif-unmatched-wb-${unmatchedDestWB.length}`,
@@ -340,16 +344,18 @@ export function computeSystemNotifications(
     });
   }
 
-  const unmatchedTaxInv = orders.filter(o => o.docType === 'tax_invoice' && !o.linkedViaDocNo);
-  if (unmatchedTaxInv.length > 0) {
+  const outstandingTaxInv = orders.filter(
+    o => o.docType === 'tax_invoice' && Number(o.col36) > 0
+  );
+  if (outstandingTaxInv.length > 0) {
     notifications.push({
-      id: `notif-unmatched-tax-${unmatchedTaxInv.length}`,
+      id: `notif-outstanding-tax-${outstandingTaxInv.length}`,
       type: 'unlinked_doc',
       severity: 'info',
-      title: `ใบเสร็จ/ใบกำกับภาษีรอชนบิล (${unmatchedTaxInv.length} ใบ)`,
-      message: `มีเอกสารการเงินที่รอตรวจสอบและผูกเข้ากับใบส่งของ (DO) เพื่อตัดยอดชำระเงิน`,
+      title: `ใบเสร็จ/ใบกำกับภาษีมียอดค้างชำระ (${outstandingTaxInv.length} ใบ)`,
+      message: `มีเอกสารที่มียอดค้างชำระในช่อง 36 ให้ตรวจสอบในทะเบียนใบกำกับ`,
       targetTab: 'tax_inv',
-      createdAt: unmatchedTaxInv[0]?.createdAt || nowIso
+      createdAt: outstandingTaxInv[0]?.createdAt || nowIso
     });
   }
 

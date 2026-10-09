@@ -3422,7 +3422,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     <td className="py-2 px-3 font-bold text-slate-900">ใบเสร็จ/กำกับภาษี</td>
                     <td className="py-2 px-3 font-mono text-[11px] text-slate-500">TableView39Cols.tsx / App.tsx</td>
                     <td className="py-2 px-3"><span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">พร้อมใช้งาน</span></td>
-                    <td className="py-2 px-3">แยกเก็บบิลการเงิน/ใบกำกับภาษี (โซน 5–6) ชนบิลเข้ากับ DO หรือบันทึกซื้อสดหน้าร้านโดยไม่นับยอดซื้อซ้ำซ้อน</td>
+                    <td className="py-2 px-3">แยกทะเบียนใบเสร็จ/ใบกำกับภาษีไว้ในโซน 04 ไม่จับคู่กับ DO หรือ RR</td>
                   </tr>
                   <tr>
                     <td className="py-2 px-3 font-mono font-bold">06</td>
@@ -3485,7 +3485,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                   <strong className="text-slate-900">1. โครงสร้างตาราง 39 คอลัมน์ (7 โซน):</strong> ใช้คีย์ <code className="font-mono text-indigo-700">col1</code> ถึง <code className="font-mono text-indigo-700">col38</code> (+ คอลัมน์จัดการเป็น 39) ห้ามเปลี่ยนความหมายประจำคอลัมน์เด็ดขาด
                 </li>
                 <li className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
-                  <strong className="text-slate-900">2. ป้องกันการนับยอดซ้ำ (Anti-Double Counting):</strong> ตั๋วชั่งปลายทาง (<code className="font-mono text-indigo-700">dest_weighbridge</code>) และใบกำกับภาษีที่ผูกกับ DO แล้ว (<code className="font-mono text-indigo-700">linkedViaDocNo</code>) ห้ามนำมานับรวมเป็นจำนวนบิลส่งของหรือบวกยอดเงินซ้ำกับใบ DO
+                  <strong className="text-slate-900">2. ป้องกันการนับยอดซ้ำ (Anti-Double Counting):</strong> ตั๋วชั่งปลายทาง (<code className="font-mono text-indigo-700">dest_weighbridge</code>) เป็นเอกสารประกอบ DO ไม่ให้นับเป็นใบส่งของซ้ำ. ใบกำกับภาษีเป็นทะเบียนแยกและไม่มีการจับคู่กับ DO/RR; บางรายงานยังมีเงื่อนไขรองรับ `linkedViaDocNo` จากข้อมูลรุ่นเก่าเพื่อป้องกันการนับซ้ำ ซึ่งไม่สร้างความสัมพันธ์ใหม่
                 </li>
                 <li className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
                   <strong className="text-slate-900">3. มาตรฐาน AI เดียวกันทั้งระบบ:</strong> ทั้ง <code className="font-mono text-indigo-700">/api/scan-bill</code> และ <code className="font-mono text-indigo-700">/api/line/webhook</code> ใช้โมเดลตระกูล <code className="font-mono text-indigo-700">FLASH_LITE_MODELS</code> พร้อมกฎสกัดเลขที่บิล <code className="font-mono text-indigo-700">เล่มที่/เลขที่</code> และกฎสลับน้ำหนัก <code className="font-mono text-indigo-700">Gross &gt;= Tare</code> ชุดเดียวกัน
@@ -3569,7 +3569,7 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                 <div className="pl-3 text-slate-300">├── 📁 <span className="text-sky-300 font-bold">03_ตั๋วชั่งปลายทาง_รอจับคู่DO/</span></div>
                 <div className="pl-6 text-slate-400">└── (พักตั๋วชั่งที่ยังไม่มี DO มาชน)</div>
                 <div className="pl-3 text-slate-300">└── 📁 <span className="text-amber-300 font-bold">04_ใบเสร็จกำกับภาษี_เอกเทศ/</span></div>
-                <div className="pl-6 text-slate-400">└── (บิลซื้อสด / ใบกำกับภาษีที่ยังไม่ผูก DO)</div>
+                <div className="pl-6 text-slate-400">└── (ทะเบียนใบกำกับ/ใบเสร็จ แยกจาก DO และ RR)</div>
               </div>
 
               {/* Right: Auto-Move & Zero-Junk Rules */}
@@ -3585,9 +3585,9 @@ export const SystemSettingsView: React.FC<SystemSettingsViewProps> = ({
                     </p>
                   </div>
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div className="font-bold text-slate-900">2. ย้ายมารวมชุดเมื่อจับคู่สำเร็จ (Auto-Move)</div>
+                    <div className="font-bold text-slate-900">2. ย้ายตั๋วปลายทางหลังยืนยันจับคู่</div>
                     <p className="text-slate-600 mt-1 leading-relaxed">
-                      ตั๋วชั่งในโซน <code className="font-mono font-bold">03</code> หรือใบกำกับภาษีในโซน <code className="font-mono font-bold">04</code> ทันทีที่จับคู่ชนกับใบ DO สำเร็จ ระบบย้ายไฟล์เข้ามารวมในโฟลเดอร์ใบงานของ DO นั้นทันที
+                      เมื่อตรวจยืนยันตั๋วชั่งปลายทางในโซน <code className="font-mono font-bold">03</code> ว่าคู่กับ DO ใดแล้ว ระบบจึงย้ายไฟล์ตั๋วเข้าโฟลเดอร์ใบงาน DO นั้น ส่วนใบกำกับภาษีในโซน <code className="font-mono font-bold">04</code> คงเป็นทะเบียนอิสระ ไม่จับคู่หรือย้ายเข้า DO
                     </p>
                   </div>
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">

@@ -9,6 +9,135 @@ export function isDeliveryOrderPairingCandidate(order: Pick<OrderRecord, 'docTyp
   return !['weighbridge', 'dest_weighbridge', 'tax_invoice', 'purchase_order'].includes(order.docType || '');
 }
 
+export function resolveOriginWeighbridgePairs(orders: OrderRecord[]): Map<string, OrderRecord[]> {
+  const deliveryOrders = orders.filter(isDeliveryOrderPairingCandidate);
+  const deliveryOrderIds = new Set(deliveryOrders.map(order => order.id));
+  const pairsByDoId = new Map<string, OrderRecord[]>();
+  const resolvedTicketIds = new Set<string>();
+  const ambiguousReferenceTicketIds = new Set<string>();
+
+  orders.forEach(ticket => {
+    if (ticket.docType !== 'weighbridge' || !ticket.matchedOriginDoId) return;
+    resolvedTicketIds.add(ticket.id);
+    if (!deliveryOrderIds.has(ticket.matchedOriginDoId)) return;
+    const tickets = pairsByDoId.get(ticket.matchedOriginDoId) || [];
+    tickets.push(ticket);
+    pairsByDoId.set(ticket.matchedOriginDoId, tickets);
+  });
+
+  const legacyTicketsByDoId = new Map<string, OrderRecord[]>();
+  orders.forEach(ticket => {
+    if (ticket.docType !== 'weighbridge' || resolvedTicketIds.has(ticket.id)) return;
+    if (ticket.linkedViaDocNo?.trim()) {
+      const matchingDOs = deliveryOrders.filter(order =>
+        isExactDocNumberReference(order.col6, ticket.linkedViaDocNo)
+      );
+      if (matchingDOs.length > 1) {
+        ambiguousReferenceTicketIds.add(ticket.id);
+        return;
+      }
+      if (matchingDOs.length === 1) {
+        const doId = matchingDOs[0].id;
+        const tickets = legacyTicketsByDoId.get(doId) || [];
+        tickets.push(ticket);
+        legacyTicketsByDoId.set(doId, tickets);
+        resolvedTicketIds.add(ticket.id);
+        return;
+      }
+    }
+  });
+
+  legacyTicketsByDoId.forEach((tickets, doId) => {
+    if (tickets.length !== 1 || pairsByDoId.has(doId)) return;
+    pairsByDoId.set(doId, tickets);
+  });
+
+  const deliveryOrdersByTr = new Map<string, OrderRecord[]>();
+  deliveryOrders.forEach(order => {
+    const trNumber = order.col1.trim();
+    if (!trNumber) return;
+    const sameTrOrders = deliveryOrdersByTr.get(trNumber) || [];
+    sameTrOrders.push(order);
+    deliveryOrdersByTr.set(trNumber, sameTrOrders);
+  });
+  const unmatchedTicketsByTr = new Map<string, OrderRecord[]>();
+  orders.forEach(ticket => {
+    if (
+      ticket.docType !== 'weighbridge' ||
+      resolvedTicketIds.has(ticket.id) ||
+      ambiguousReferenceTicketIds.has(ticket.id)
+    ) {
+      return;
+    }
+    const trNumber = ticket.col1.trim();
+    if (!trNumber) return;
+    const sameTrTickets = unmatchedTicketsByTr.get(trNumber) || [];
+    sameTrTickets.push(ticket);
+    unmatchedTicketsByTr.set(trNumber, sameTrTickets);
+  });
+
+  unmatchedTicketsByTr.forEach((tickets, trNumber) => {
+    const matchingDOs = deliveryOrdersByTr.get(trNumber) || [];
+    if (matchingDOs.length !== 1 || tickets.length !== 1) return;
+    const doId = matchingDOs[0].id;
+    if (pairsByDoId.has(doId)) return;
+    pairsByDoId.set(doId, tickets);
+    resolvedTicketIds.add(tickets[0].id);
+  });
+
+  return pairsByDoId;
+}
+
+export function getOccupiedOriginWeighbridgeDoIds(orders: OrderRecord[]): Set<string> {
+  const deliveryOrders = orders.filter(isDeliveryOrderPairingCandidate);
+  const deliveryOrderIds = new Set(deliveryOrders.map(order => order.id));
+  const occupiedDoIds = new Set(resolveOriginWeighbridgePairs(orders).keys());
+
+  orders.forEach(ticket => {
+    if (ticket.docType !== 'weighbridge') return;
+    if (ticket.matchedOriginDoId && deliveryOrderIds.has(ticket.matchedOriginDoId)) return;
+
+    if (ticket.linkedViaDocNo?.trim()) {
+      const referencedDOs = deliveryOrders.filter(order =>
+        isExactDocNumberReference(order.col6, ticket.linkedViaDocNo)
+      );
+      if (referencedDOs.length > 0) {
+        referencedDOs.forEach(order => occupiedDoIds.add(order.id));
+        return;
+      }
+    }
+
+    const trNumber = ticket.col1.trim();
+    if (!trNumber) return;
+    const matchingDOs = deliveryOrders.filter(order => order.col1.trim() === trNumber);
+    matchingDOs.forEach(order => occupiedDoIds.add(order.id));
+  });
+
+  return occupiedDoIds;
+}
+
+export function getOriginWeighbridgeMismatchWarning(
+  doNumber: string,
+  ticketNumber: string,
+  doWeights: Pick<Partial<OrderRecord>, 'col13' | 'col14' | 'col15'>,
+  ticketWeights: Pick<Partial<OrderRecord>, 'col13' | 'col14' | 'col15'>
+): string | undefined {
+  const fields = [
+    { key: 'col13', label: 'หนักต้นทาง' },
+    { key: 'col14', label: 'เบาต้นทาง' },
+    { key: 'col15', label: 'สุทธิต้นทาง' }
+  ] as const;
+  const differences = fields.flatMap(({ key, label }) => {
+    const doValue = Number(doWeights[key]) || 0;
+    const ticketValue = Number(ticketWeights[key]) || 0;
+    return doValue > 0 && ticketValue > 0 && doValue !== ticketValue
+      ? [`${label}: DO ${doValue.toLocaleString()} / ตั๋ว ${ticketValue.toLocaleString()} กก.`]
+      : [];
+  });
+  if (!differences.length) return undefined;
+  return `⚠️ น้ำหนักตั๋วชั่งต้นทางไม่ตรงกับ DO ${doNumber} (ตั๋ว ${ticketNumber}): ${differences.join(', ')} — ใช้ค่าน้ำหนักจากตั๋วในโซน 3`;
+}
+
 /**
  * Normalizes document reference numbers by stripping whitespace, dashes, slashes,
  * and converting to uppercase for deterministic matching without guessing.
@@ -700,10 +829,7 @@ export function reconcilePO(po: PurchaseOrder, orders: OrderRecord[]): POReconci
 export function findCandidateUnlinkedOrders(po: PurchaseOrder, orders: OrderRecord[]): OrderRecord[] {
   return orders
     .filter(ord => {
-      // Exclude secondary documents that have already been merged into a primary DO
-      if ((ord.docType === 'dest_weighbridge' || ord.docType === 'tax_invoice') && ord.linkedViaDocNo) {
-        return false;
-      }
+      if (!isDeliveryOrderPairingCandidate(ord)) return false;
 
       // Already linked to this PO
       if (isExactDocNumberReference(ord.col4, po.poNumber)) return false;

@@ -31,7 +31,7 @@ import {
   remapLineBillToDocType,
   rescanBillForTargetDocType
 } from '../utils/lineBillRemapper';
-import { isDeliveryOrderPairingCandidate } from '../utils/poReconciliation';
+import { getOccupiedOriginWeighbridgeDoIds, isDeliveryOrderPairingCandidate } from '../utils/poReconciliation';
 
 interface LineInboxViewProps {
   inboxItems: LineBillInboxItem[];
@@ -417,7 +417,11 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
     }
   };
 
-  const pairableDeliveryOrders = orders.filter(isDeliveryOrderPairingCandidate);
+  const occupiedOriginDoIds = getOccupiedOriginWeighbridgeDoIds(orders);
+  const pairableDeliveryOrders = orders.filter(order =>
+    isDeliveryOrderPairingCandidate(order) &&
+    !occupiedOriginDoIds.has(order.id)
+  );
   const pairablePendingDeliveryInboxItems = inboxItems.filter(item =>
     item.status === 'pending_review' &&
     item.id !== pairingTicket?.id &&

@@ -323,7 +323,7 @@ function handleSyncTaxInvoiceLinks(payload) {
   if (
     !rootFolderId ||
     !invoiceFileId ||
-    (matchAction !== 'confirm_match' && matchAction !== 'revoke_match') ||
+    matchAction !== 'revoke_match' ||
     !Array.isArray(bundles) ||
     bundles.length === 0 ||
     bundles.length > 50

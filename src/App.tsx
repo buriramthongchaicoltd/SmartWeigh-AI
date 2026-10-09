@@ -23,7 +23,7 @@ import {
   BillingNoteRecord,
   ContractorChargeDocument
 } from './types';
-import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge, isDeliveryOrderPairingCandidate } from './utils/poReconciliation';
+import { isExactDocNumberReference, extractDocReferences, checkDuplicateOrder, checkDuplicatePO, isMatchedOriginWeighbridge, isDeliveryOrderPairingCandidate, getOccupiedOriginWeighbridgeDoIds, getOriginWeighbridgeMismatchWarning, resolveOriginWeighbridgePairs } from './utils/poReconciliation';
 import { convertOrderDraftToPODraft } from './utils/lineBillRemapper';
 import { safeSaveToLocalStorage } from './utils/storageEngine';
 import {
@@ -234,17 +234,9 @@ const normalizeOrderWeights = (ord: OrderRecord): OrderRecord => {
 const reconcileAndHealOrders = (ordersList: OrderRecord[]): OrderRecord[] => {
   const list = ordersList.map(normalizeOrderWeights);
 
-  list.forEach(ticket => {
-    if (ticket.docType !== 'weighbridge' || ticket.matchedOriginDoId || !ticket.linkedViaDocNo?.trim()) {
-      return;
-    }
-
-    const matchingDOs = list.filter(order =>
-      isDeliveryOrderPairingCandidate(order) &&
-      isExactDocNumberReference(order.col6, ticket.linkedViaDocNo)
-    );
-    if (matchingDOs.length === 1) {
-      ticket.matchedOriginDoId = matchingDOs[0].id;
+  resolveOriginWeighbridgePairs(list).forEach((tickets, doId) => {
+    if (tickets.length === 1 && !tickets[0].matchedOriginDoId) {
+      tickets[0].matchedOriginDoId = doId;
     }
   });
 
@@ -1006,13 +998,13 @@ export default function App() {
   };
 
   const handleSyncTaxInvoiceDrive = async (
-    action: 'confirm_match' | 'revoke_match',
+    action: 'revoke_match',
     invoice: OrderRecord,
     deliveryOrders: OrderRecord[]
   ): Promise<boolean> => {
     if (!invoice.driveFileId || deliveryOrders.length === 0) return true;
     if (deliveryOrders.some(order => !order.col1.trim() || !order.col6.trim())) {
-      showToast('ยืนยันจับคู่ไม่ได้: ใบงานทุกใบต้องมีเลข TR และเลข DO ก่อนสร้างทางลัด', 'error');
+      showToast('ล้างทางลัดใบกำกับเดิมไม่ได้: ใบงานทุกใบต้องมีเลข TR และเลข DO', 'error');
       return false;
     }
     try {
@@ -1038,7 +1030,7 @@ export default function App() {
       return true;
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
-      showToast(`จัดการทางลัดใบกำกับภาษีในโฟลเดอร์ TR ไม่สำเร็จ: ${reason}`, 'error');
+      showToast(`ล้างทางลัดใบกำกับภาษีเดิมในโฟลเดอร์ TR ไม่สำเร็จ: ${reason}`, 'error');
       return false;
     }
   };
@@ -1752,17 +1744,11 @@ export default function App() {
       if (!ticketNumber || net <= 0) {
         throw new Error('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิให้ครบก่อนจับคู่');
       }
-      const doHasOriginWeight = [
-          pendingInboxDO.extractedData.col13,
-          pendingInboxDO.extractedData.col14,
-          pendingInboxDO.extractedData.col15
-      ].some(value => Number(value) > 0);
       await handleOpenVerifyFromInbox({
           ...pendingInboxDO,
           extractedData: {
             ...pendingInboxDO.extractedData,
-            pairedWeighbridgeInboxId: inboxItem.id,
-            ...(doHasOriginWeight ? {} : { col13: gross, col14: tare, col15: net })
+            pairedWeighbridgeInboxId: inboxItem.id
           }
       });
       return;
@@ -1777,6 +1763,9 @@ export default function App() {
       throw new Error('ไม่พบใบ DO ที่ยืนยันแล้วพร้อมเลข TR และเลข DO ครบ');
     }
     const existingTicket = orders.find(item => item.lineInboxId === inboxId);
+    if (getOccupiedOriginWeighbridgeDoIds(orders).has(targetDO.id)) {
+      throw new Error(`DO ${targetDO.col6} มีตั๋วชั่งต้นทางหรือข้อมูลอ้างอิงเดิมอยู่แล้ว (กำหนด 1 DO ต่อ 1 ตั๋ว)`);
+    }
     if (existingTicket?.matchedOriginDoId === targetDO.id) {
       throw new Error('ตั๋วชั่งใบนี้จับคู่กับใบส่งของที่เลือกอยู่แล้ว');
     }
@@ -1893,10 +1882,26 @@ export default function App() {
       createdAt: existingTicket?.createdAt || now,
       updatedBy: currentUser.fullName
     });
-    const hasDOWeights = Number(targetDO.col13) > 0 || Number(targetDO.col14) > 0 || Number(targetDO.col15) > 0;
+    const originWeightMismatchWarning = getOriginWeighbridgeMismatchWarning(
+      targetDO.col6,
+      ticketNumber,
+      targetDO,
+      { col13: gross, col14: tare, col15: net }
+    );
     const updatedDO: OrderRecord = {
       ...targetDO,
-      ...(hasDOWeights ? {} : { col13: gross, col14: tare, col15: net }),
+      col13: gross,
+      col14: tare,
+      col15: net,
+      ...(originWeightMismatchWarning
+        ? {
+            autoActionFlags: Array.from(new Set([
+              ...(targetDO.autoActionFlags || []),
+              originWeightMismatchWarning
+            ])),
+            autoFlagsVerified: false
+          }
+        : {}),
       updatedBy: currentUser.fullName
     };
     const verifiedInboxItem: LineBillInboxItem = {
@@ -2000,9 +2005,6 @@ export default function App() {
       setStores(previousStores => syncStoreFinancials(previousStores, updatedOrders));
       return updatedOrders;
     });
-    if (hasDOWeights) {
-      showToast('จับคู่ตั๋วชั่งแล้ว; ใบส่งของมีน้ำหนักเดิม ระบบจึงไม่เขียนทับน้ำหนักเดิม', 'info');
-    }
   };
 
   const handleCorrectAndPairOriginWeighbridge = async (
@@ -2031,6 +2033,9 @@ export default function App() {
     ) {
       throw new Error('ไม่พบใบส่งของที่ยืนยันแล้วพร้อมเลข TR และเลข DO ครบ');
     }
+    if (getOccupiedOriginWeighbridgeDoIds(orders).has(targetDO.id)) {
+      throw new Error(`DO ${targetDO.col6} มีตั๋วชั่งต้นทางหรือข้อมูลอ้างอิงเดิมอยู่แล้ว (กำหนด 1 DO ต่อ 1 ตั๋ว)`);
+    }
     if (
       previousTicket.matchedOriginDoId ||
       previousTicket.matchedDestTicketId ||
@@ -2056,6 +2061,12 @@ export default function App() {
     if (duplicateTicket) {
       throw new Error(`พบตั๋วชั่งที่อาจซ้ำกับ ${duplicateTicket.matchedOrder.col6 || duplicateTicket.matchedOrder.id} กรุณาตรวจรายการเดิมก่อน`);
     }
+    const originWeightMismatchWarning = getOriginWeighbridgeMismatchWarning(
+      targetDO.col6,
+      ticketNumber,
+      targetDO,
+      { col13: gross, col14: tare, col15: net }
+    );
 
     const driveResponse = await fetch('/api/drive/rename-and-move', {
       method: 'POST',
@@ -2131,11 +2142,20 @@ export default function App() {
       autoFlagsVerifiedAt: now,
       updatedBy: currentUser.fullName
     });
-    const hasDOWeights = [targetDO.col13, targetDO.col14, targetDO.col15]
-      .some(value => Number(value) > 0);
     const updatedDO: OrderRecord = {
       ...targetDO,
-      ...(hasDOWeights ? {} : { col13: gross, col14: tare, col15: net }),
+      col13: gross,
+      col14: tare,
+      col15: net,
+      ...(originWeightMismatchWarning
+        ? {
+            autoActionFlags: Array.from(new Set([
+              ...(targetDO.autoActionFlags || []),
+              originWeightMismatchWarning
+            ])),
+            autoFlagsVerified: false
+          }
+        : {}),
       updatedBy: currentUser.fullName
     };
     const persistRecord = async (
@@ -2204,15 +2224,11 @@ export default function App() {
       return nextOrders;
     });
     setActiveTab('orders');
-    showToast(
-      hasDOWeights
-        ? 'แก้ประเภทและจับคู่ตั๋วชั่งแล้ว; น้ำหนักเดิมของ DO ไม่ถูกเขียนทับ'
-        : 'แก้ประเภทเดิมเป็นตั๋วชั่งต้นทางและจับคู่กับ DO แล้ว'
-    );
+    showToast('แก้ประเภทเดิมเป็นตั๋วชั่งต้นทางและจับคู่กับ DO แล้ว; บันทึกน้ำหนักตั๋วในโซน 3 และคงปริมาณ DO ในช่อง 22');
     return true;
   };
 
-  // Save verified order (either new or updated) with automatic DO matching for dest_weighbridge and tax_invoice
+  // Save a verified order and any explicitly confirmed destination-ticket match.
   const handleSaveOrder = async (inputOrder: OrderRecord, storeToSave?: StoreMerchant): Promise<boolean> => {
     const order = { ...inputOrder };
     const persistVerifiedInboxItem = async (
@@ -2345,6 +2361,27 @@ export default function App() {
           if (!ticketNumber || ticketNet <= 0) {
             throw new Error('กรุณาตรวจเลขที่ตั๋วชั่งและน้ำหนักสุทธิจากภาพให้ครบก่อน');
           }
+          const ticketWeights = {
+            col13: Number(pairedWeighbridgeInboxItem.extractedData.col13) || 0,
+            col14: Number(pairedWeighbridgeInboxItem.extractedData.col14) || 0,
+            col15: ticketNet
+          };
+          const mismatchWarning = getOriginWeighbridgeMismatchWarning(
+            order.col6,
+            ticketNumber,
+            order,
+            ticketWeights
+          );
+          if (mismatchWarning) {
+            order.autoActionFlags = Array.from(new Set([
+              ...(order.autoActionFlags || []),
+              mismatchWarning
+            ]));
+            order.autoFlagsVerified = false;
+          }
+          order.col13 = ticketWeights.col13;
+          order.col14 = ticketWeights.col14;
+          order.col15 = ticketWeights.col15;
         }
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'ข้อผิดพลาดที่ไม่ทราบสาเหตุ';
@@ -2808,6 +2845,11 @@ export default function App() {
         updatedBy: currentUser.fullName
       });
       const pairedWeighbridgeOrder = pairedOrderForConfirm;
+      if (pairedWeighbridgeOrder) {
+        orderToSave.col13 = pairedWeighbridgeOrder.col13;
+        orderToSave.col14 = pairedWeighbridgeOrder.col14;
+        orderToSave.col15 = pairedWeighbridgeOrder.col15;
+      }
 
       // =========================================================================
       // STRICT REFERENCE-NUMBER-ONLY AUTO-MATCHING (ZONES 1-4) + VERIFICATION FLAGS
@@ -2979,55 +3021,6 @@ export default function App() {
               orderToSave.poMatchStatus = 'auto_flagged';
               autoFlagsSet.add(`🔗 ชนใบสั่งซื้อ ${matchedPO.poNumber} เข้าช่อง 4 อัตโนมัติ (ตามเลขอ้างอิงในบิล)`);
             }
-          }
-        }
-      }
-
-      // 2. If saving an unlinked Tax Invoice, try auto-matching to an Origin DO if referenceDocNo matches DO col6
-      if (orderToSave.docType === 'tax_invoice' && !orderToSave.linkedViaDocNo) {
-        const textRefs = extractDocReferences(orderToSave.col38);
-        const refCandidates = [orderToSave.referenceDocNo, ...textRefs.doNumbers].filter(Boolean) as string[];
-        if (refCandidates.length > 0) {
-          const candidateDOs = workingList
-            .map((record, index) => ({ record, index }))
-            .filter(({ record }) =>
-              record.id !== orderToSave.id &&
-              ['delivery_order', 'concrete', 'full_logistics'].includes(record.docType || '') &&
-              Boolean(record.col6 && refCandidates.some(ref => isExactDocNumberReference(record.col6, ref)))
-            );
-
-          if (candidateDOs.length === 1) {
-            const { record: candidateDO, index: candIdx } = candidateDOs[0];
-            const hasExistingPrice = Number(candidateDO.col29) > 0;
-            const invNo = orderToSave.col6 || orderToSave.col1;
-            const candFlags = new Set<string>(candidateDO.autoActionFlags || []);
-            candFlags.add(`🧾 ชนใบกำกับภาษี #${invNo} อัตโนมัติ (ตามเลขอ้างอิง DO ${candidateDO.col6})`);
-            workingList[candIdx] = {
-              ...candidateDO,
-              col24: hasExistingPrice ? candidateDO.col24 : (Number(orderToSave.col24) || candidateDO.col24),
-              col25: hasExistingPrice ? candidateDO.col25 : (Number(orderToSave.col25) || candidateDO.col25),
-              col28: hasExistingPrice ? candidateDO.col28 : (Number(orderToSave.col28) || candidateDO.col28),
-              col29: hasExistingPrice ? candidateDO.col29 : (Number(orderToSave.col29) || candidateDO.col29),
-              col30: orderToSave.col30 || candidateDO.col30 || '',
-              col31: Number(orderToSave.col31) || 0,
-              col32: Number(orderToSave.col32) || 0,
-              col33: Number(orderToSave.col33) || 0,
-              col34: Number(orderToSave.col34) || 0,
-              col35: Number(orderToSave.col35) || Number(orderToSave.col31) || 0,
-              col36: Number(orderToSave.col36) || 0,
-              autoActionFlags: Array.from(candFlags),
-              autoFlagsVerified: false,
-              updatedBy: currentUser.fullName,
-              col38: candidateDO.col38
-                ? `${candidateDO.col38} | ชนใบกำกับภาษี: ${invNo}`
-                : `ชนใบกำกับภาษี: ${invNo}`
-            };
-            orderToSave.linkedViaDocNo = candidateDO.col6;
-            autoFlagsSet.add(`🧾 ชนเข้า DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติ`);
-            autoMatchedNote = `🚩 จับคู่ใบกำกับภาษีเข้ากับ DO ${candidateDO.col6 || candidateDO.col1} อัตโนมัติแล้ว (ติดธงรอตรวจสอบยืนยัน)`;
-          } else if (candidateDOs.length > 1) {
-            autoFlagsSet.add('🧾 พบ DO ที่อ้างอิงตรงกันมากกว่าหนึ่งใบ กรุณาเลือกใบที่ถูกต้องด้วยมือ');
-            autoMatchedNote = '🚩 ยังไม่จับคู่ใบกำกับภาษี: พบ DO ที่อ้างอิงตรงกันหลายใบ กรุณาตรวจสอบและเลือกด้วยมือ';
           }
         }
       }
@@ -3447,7 +3440,7 @@ export default function App() {
       showToast('บันทึกในแถบ "ตั๋วชั่งปลายทาง" เรียบร้อยแล้ว (รอชนบิลเข้า DO)');
     } else if (order.docType === 'tax_invoice' && !autoMatchedNote) {
       setActiveTab('tax_inv');
-      showToast('บันทึกในแถบ "ใบเสร็จ/กำกับภาษี" เรียบร้อยแล้ว (รอชนบิลเข้า DO)');
+      showToast('บันทึกในทะเบียนใบเสร็จ/ใบกำกับภาษีเรียบร้อยแล้ว');
     } else if (autoMatchedNote) {
       showToast(autoMatchedNote);
     } else {
@@ -4334,20 +4327,6 @@ export default function App() {
       }
     }
 
-    if (target && scope === 'all') {
-      const linkedInvoices = orders.filter(invoice =>
-        invoice.docType === 'tax_invoice' &&
-        invoice.status === 'verified' &&
-        invoice.linkedViaDocNo?.split(',').some(docNo =>
-          isExactDocNumberReference(docNo.trim(), target.col6) ||
-          isExactDocNumberReference(docNo.trim(), target.col1)
-        )
-      );
-      for (const invoice of linkedInvoices) {
-        if (!await handleSyncTaxInvoiceDrive('confirm_match', invoice, [target])) return;
-      }
-    }
-
     setOrders(prev => {
       return prev.map(ord => {
         if (ord.id === orderId) {
@@ -4384,23 +4363,6 @@ export default function App() {
           return {
             ...ord,
             destMatchStatus: 'verified',
-            autoFlagsVerified: true,
-            autoFlagsVerifiedBy: currentUser.fullName,
-            autoFlagsVerifiedAt: nowIso
-          };
-        }
-
-        if (
-          scope === 'all' &&
-          target &&
-          ord.docType === 'tax_invoice' &&
-          ord.linkedViaDocNo?.split(',').some(docNo =>
-            isExactDocNumberReference(docNo.trim(), target.col6) ||
-            isExactDocNumberReference(docNo.trim(), target.col1)
-          )
-        ) {
-          return {
-            ...ord,
             autoFlagsVerified: true,
             autoFlagsVerifiedBy: currentUser.fullName,
             autoFlagsVerifiedAt: nowIso
@@ -4874,7 +4836,11 @@ export default function App() {
       <SidebarNav
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        unmatchedDestWB={orders.filter(o => o.docType === 'dest_weighbridge' && !o.linkedViaDocNo).length}
+        unmatchedDestWB={orders.filter(
+          o =>
+            o.docType === 'dest_weighbridge' &&
+            (!o.linkedViaDocNo || o.destMatchStatus === 'auto_flagged')
+        ).length}
         pendingLineInbox={pendingLineInboxCount}
         pendingOrderReview={pendingOrderReviewCount}
         pendingBillingRR={billingNotes.filter(b => b.status !== 'rr_stamped_billed').length}
@@ -4985,7 +4951,6 @@ export default function App() {
               onDeleteOrder={handleDeleteOrder}
               onUpdateOrder={handleUpdateOrder}
               onSyncDestTicketDrive={handleSyncDestTicketDrive}
-              onSyncTaxInvoiceDrive={handleSyncTaxInvoiceDrive}
               onNotifyError={(message) => showToast(message, 'error')}
               onLinkOrderToPO={handleLinkOrderToPO}
               onUnlinkOrderFromPO={handleUnlinkOrderFromPO}

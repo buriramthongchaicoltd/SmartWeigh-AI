@@ -16,10 +16,11 @@ import {
   Link2,
   X,
   AlertCircle,
-  Flag
+  Flag,
+  AlertTriangle
 } from 'lucide-react';
 import { OrderRecord, PurchaseOrder, StoreMerchant } from '../types';
-import { isDocNumberMatch, extractDocReferences } from '../utils/poReconciliation';
+import { isDocNumberMatch, extractDocReferences, resolveOriginWeighbridgePairs } from '../utils/poReconciliation';
 import { hasUnverifiedAutoActions, getOrderAutoFlagSummary } from '../utils/systemConfig';
 
 const extractGoogleDriveFileId = (imageUrl?: string | null): string | undefined => {
@@ -70,11 +71,6 @@ interface TableView39ColsProps {
     ticket: OrderRecord,
     deliveryOrder: OrderRecord
   ) => Promise<Pick<OrderRecord, 'driveFileLocation' | 'driveFolderId'> | null>;
-  onSyncTaxInvoiceDrive: (
-    action: 'confirm_match' | 'revoke_match',
-    invoice: OrderRecord,
-    deliveryOrders: OrderRecord[]
-  ) => Promise<boolean>;
   onNotifyError: (message: string) => void;
   onLinkOrderToPO?: (orderId: string, poNumber: string) => void;
   onUnlinkOrderFromPO?: (orderId: string) => void;
@@ -97,7 +93,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   onDeleteOrder,
   onUpdateOrder,
   onSyncDestTicketDrive,
-  onSyncTaxInvoiceDrive,
   onNotifyError,
   onLinkOrderToPO,
   onUnlinkOrderFromPO,
@@ -165,8 +160,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   const [matchingDestTicket, setMatchingDestTicket] = useState<OrderRecord | null>(null);
   const [matchingDOForPO, setMatchingDOForPO] = useState<OrderRecord | null>(null);
   const [matchingDOForDest, setMatchingDOForDest] = useState<OrderRecord | null>(null);
-  const [matchingTaxInvoice, setMatchingTaxInvoice] = useState<OrderRecord | null>(null);
-  const [selectedDOIdsForTaxMatch, setSelectedDOIdsForTaxMatch] = useState<string[]>([]);
   const [holdingSearchTerm, setHoldingSearchTerm] = useState('');
   const [holdingMatchFilter, setHoldingMatchFilter] = useState<'all' | 'unmatched' | 'matched' | 'auto_flagged'>('all');
 
@@ -267,62 +260,19 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
   }, [orders]);
 
   const unmatchedDestTickets = useMemo(() => {
-    return allDestTickets.filter(o => !o.linkedViaDocNo);
+    return allDestTickets.filter(
+      o => !o.linkedViaDocNo || o.destMatchStatus === 'auto_flagged'
+    );
   }, [allDestTickets]);
 
   const allTaxInvoices = useMemo(() => {
     return orders.filter(o => o.docType === 'tax_invoice');
   }, [orders]);
 
-  const pairedOriginWeighbridgesByDoId = useMemo(() => {
-    const eligibleDeliveryOrders = orders.filter(order =>
-      order.docType !== 'weighbridge' &&
-      order.docType !== 'dest_weighbridge' &&
-      order.docType !== 'tax_invoice'
-    );
-    const eligibleDeliveryOrderIds = new Set(eligibleDeliveryOrders.map(order => order.id));
-    const ticketsByDoId = new Map<string, OrderRecord[]>();
-    const groupedTicketIds = new Set<string>();
-
-    orders.forEach(order => {
-      if (
-        order.docType !== 'weighbridge' ||
-        !order.matchedOriginDoId ||
-        !eligibleDeliveryOrderIds.has(order.matchedOriginDoId)
-      ) {
-        return;
-      }
-      const tickets = ticketsByDoId.get(order.matchedOriginDoId) || [];
-      tickets.push(order);
-      ticketsByDoId.set(order.matchedOriginDoId, tickets);
-      groupedTicketIds.add(order.id);
-    });
-
-    const deliveryOrdersByTr = new Map<string, OrderRecord[]>();
-    eligibleDeliveryOrders.forEach(order => {
-      const trNumber = order.col1.trim();
-      if (!trNumber) return;
-      const sameTrOrders = deliveryOrdersByTr.get(trNumber) || [];
-      sameTrOrders.push(order);
-      deliveryOrdersByTr.set(trNumber, sameTrOrders);
-    });
-
-    orders.forEach(order => {
-      if (order.docType !== 'weighbridge' || groupedTicketIds.has(order.id)) return;
-      const trNumber = order.col1.trim();
-      if (!trNumber) return;
-      const matchingDeliveryOrders = deliveryOrdersByTr.get(trNumber) || [];
-      if (matchingDeliveryOrders.length !== 1) return;
-
-      const deliveryOrderId = matchingDeliveryOrders[0].id;
-      const tickets = ticketsByDoId.get(deliveryOrderId) || [];
-      tickets.push(order);
-      ticketsByDoId.set(deliveryOrderId, tickets);
-      groupedTicketIds.add(order.id);
-    });
-
-    return ticketsByDoId;
-  }, [orders]);
+  const pairedOriginWeighbridgesByDoId = useMemo(
+    () => resolveOriginWeighbridgePairs(orders),
+    [orders]
+  );
 
   const groupedOriginWeighbridgeIds = useMemo(
     () => new Set(Array.from(pairedOriginWeighbridgesByDoId.values()).flat().map(ticket => ticket.id)),
@@ -342,9 +292,24 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
             (ticket.col1 && isDocNumberMatch(ticket.col1, row.col17)))))
   );
 
-  const unmatchedTaxInvoices = useMemo(() => {
-    return allTaxInvoices.filter(o => !o.linkedViaDocNo);
-  }, [allTaxInvoices]);
+  const outstandingTaxInvoices = useMemo(
+    () => allTaxInvoices.filter(invoice => Number(invoice.col36) > 0),
+    [allTaxInvoices]
+  );
+
+  const filteredTaxInvoices = useMemo(() => {
+    return allTaxInvoices.filter(invoice => {
+      const hasOutstandingBalance = Number(invoice.col36) > 0;
+      if (holdingMatchFilter === 'unmatched' && !hasOutstandingBalance) return false;
+      if (holdingMatchFilter === 'matched' && hasOutstandingBalance) return false;
+      if (holdingSearchTerm.trim()) {
+        const query = holdingSearchTerm.toLowerCase();
+        const searchableText = `${invoice.col1} ${invoice.col6} ${invoice.col4} ${invoice.col8} ${invoice.col11} ${invoice.referenceDocNo || ''}`.toLowerCase();
+        if (!searchableText.includes(query)) return false;
+      }
+      return true;
+    });
+  }, [allTaxInvoices, holdingMatchFilter, holdingSearchTerm]);
 
   const candidateDOsForDestMatch = useMemo(() => {
     if (!matchingDestTicket) return [];
@@ -369,44 +334,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
         return 0;
       });
   }, [orders, matchingDestTicket]);
-
-  const candidateDOsForTaxMatch = useMemo(() => {
-    if (!matchingTaxInvoice) return [];
-    const targetVendor = (matchingTaxInvoice.col8 || '').trim().toLowerCase();
-    const targetRef = (matchingTaxInvoice.referenceDocNo || matchingTaxInvoice.col4 || '').trim();
-    const targetRefLower = targetRef.toLowerCase();
-
-    return orders
-      .filter(o => o.docType !== 'dest_weighbridge' && o.docType !== 'tax_invoice')
-      .sort((a, b) => {
-        const aVendor = (a.col8 || '').trim().toLowerCase();
-        const bVendor = (b.col8 || '').trim().toLowerCase();
-        const aRefMatch = Boolean(
-          targetRef && (
-            isDocNumberMatch(targetRef, a.col6) ||
-            isDocNumberMatch(targetRef, a.col4) ||
-            (a.col6 || '').toLowerCase().includes(targetRefLower) ||
-            (a.col4 || '').toLowerCase().includes(targetRefLower)
-          )
-        );
-        const bRefMatch = Boolean(
-          targetRef && (
-            isDocNumberMatch(targetRef, b.col6) ||
-            isDocNumberMatch(targetRef, b.col4) ||
-            (b.col6 || '').toLowerCase().includes(targetRefLower) ||
-            (b.col4 || '').toLowerCase().includes(targetRefLower)
-          )
-        );
-        if (aRefMatch && !bRefMatch) return -1;
-        if (!aRefMatch && bRefMatch) return 1;
-
-        const aVendorMatch = targetVendor && aVendor && (aVendor.includes(targetVendor) || targetVendor.includes(aVendor));
-        const bVendorMatch = targetVendor && bVendor && (bVendor.includes(targetVendor) || targetVendor.includes(bVendor));
-        if (aVendorMatch && !bVendorMatch) return -1;
-        if (!aVendorMatch && bVendorMatch) return 1;
-        return 0;
-      });
-  }, [orders, matchingTaxInvoice]);
 
   const handleExecuteManualMatchDest = async (targetDO: OrderRecord) => {
     if (!matchingDestTicket) return;
@@ -591,117 +518,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       matchedDestTicketId: undefined,
       autoActionFlags: filteredFlags
     });
-  };
-
-  // Match Tax Invoice into 1 or multiple selected DOs (updating Zone 5 if unpriced & Zone 6 Payment status)
-  const handleExecuteManualMatchTaxInvoice = async (targetDOIds: string[]) => {
-    if (!matchingTaxInvoice || targetDOIds.length === 0) return;
-    const targetDOs = targetDOIds
-      .map(doId => orders.find(order => order.id === doId))
-      .filter((order): order is OrderRecord => Boolean(order));
-    if (targetDOs.length !== targetDOIds.length) {
-      onNotifyError('ไม่พบใบ DO ที่เลือกครบถ้วน จึงยกเลิกการจับคู่ใบกำกับภาษี');
-      return;
-    }
-    if (!await onSyncTaxInvoiceDrive('confirm_match', matchingTaxInvoice, targetDOs)) return;
-    const invNo = matchingTaxInvoice.col6 || matchingTaxInvoice.col1 || 'ใบกำกับภาษี';
-    const invPaid = Number(matchingTaxInvoice.col35) || Number(matchingTaxInvoice.col31) || 0;
-    const invUnpaid = Number(matchingTaxInvoice.col36) || 0;
-    const isFullyPaid = invUnpaid === 0 && invPaid > 0;
-    const paymentMethod = matchingTaxInvoice.col30 || (isFullyPaid ? 'โอนเงิน' : 'เครดิต');
-    const matchedDONos: string[] = [];
-
-    if (targetDOIds.length === 1) {
-      const targetDO = orders.find(o => o.id === targetDOIds[0]);
-      if (targetDO) {
-        matchedDONos.push(targetDO.col6 || targetDO.col1);
-        const hasDOPrice = Number(targetDO.col29) > 0;
-        const finalGrand = hasDOPrice ? Number(targetDO.col29) : (Number(matchingTaxInvoice.col29) || 0);
-        const finalGoods = hasDOPrice ? Number(targetDO.col25) : (Number(matchingTaxInvoice.col25) || finalGrand);
-        const finalFreight = hasDOPrice ? Number(targetDO.col28) : (Number(matchingTaxInvoice.col28) || 0);
-        const finalPaid = invPaid > 0 ? invPaid : (isFullyPaid ? finalGrand : 0);
-        const finalUnpaid = Math.max(0, finalGrand - finalPaid);
-
-        const mergedDO: OrderRecord = {
-          ...targetDO,
-          col24: hasDOPrice ? targetDO.col24 : (Number(matchingTaxInvoice.col24) || targetDO.col24),
-          col25: finalGoods,
-          col28: finalFreight,
-          col29: finalGrand,
-          col30: paymentMethod,
-          col31: finalPaid,
-          col32: finalUnpaid,
-          col35: finalPaid,
-          col36: finalUnpaid,
-          col38: targetDO.col38
-            ? `${targetDO.col38} | ชนใบกำกับภาษี: ${invNo}`
-            : `ชนใบกำกับภาษี: ${invNo}`
-        };
-        onUpdateOrder(mergedDO);
-      }
-    } else {
-      // 1-to-N Match: 1 Tax Invoice covering multiple DOs
-      targetDOIds.forEach(doId => {
-        const targetDO = orders.find(o => o.id === doId);
-        if (targetDO) {
-          matchedDONos.push(targetDO.col6 || targetDO.col1);
-          const doGrand = Number(targetDO.col29) || 0;
-          const doGoods = Number(targetDO.col25) || doGrand;
-          const doFreight = Number(targetDO.col28) || 0;
-          const mergedDO: OrderRecord = {
-            ...targetDO,
-            col30: paymentMethod,
-            col31: isFullyPaid ? doGoods : 0,
-            col32: isFullyPaid ? 0 : doGoods,
-            col33: isFullyPaid ? doFreight : 0,
-            col34: isFullyPaid ? 0 : doFreight,
-            col35: isFullyPaid ? doGrand : 0,
-            col36: isFullyPaid ? 0 : doGrand,
-            col38: targetDO.col38
-              ? `${targetDO.col38} | ชนใบกำกับภาษีรวม: ${invNo}`
-              : `ชนใบกำกับภาษีรวม: ${invNo}`
-          };
-          onUpdateOrder(mergedDO);
-        }
-      });
-    }
-
-    onUpdateOrder({
-      ...matchingTaxInvoice,
-      linkedViaDocNo: matchedDONos.join(', '),
-      autoFlagsVerified: true
-    });
-    setMatchingTaxInvoice(null);
-    setSelectedDOIdsForTaxMatch([]);
-  };
-
-  const handleUnlinkTaxInvoice = async (inv: OrderRecord) => {
-    const linkedDoNos = (inv.linkedViaDocNo || '').split(',').map(docNo => docNo.trim()).filter(Boolean);
-    const linkedDOs = orders.filter(order =>
-      order.docType !== 'dest_weighbridge' &&
-      order.docType !== 'tax_invoice' &&
-      linkedDoNos.some(docNo =>
-        isDocNumberMatch(order.col6, docNo) ||
-        isDocNumberMatch(order.col1, docNo)
-      )
-    );
-    if (!await onSyncTaxInvoiceDrive('revoke_match', inv, linkedDOs)) return;
-    onUpdateOrder({
-      ...inv,
-      linkedViaDocNo: ''
-    });
-  };
-
-  // Promote a standalone Tax Invoice / Cash Receipt directly into the 39-Column DO table (when no separate DO exists)
-  const handlePromoteTaxInvoiceToDirectDO = (taxOrder: OrderRecord) => {
-    const promoted: OrderRecord = {
-      ...taxOrder,
-      docType: 'delivery_order',
-      col38: taxOrder.col38
-        ? `${taxOrder.col38} | บิลซื้อตรงพร้อมใบเสร็จ/กำกับภาษี`
-        : 'บิลซื้อตรงพร้อมใบเสร็จ/กำกับภาษี (ไม่มี DO แยก)'
-    };
-    onUpdateOrder(promoted);
   };
 
   // Distinct dropdown options
@@ -928,8 +744,9 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
   const filteredDestTickets = useMemo(() => {
     return allDestTickets.filter(t => {
-      if (holdingMatchFilter === 'unmatched' && t.linkedViaDocNo) return false;
-      if (holdingMatchFilter === 'matched' && !t.linkedViaDocNo) return false;
+      const isPendingMatch = !t.linkedViaDocNo || t.destMatchStatus === 'auto_flagged';
+      if (holdingMatchFilter === 'unmatched' && !isPendingMatch) return false;
+      if (holdingMatchFilter === 'matched' && isPendingMatch) return false;
       if (holdingMatchFilter === 'auto_flagged' && t.destMatchStatus !== 'auto_flagged' && !hasUnverifiedAutoActions(t)) return false;
       if (holdingSearchTerm.trim()) {
         const q = holdingSearchTerm.toLowerCase();
@@ -939,19 +756,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       return true;
     });
   }, [allDestTickets, holdingMatchFilter, holdingSearchTerm]);
-
-  const filteredTaxInvoices = useMemo(() => {
-    return allTaxInvoices.filter(inv => {
-      if (holdingMatchFilter === 'unmatched' && inv.linkedViaDocNo) return false;
-      if (holdingMatchFilter === 'matched' && !inv.linkedViaDocNo) return false;
-      if (holdingSearchTerm.trim()) {
-        const q = holdingSearchTerm.toLowerCase();
-        const s = `${inv.col1} ${inv.col6} ${inv.col4} ${inv.col8} ${inv.col11} ${inv.linkedViaDocNo || ''} ${inv.referenceDocNo || ''}`.toLowerCase();
-        if (!s.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [allTaxInvoices, holdingMatchFilter, holdingSearchTerm]);
 
   React.useEffect(() => {
     const container = previewContainerRef.current;
@@ -1022,7 +826,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               <div className="text-[11px] text-slate-400 mt-0.5">น้ำหนักสุทธิปลายทางรวม {(allDestTickets.reduce((s, t) => s + (Number(t.col20) || 0), 0) / 1000).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ตัน</div>
             </div>
             <div className="bg-amber-50/50 p-3.5 rounded-xl border border-amber-200 shadow-2xs">
-              <div className="text-xs text-amber-800 font-semibold">⚠️ รอชนบิลเข้า DO</div>
+              <div className="text-xs text-amber-800 font-semibold">⚠️ รอผูกกับชุดรับวางบิล / RR</div>
               <div className="text-2xl font-bold text-amber-700 mt-1 tabular-nums">{unmatchedDestTickets.length} <span className="text-xs font-normal text-amber-700">ใบ</span></div>
               <div className="text-[11px] text-amber-700/80 mt-0.5">ยังไม่ได้ผูกเข้ากับใบส่งของต้นทาง</div>
             </div>
@@ -1159,7 +963,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                          <td className="py-2.5 px-3">
                           {ticket.linkedViaDocNo ? (
                             <div className="flex flex-col items-start gap-1">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
                                 ✅ ชนเข้า DO: {ticket.linkedViaDocNo}
                               </span>
                               {ticket.destMatchStatus === 'auto_flagged' ? (
@@ -1182,7 +986,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                               ) : null}
                             </div>
                           ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
                               ⚠️ รอชนบิลเข้า DO
                             </span>
                           )}
@@ -1267,14 +1071,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               <div className="text-[11px] text-slate-400 mt-0.5">เอกสารการเงินในระบบ</div>
             </div>
             <div className="bg-amber-50/50 p-3.5 rounded-xl border border-amber-200 shadow-2xs">
-              <div className="text-xs text-amber-800 font-semibold">⚠️ รอชนบิลเข้า DO</div>
-              <div className="text-2xl font-bold text-amber-700 mt-1 tabular-nums">{unmatchedTaxInvoices.length} <span className="text-xs font-normal text-amber-700">ใบ</span></div>
-              <div className="text-[11px] text-amber-700/80 mt-0.5">รอผูกเข้ากับใบส่งของ</div>
+              <div className="text-xs text-amber-800 font-semibold">⚠️ ใบที่มียอดค้างชำระ</div>
+              <div className="text-2xl font-bold text-amber-700 mt-1 tabular-nums">{outstandingTaxInvoices.length} <span className="text-xs font-normal text-amber-700">ใบ</span></div>
+              <div className="text-[11px] text-amber-700/80 mt-0.5">ตรวจยอดจากช่องค้างชำระ (36)</div>
             </div>
-            <div className="bg-emerald-50/50 p-3.5 rounded-xl border border-emerald-200 shadow-2xs">
-              <div className="text-xs text-emerald-800 font-semibold">✅ ชนบิลเข้า [โซน 5-6] แล้ว</div>
-              <div className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">{allTaxInvoices.length - unmatchedTaxInvoices.length} <span className="text-xs font-normal text-emerald-700">ใบ</span></div>
-              <div className="text-[11px] text-emerald-700/80 mt-0.5">อัปเดตสถานะการชำระเงินใน DO แล้ว</div>
+            <div className="bg-blue-50/40 p-3.5 rounded-xl border border-blue-200 shadow-2xs">
+              <div className="text-xs text-blue-900 font-semibold">ยอดค้างชำระรวม</div>
+              <div className="text-xl font-bold text-blue-700 mt-1 tabular-nums">
+                {fmtCurrency(outstandingTaxInvoices.reduce((sum, invoice) => sum + (Number(invoice.col36) || 0), 0))}
+              </div>
+              <div className="text-[11px] text-blue-600/80 mt-0.5">รวมจากช่องค้างชำระ (36)</div>
             </div>
             <div className="bg-blue-50/40 p-3.5 rounded-xl border border-blue-200 shadow-2xs">
               <div className="text-xs text-blue-900 font-semibold">มูลค่ารวมตามใบกำกับภาษี</div>
@@ -1293,7 +1099,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                 type="text"
                 value={holdingSearchTerm}
                 onChange={(e) => setHoldingSearchTerm(e.target.value)}
-                placeholder="ค้นหาเลขที่ใบกำกับภาษี, ร้านค้า, รายการสินค้า, เลข DO/PO อ้างอิง..."
+                placeholder="ค้นหาเลขที่ใบกำกับภาษี, ร้านค้า หรือรายการสินค้า..."
                 className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:bg-white outline-none"
               />
             </div>
@@ -1314,7 +1120,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   holdingMatchFilter === 'unmatched' ? 'bg-rose-600 text-white' : 'bg-rose-50 text-rose-800 hover:bg-rose-100'
                 }`}
               >
-                ⚠️ รอชนบิล ({unmatchedTaxInvoices.length})
+                ⚠️ มียอดค้างชำระ ({outstandingTaxInvoices.length})
               </button>
               <button
                 type="button"
@@ -1323,7 +1129,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   holdingMatchFilter === 'matched' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
                 }`}
               >
-                ✅ ชนบิลแล้ว ({allTaxInvoices.length - unmatchedTaxInvoices.length})
+                ไม่มีค้างชำระ ({allTaxInvoices.length - outstandingTaxInvoices.length})
               </button>
             </div>
           </div>
@@ -1342,18 +1148,18 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   <thead className="sticky top-0 z-20 bg-amber-600 text-white font-semibold text-[11px]">
                     <tr>
                       <th className="py-2.5 px-3">เลข TR</th>
-                      <th className="py-2.5 px-3">สถานะการชนบิล</th>
+                      <th className="py-2.5 px-3">สถานะยอดค้างชำระ</th>
                       <th className="py-2.5 px-3">6. เลขที่ใบกำกับภาษี/ใบเสร็จ</th>
                       <th className="py-2.5 px-3">7. วันที่ออกบิล</th>
                       <th className="py-2.5 px-3">8. ร้านค้าผู้ขาย</th>
-                      <th className="py-2.5 px-3">อ้างอิง PO / DO</th>
+                      <th className="py-2.5 px-3">เลขอ้างอิงเอกสาร</th>
                       <th className="py-2.5 px-3">11. รายการสินค้า</th>
                       <th className="py-2.5 px-3 text-right">25. มูลค่าสินค้า</th>
                       <th className="py-2.5 px-3 text-right bg-amber-700 font-bold">29. ยอดรวมทั้งสิ้น</th>
                       <th className="py-2.5 px-3">30. รูปแบบจ่าย</th>
                       <th className="py-2.5 px-3 text-right">35. ชำระแล้ว</th>
                       <th className="py-2.5 px-3 text-right">36. ค้างชำระ</th>
-                      <th className="py-2.5 px-3 text-center">จัดการชนบิล</th>
+                      <th className="py-2.5 px-3 text-center">จัดการเอกสาร</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -1366,14 +1172,16 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                           </button>
                         </td>
                         <td className="py-2.5 px-3">
-                          {inv.linkedViaDocNo ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                              ✅ ชนเข้า DO: {inv.linkedViaDocNo}
+                          {Number(inv.col36) > 0 ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                              ค้างชำระ {fmtCurrency(inv.col36)}
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
-                              ⚠️ รอชนบิลเข้า DO
-                            </span>
+                            <div className="flex flex-col items-start gap-1">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                                ไม่มียอดค้างในช่อง 36
+                              </span>
+                            </div>
                           )}
                         </td>
                         <td className="py-2.5 px-3 font-mono font-bold text-slate-900">{inv.col6 || '-'}</td>
@@ -1388,38 +1196,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                         <td className="py-2.5 px-3 text-right font-mono text-rose-600 font-semibold">{fmtCurrency(inv.col36)}</td>
                         <td className="py-2.5 px-3 text-center">
                           <div className="flex items-center justify-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setMatchingTaxInvoice(inv);
-                                setSelectedDOIdsForTaxMatch([]);
-                              }}
-                              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-md font-bold text-[11px] flex items-center gap-1 shadow-2xs cursor-pointer transition"
-                              title="ชนบิลเพื่อนำยอดชำระเงิน (โซน 6) ไปใส่ในใบส่งของ (DO)"
-                            >
-                              <Link2 className="w-3 h-3" />
-                              <span>{inv.linkedViaDocNo ? 'ชนเพิ่ม/เปลี่ยน DO' : 'ชนบิลเข้า DO'}</span>
-                            </button>
-                            {!inv.linkedViaDocNo && (
-                              <button
-                                type="button"
-                                onClick={() => handlePromoteTaxInvoiceToDirectDO(inv)}
-                                className="px-2 py-1 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded-md font-semibold text-[11px] cursor-pointer transition"
-                                title="สำหรับบิลซื้อสดหน้าร้านที่ไม่มีใบส่งของ (DO) แยก — ส่งเข้าตาราง 39 คอลัมน์โดยตรง"
-                              >
-                                📥 รับของตรง
-                              </button>
-                            )}
-                            {inv.linkedViaDocNo && (
-                              <button
-                                type="button"
-                                onClick={() => handleUnlinkTaxInvoice(inv)}
-                                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md text-[11px] font-medium cursor-pointer transition"
-                                title="ยกเลิกสถานะการชนบิล"
-                              >
-                                ยกเลิกชน
-                              </button>
-                            )}
                             <button
                               type="button"
                               onClick={() => onInspectOrder(inv)}
@@ -1451,12 +1227,12 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
       {/* Main 39-Column DO View (when viewMode === 'orders') */}
       {viewMode === 'orders' && (
         <>
-          {/* Compact Notification Bar if there are unmatched Dest Weighbridge or Tax Invoices in their tabs */}
-          {(unmatchedDestTickets.length > 0 || unmatchedTaxInvoices.length > 0) && (
+          {/* Compact notification for documents requiring follow-up in their own registers */}
+          {(unmatchedDestTickets.length > 0 || outstandingTaxInvoices.length > 0) && (
             <div className="bg-white px-3.5 py-2.5 rounded-xl border border-teal-200 shadow-2xs flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex items-center gap-2 text-slate-700">
                 <Link2 className="w-4 h-4 text-teal-600 shrink-0" />
-                <span>มีเอกสารรอชนบิลเข้ากับใบส่งของ (DO) ในแถบแยก:</span>
+                <span>มีเอกสารที่ต้องติดตามในทะเบียนแยก:</span>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 {unmatchedDestTickets.length > 0 && onSwitchTab && (
@@ -1468,13 +1244,13 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                     <span>🏁 ไปที่แถบ ตั๋วชั่งปลายทาง ({unmatchedDestTickets.length} ใบรอชน)</span>
                   </button>
                 )}
-                {unmatchedTaxInvoices.length > 0 && onSwitchTab && (
+                {outstandingTaxInvoices.length > 0 && onSwitchTab && (
                   <button
                     type="button"
                     onClick={() => onSwitchTab('tax_inv')}
                     className="px-3 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg font-bold text-xs cursor-pointer transition flex items-center gap-1.5"
                   >
-                    <span>🧾 ไปที่แถบ ใบเสร็จ/กำกับภาษี ({unmatchedTaxInvoices.length} ใบรอชน)</span>
+                    <span>🧾 ไปที่แถบ ใบเสร็จ/กำกับภาษี ({outstandingTaxInvoices.length} ใบมียอดค้าง)</span>
                   </button>
                 )}
               </div>
@@ -1953,7 +1729,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                     </th>
                     <th className={`min-w-[110px] bg-slate-100 font-mono text-slate-700 ${cellPadding}`}>4. PO</th>
                     <th className={`min-w-[110px] bg-slate-100 font-mono text-slate-700 ${cellPadding}`}>5. RR</th>
-                    <th className={`min-w-[120px] bg-slate-100 font-mono text-slate-700 ${cellPadding}`}>6. DO / ตั๋ว</th>
+                    <th className={`min-w-[120px] bg-slate-100 font-mono text-slate-700 ${cellPadding}`}>6. DO / ตั๋วต้นทาง</th>
                   </>
                 )}
 
@@ -2059,7 +1835,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const isSelected = selectedIds.includes(row.id);
                   const isUnpaid = Number(row.col36) > 0;
 
-                  // Resolve linked documents for this row (Zones 1-4 & Tax Invoice)
+                  // Resolve PO and weighbridge documents for this row (Zones 1-4)
                   const matchedPO = row.col4
                     ? pos.find(p => isDocNumberMatch(p.poNumber || p.poNo || p.poId, row.col4))
                     : undefined;
@@ -2068,12 +1844,8 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                   const linkedDestTickets = getLinkedDestTicketsForOrder(row);
                   const linkedDestTicket = linkedDestTickets[0];
                   const linkedOriginWeighbridges = pairedOriginWeighbridgesByDoId.get(row.id) || [];
-
-                  const linkedTaxInvoice = allTaxInvoices.find(
-                    inv =>
-                      inv.linkedViaDocNo &&
-                      ((row.col6 && inv.linkedViaDocNo.split(',').some(ref => isDocNumberMatch(ref.trim(), row.col6))) ||
-                        (row.col1 && inv.linkedViaDocNo.split(',').some(ref => isDocNumberMatch(ref.trim(), row.col1))))
+                  const originWeightMismatchWarning = row.autoActionFlags?.find(flag =>
+                    flag.startsWith('⚠️ น้ำหนักตั๋วชั่งต้นทางไม่ตรงกับ DO')
                   );
 
                   // Resolve effective Zone 4 fields so any row showing a Zone 4 document ALWAYS displays its Zone 4 data
@@ -2508,31 +2280,27 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                               </button>
                             )}
 
-                            {/* 4. Purple Bill Icon = ใบรับวางบิล RR / ใบกำกับภาษี (ถ้ามี) */}
-                            {(row.col5 || linkedTaxInvoice) && (
+                            {/* RR is recorded on the DO; tax invoices remain in their own register. */}
+                            {row.col5 && (
                               <button
                                 type="button"
                                 onMouseEnter={(e) => {
-                                  const invDoc = linkedTaxInvoice?.col6 || row.col5 || '-';
                                   openDocHoverPreview(e, {
                                     rowId: row.id,
                                     trNo: row.col1,
-                                    zoneBadge: 'โซน 1 คอลัมน์ 5 / โซน 5-6 (เอกสารวางบิล/ใบเสร็จ)',
-                                    docTypeLabel: linkedTaxInvoice ? 'ใบกำกับภาษี / ใบเสร็จรับเงิน' : 'ใบรับวางบิล (RR)',
-                                    docNo: invDoc,
-                                    driveFileId: linkedTaxInvoice?.image
-                                      ? linkedTaxInvoice.driveFileId
-                                      : row.driveFileId,
-                                    imageUrl: linkedTaxInvoice?.image || row.image,
+                                    zoneBadge: 'โซน 1 คอลัมน์ 5 (เลข RR)',
+                                    docTypeLabel: 'ใบรับวางบิล (RR)',
+                                    docNo: row.col5,
+                                    driveFileId: row.driveFileId,
+                                    imageUrl: row.image,
                                     details: [
-                                      { label: 'เลขที่เอกสาร', value: invDoc, highlight: true },
-                                      { label: 'อ้างอิง DO', value: row.col6 || row.col1 },
-                                      { label: 'ยอดสุทธิรวมภาษี (ช่อง 31)', value: fmtCurrency(row.col31), highlight: true }
+                                      { label: 'เลข RR', value: row.col5, highlight: true },
+                                      { label: 'เลข DO', value: row.col6 || row.col1 }
                                     ]
                                   });
                                 }}
                                 onMouseLeave={closeDocHoverPreview}
-                                onClick={() => onInspectOrder(linkedTaxInvoice || row)}
+                                onClick={() => onInspectOrder(row)}
                                 className="p-1 rounded-md bg-purple-100 hover:bg-purple-200 text-purple-700 border border-purple-300 transition cursor-pointer"
                               >
                                 <FileImage className="w-3.5 h-3.5" />
@@ -2653,7 +2421,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-200 cursor-pointer"
                               >
                                 <FileImage className="w-3 h-3 text-sky-600 shrink-0" />
-                                <span>{row.col6 || '-'}</span>
+                                <span>DO: {row.col6 || '-'}</span>
                               </span>
                               {row.referenceDocNo && row.referenceDocNo !== row.col6 && row.referenceDocNo !== row.col4 && (
                                 <span className="text-[9px] font-normal text-sky-700 bg-sky-50 px-1 rounded border border-sky-200 font-sans" title={`อ้างถึง DO: ${row.referenceDocNo}`}>
@@ -2674,9 +2442,21 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
                                   aria-label={`เปิดตั๋วชั่งต้นทาง ${ticket.col6 || ''} ที่จับคู่กับ DO ${row.col6 || ''}`}
                                 >
                                   <Scale className="w-3 h-3 shrink-0" />
-                                  <span>{ticket.col6 || 'ตั๋วชั่งต้นทาง'}</span>
+                                  <span>ต้นทาง: {ticket.col6 || 'ตั๋วชั่ง'}</span>
                                 </button>
                               ))}
+                              {originWeightMismatchWarning && (
+                                <button
+                                  type="button"
+                                  onClick={() => onInspectOrder(row)}
+                                  className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900 hover:bg-amber-100"
+                                  title={originWeightMismatchWarning}
+                                  aria-label={`ตรวจสอบความต่างน้ำหนักของ DO ${row.col6}: ${originWeightMismatchWarning}`}
+                                >
+                                  <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                  น้ำหนักไม่ตรง
+                                </button>
+                              )}
                             </div>
                           </td>
                         </>
@@ -3083,180 +2863,6 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
               <button
                 type="button"
                 onClick={() => setMatchingDestTicket(null)}
-                className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 hover:bg-slate-50 text-xs font-semibold cursor-pointer transition"
-              >
-                ปิดหน้าต่าง
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Manual Match Tax Invoice / Receipt to Origin DO(s) */}
-      {matchingTaxInvoice && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-5 space-y-4 border border-slate-200">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <div className="flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-amber-600 text-white flex items-center justify-center font-bold text-sm">
-                  🧾
-                </span>
-                <div>
-                  <h3 className="font-bold text-sm text-slate-900">ชนบิลใบเสร็จรับเงิน / ใบกำกับภาษี เข้ากับใบส่งของ (DO)</h3>
-                  <p className="text-[11px] text-slate-500">
-                    เลือกใบส่งของ (DO) 1 ใบ หรือหลายใบ เพื่อนำข้อมูลราคาและสถานะการชำระเงินไปเติมใน [โซน 5 และ โซน 6]
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  setMatchingTaxInvoice(null);
-                  setSelectedDOIdsForTaxMatch([]);
-                }}
-                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Source Tax Invoice Summary Card */}
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs space-y-1.5">
-              <div className="font-bold text-amber-950 flex items-center justify-between">
-                <span>เลขที่ใบกำกับภาษี/ใบเสร็จ: {matchingTaxInvoice.col6 || matchingTaxInvoice.col1}</span>
-                <span className="font-mono text-amber-800">วันที่: {matchingTaxInvoice.col7}</span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px] text-amber-900">
-                <div>
-                  <span className="text-amber-700 block">ร้านค้าผู้ขาย:</span>
-                  <span className="font-bold text-xs">{matchingTaxInvoice.col8 || '-'}</span>
-                </div>
-                <div>
-                  <span className="text-amber-700 block">ยอดรวมสุทธิ (29):</span>
-                  <span className="font-mono font-bold text-amber-950">{fmtCurrency(matchingTaxInvoice.col29)}</span>
-                </div>
-                <div>
-                  <span className="text-amber-700 block">ชำระแล้ว (35):</span>
-                  <span className="font-mono text-emerald-700 font-bold">{fmtCurrency(matchingTaxInvoice.col35)}</span>
-                </div>
-                <div>
-                  <span className="text-amber-700 block">ค้างชำระ (36):</span>
-                  <span className="font-mono text-rose-700 font-bold">{fmtCurrency(matchingTaxInvoice.col36)}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Candidate DOs List (supports single 1-click or multi-select) */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-800">
-                  เลือกใบส่งของ (DO) ที่ต้องการนำยอดการเงินไปอัปเดต ({candidateDOsForTaxMatch.length} รายการ):
-                </span>
-                {selectedDOIdsForTaxMatch.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => handleExecuteManualMatchTaxInvoice(selectedDOIdsForTaxMatch)}
-                    className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-bold text-xs shadow-2xs cursor-pointer transition"
-                  >
-                    ยืนยันชนบิลกับ {selectedDOIdsForTaxMatch.length} DO ที่เลือก
-                  </button>
-                )}
-              </div>
-
-              {candidateDOsForTaxMatch.length === 0 ? (
-                <div className="p-6 text-center bg-slate-50 rounded-xl border border-slate-200 text-slate-500 text-xs space-y-2">
-                  <p>ยังไม่มีใบส่งของ (DO) ในตาราง 39 คอลัมน์ให้ชนบิล</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handlePromoteTaxInvoiceToDirectDO(matchingTaxInvoice);
-                      setMatchingTaxInvoice(null);
-                    }}
-                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold text-xs cursor-pointer transition"
-                  >
-                    📥 บรรจุใบกำกับภาษีนี้เป็นรายการรับของตรงในตาราง 39 คอลัมน์ (กรณีไม่มี DO แยก)
-                  </button>
-                </div>
-              ) : (
-                <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-                  {candidateDOsForTaxMatch.map((cand) => {
-                    const isSameVendor = cand.col8 && matchingTaxInvoice.col8 &&
-                      cand.col8.trim().toLowerCase() === matchingTaxInvoice.col8.trim().toLowerCase();
-                    const isChecked = selectedDOIdsForTaxMatch.includes(cand.id);
-
-                    return (
-                      <div
-                        key={cand.id}
-                        className={`p-3 rounded-xl border transition flex flex-wrap items-center justify-between gap-2 text-xs ${
-                          isChecked
-                            ? 'bg-amber-50 border-amber-400 ring-1 ring-amber-300'
-                            : isSameVendor
-                            ? 'bg-emerald-50/50 border-emerald-200'
-                            : 'bg-white border-slate-200 hover:border-slate-300'
-                        }`}
-                      >
-                        <label className="flex items-start gap-2.5 cursor-pointer flex-1">
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => {
-                              setSelectedDOIdsForTaxMatch(prev =>
-                                prev.includes(cand.id) ? prev.filter(x => x !== cand.id) : [...prev, cand.id]
-                              );
-                            }}
-                            className="mt-1 rounded text-amber-600 focus:ring-amber-500 cursor-pointer"
-                          />
-                          <div className="space-y-0.5">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-bold font-mono text-slate-900">{cand.col1}</span>
-                              <span className="text-slate-600 font-mono font-semibold">DO: {cand.col6 || '-'}</span>
-                              {cand.col4 && <span className="text-indigo-600 font-mono text-[11px]">PO: {cand.col4}</span>}
-                              {isSameVendor && (
-                                <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                                  ⭐ ร้านค้าตรงกัน
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-slate-600 flex flex-wrap gap-x-3 gap-y-0.5">
-                              <span>วันที่: {cand.col7}</span>
-                              <span>ร้าน: <strong>{cand.col8}</strong></span>
-                              <span>สินค้า: {cand.col11} ({cand.col22} {cand.col23})</span>
-                              <span className="font-mono font-semibold text-blue-800">ยอดใน DO: {fmtCurrency(cand.col29)}</span>
-                            </div>
-                          </div>
-                        </label>
-
-                        <button
-                          type="button"
-                          onClick={() => handleExecuteManualMatchTaxInvoice([cand.id])}
-                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold text-xs transition cursor-pointer shadow-2xs flex items-center gap-1.5"
-                        >
-                          <Link2 className="w-3.5 h-3.5" />
-                          <span>ชนเข้า DO นี้ทันที</span>
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-between pt-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={() => {
-                  handlePromoteTaxInvoiceToDirectDO(matchingTaxInvoice);
-                  setMatchingTaxInvoice(null);
-                }}
-                className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-300 rounded-xl text-xs font-semibold cursor-pointer transition"
-              >
-                📥 บรรจุเป็นบิลรับของตรง (กรณีซื้อสดไม่มี DO แยก)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMatchingTaxInvoice(null);
-                  setSelectedDOIdsForTaxMatch([]);
-                }}
                 className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 hover:bg-slate-50 text-xs font-semibold cursor-pointer transition"
               >
                 ปิดหน้าต่าง

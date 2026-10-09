@@ -100,7 +100,7 @@ const TAB_META: Record<MainTabType, { label: string; subtitle: string; badgeText
   },
   tax_inv: {
     label: 'ใบเสร็จ/กำกับภาษี',
-    subtitle: 'รายการบิลการเงิน/ใบกำกับภาษี (โซน 5–6) สำหรับชนบิลเข้ากับ DO หรือรับของสดหน้าร้าน',
+    subtitle: 'ทะเบียนใบเสร็จ/ใบกำกับภาษีแยกจาก DO และ RR พร้อมตรวจยอดค้างชำระ',
     badgeText: 'เอกสารการเงิน & บัญชี',
     badgeColor: 'bg-amber-50 text-amber-800 border-amber-200'
   },

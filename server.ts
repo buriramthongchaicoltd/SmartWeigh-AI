@@ -5118,6 +5118,19 @@ app.post('/api/orders/confirm-prepared-do', async (req: Request, res: Response) 
       ) {
         return res.status(409).json({ success: false, error: 'ข้อมูลตั๋วชั่งที่จับคู่ไม่ครบหรือไม่ตรงกับ DO' });
       }
+      const { data: existingOriginTickets, error: existingOriginTicketsError } = await client
+        .from('orders')
+        .select('id')
+        .eq('doc_type', 'weighbridge')
+        .eq('matched_origin_do_id', orderId)
+        .neq('id', String(candidatePairedOrderRow.id));
+      if (existingOriginTicketsError) throw existingOriginTicketsError;
+      if (existingOriginTickets?.length) {
+        return res.status(409).json({
+          success: false,
+          error: 'DO นี้มีตั๋วชั่งต้นทางที่จับคู่อยู่แล้ว (กำหนด 1 DO ต่อ 1 ตั๋ว)'
+        });
+      }
       const { data: pairedInboxRow, error: pairedInboxError } = await client
         .from('line_inbox')
         .select('status,drive_file_id,extracted_data')
@@ -5205,6 +5218,21 @@ app.post('/api/database/save-record', async (req: Request, res: Response) => {
       await assertNoDuplicateDocumentWrite(client, targetTable, dbRow);
     }
     if (targetTable === 'orders') {
+      if (dbRow.doc_type === 'weighbridge' && dbRow.matched_origin_do_id) {
+        const { data: existingOriginTickets, error: existingOriginTicketsError } = await client
+          .from('orders')
+          .select('id')
+          .eq('doc_type', 'weighbridge')
+          .eq('matched_origin_do_id', String(dbRow.matched_origin_do_id))
+          .neq('id', String(dbRow.id));
+        if (existingOriginTicketsError) throw existingOriginTicketsError;
+        if (existingOriginTickets?.length) {
+          return res.status(409).json({
+            success: false,
+            error: 'DO นี้มีตั๋วชั่งต้นทางที่จับคู่อยู่แล้ว (กำหนด 1 DO ต่อ 1 ตั๋ว)'
+          });
+        }
+      }
       if (authenticatedUser) await preserveRestrictedOrderFields(client, authenticatedUser, [dbRow]);
       if (originTicketCorrection) {
         if (!await validateOriginTicketReclassification(client, dbRow)) {
@@ -5346,15 +5374,79 @@ app.post('/api/database/save-batch', async (req: Request, res: Response) => {
     const rows = records.map(mapper);
     if (targetTable === 'orders' || targetTable === 'purchase_orders') {
       const existingIds = new Set<string>();
+      const existingOriginDoByTicketId = new Map<string, string | null>();
       const newDocumentKeys = new Set<string>();
       const rowIds = rows.map(row => String(row.id || '')).filter(Boolean);
       for (let index = 0; index < rowIds.length; index += 500) {
-        const { data, error } = await client
-          .from(targetTable)
-          .select('id')
-          .in('id', rowIds.slice(index, index + 500));
+        const batchIds = rowIds.slice(index, index + 500);
+        const { data, error } = targetTable === 'orders'
+          ? await client.from('orders').select('id,matched_origin_do_id').in('id', batchIds)
+          : await client.from('purchase_orders').select('id').in('id', batchIds);
         if (error) throw new Error(`ตรวจสอบรายการเดิมก่อนบันทึกชุดข้อมูลไม่สำเร็จ: ${error.message}`);
-        for (const existingRow of data || []) existingIds.add(String(existingRow.id));
+        for (const existingRow of data || []) {
+          const existingId = String(existingRow.id);
+          existingIds.add(existingId);
+          if (targetTable === 'orders') {
+            const matchedOriginDoId =
+              'matched_origin_do_id' in existingRow &&
+              typeof existingRow.matched_origin_do_id === 'string'
+                ? existingRow.matched_origin_do_id
+                : null;
+            existingOriginDoByTicketId.set(
+              existingId,
+              matchedOriginDoId
+            );
+          }
+        }
+      }
+
+      if (targetTable === 'orders') {
+        const incomingById = new Map(rows.filter(row => row.id).map(row => [String(row.id), row]));
+        const changedOriginPairs = rows.filter(row =>
+          row.id &&
+          row.doc_type === 'weighbridge' &&
+          row.matched_origin_do_id &&
+          existingOriginDoByTicketId.get(String(row.id)) !== String(row.matched_origin_do_id)
+        );
+        const newPairByDoId = new Map<string, string>();
+        for (const row of changedOriginPairs) {
+          const doId = String(row.matched_origin_do_id);
+          const ticketId = String(row.id);
+          const existingTicketId = newPairByDoId.get(doId);
+          if (existingTicketId && existingTicketId !== ticketId) {
+            return res.status(409).json({
+              success: false,
+              error: 'บันทึกชุดข้อมูลไม่ได้: DO หนึ่งใบจับคู่ตั๋วชั่งต้นทางได้เพียงหนึ่งใบ'
+            });
+          }
+          newPairByDoId.set(doId, ticketId);
+        }
+
+        const changedDoIds = Array.from(newPairByDoId.keys());
+        for (let index = 0; index < changedDoIds.length; index += 500) {
+          const doIdChunk = changedDoIds.slice(index, index + 500);
+          const { data: existingPairs, error: existingPairsError } = await client
+            .from('orders')
+            .select('id,matched_origin_do_id')
+            .eq('doc_type', 'weighbridge')
+            .in('matched_origin_do_id', doIdChunk);
+          if (existingPairsError) throw new Error(`ตรวจสอบคู่ตั๋วชั่งต้นทางก่อนบันทึกชุดข้อมูลไม่สำเร็จ: ${existingPairsError.message}`);
+          for (const existingPair of existingPairs || []) {
+            const doId = String(existingPair.matched_origin_do_id);
+            const ticketId = String(existingPair.id);
+            const incomingTicket = incomingById.get(ticketId);
+            const remainsPairedToDo =
+              !incomingTicket ||
+              (incomingTicket.doc_type === 'weighbridge' &&
+                String(incomingTicket.matched_origin_do_id || '') === doId);
+            if (newPairByDoId.get(doId) !== ticketId && remainsPairedToDo) {
+              return res.status(409).json({
+                success: false,
+                error: 'บันทึกชุดข้อมูลไม่ได้: DO นี้มีตั๋วชั่งต้นทางที่จับคู่อยู่แล้ว'
+              });
+            }
+          }
+        }
       }
 
       for (const row of rows) {
@@ -6731,21 +6823,21 @@ app.post('/api/drive/sync-tax-invoice-links', async (req: Request, res: Response
     const invoiceId = typeof req.body?.invoiceId === 'string' ? req.body.invoiceId.trim() : '';
     const fileId = typeof req.body?.fileId === 'string' ? req.body.fileId.trim() : '';
     const bundles = Array.isArray(req.body?.bundles) ? req.body.bundles : [];
-    if (!['confirm_match', 'revoke_match'].includes(action) || !invoiceId || !fileId || bundles.length > 50) {
-      return res.status(400).json({ success: false, error: 'ข้อมูลสำหรับจัดการทางลัดใบกำกับภาษีไม่ถูกต้อง' });
+    if (action !== 'revoke_match' || !invoiceId || !fileId || bundles.length > 50) {
+      return res.status(400).json({ success: false, error: 'อนุญาตเฉพาะการล้างทางลัดใบกำกับภาษีเดิม' });
     }
     if (bundles.length === 0) {
       return res.json({ success: true, folders: [] });
     }
 
     const client = getSupabaseClient();
-    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสอบการจับคู่ใบกำกับภาษี' });
+    if (!client) return res.status(503).json({ success: false, error: 'ฐานข้อมูลยังไม่พร้อมตรวจสอบใบกำกับภาษีเดิม' });
     const { data: invoice, error: invoiceError } = await client
       .from('orders')
       .select('id,doc_type,status,drive_file_id,col6,col1')
       .eq('id', invoiceId)
       .maybeSingle();
-    if (invoiceError) throw new Error(`ตรวจสอบใบกำกับภาษีไม่สำเร็จ: ${invoiceError.message}`);
+    if (invoiceError) throw new Error(`ตรวจสอบใบกำกับภาษีเดิมไม่สำเร็จ: ${invoiceError.message}`);
     if (!invoice || invoice.doc_type !== 'tax_invoice' || invoice.status !== 'verified' || invoice.drive_file_id !== fileId) {
       return res.status(409).json({ success: false, error: 'ใบกำกับภาษีไม่ได้ยืนยันแล้ว หรือ Drive ID ไม่ตรงกับฐานข้อมูล' });
     }
@@ -6758,7 +6850,7 @@ app.post('/api/drive/sync-tax-invoice-links', async (req: Request, res: Response
       .from('orders')
       .select('id,doc_type,status,col1,col6')
       .in('id', requestedIds);
-    if (doError) throw new Error(`ตรวจสอบ DO ปลายทางไม่สำเร็จ: ${doError.message}`);
+    if (doError) throw new Error(`ตรวจสอบ DO ที่มีทางลัดเก่าไม่สำเร็จ: ${doError.message}`);
     const doById = new Map((doRows || []).map(row => [String(row.id), row]));
     const requestedBundles: Array<{ trNumber: string; doNumber: string }> = [];
     const seenTrNumbers = new Set<string>();
