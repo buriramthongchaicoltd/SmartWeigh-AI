@@ -6502,7 +6502,7 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
           action: 'get_image',
           fileId,
           rootFolderId: driveCfg.rootFolderId
-        });
+        }, AbortSignal.timeout(20000));
         if (!result?.success || typeof result.base64Data !== 'string') {
           throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
         }

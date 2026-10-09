@@ -48,17 +48,27 @@ const getDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | 
     : imageUrl || undefined;
 };
 
+const getGoogleDriveResourceKeyParam = (imageUrl?: string | null) => {
+  try {
+    const resourceKey = new URL(imageUrl || '').searchParams.get('resourcekey');
+    return resourceKey ? `&resourcekey=${encodeURIComponent(resourceKey)}` : '';
+  } catch {
+    return '';
+  }
+};
+
 const getDocPreviewFallbackImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
   const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
   if (!fileId) return undefined;
-  return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+  const resourceKeyParam = getGoogleDriveResourceKeyParam(imageUrl);
+  return `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}${resourceKeyParam}`;
 };
 
 const getDocPreviewAlternateImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
   const fileId = driveFileId || extractGoogleDriveFileId(imageUrl);
-  return fileId
-    ? `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1200`
-    : undefined;
+  if (!fileId) return undefined;
+  const resourceKeyParam = getGoogleDriveResourceKeyParam(imageUrl);
+  return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1200${resourceKeyParam}`;
 };
 
 const getPreloadableDocPreviewImageUrl = (driveFileId?: string | null, imageUrl?: string | null) => {
@@ -209,7 +219,7 @@ export const TableView39Cols: React.FC<TableView39ColsProps> = ({
 
     const requestSignal = AbortSignal.any([
       controller.signal,
-      AbortSignal.timeout(50000)
+      AbortSignal.timeout(25000)
     ]);
     fetch(sourceUrl, { signal: requestSignal })
       .then(async response => {
