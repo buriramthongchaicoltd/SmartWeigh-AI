@@ -641,6 +641,7 @@ export default function App() {
   const [verifyOrderData, setVerifyOrderData] = useState<Partial<OrderRecord> | null>(null);
   const [verifyImage, setVerifyImage] = useState<string | null>(null);
   const [verifyStoreSuggestion, setVerifyStoreSuggestion] = useState<Partial<StoreMerchant> | undefined>(undefined);
+  const verifyImageRequestIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!authenticatedUser || activeTab !== 'contractor_billing') return;
@@ -2002,6 +2003,7 @@ export default function App() {
 
   // Switch from VerifyModal to POEditModal when user selects or detects PO
   const handleSwitchVerifyToPO = (draftPO: Partial<PurchaseOrder>) => {
+    verifyImageRequestIdRef.current = null;
     setIsVerifyOpen(false);
     setVerifyOrderData(null);
     setVerifyImage(null);
@@ -4536,6 +4538,7 @@ export default function App() {
 
   // Inspect order in verification modal
   const handleInspectOrder = (order: OrderRecord) => {
+    verifyImageRequestIdRef.current = null;
     setVerifyOrderData(order);
     setVerifyImage(order.image || null);
     const matchingStore = stores.find(s => s.name === order.col8 || s.id === order.storeId);
@@ -5432,30 +5435,19 @@ export default function App() {
       image: item.image
     };
 
-    // Resolve image: fetch จาก server on-demand เสมอเมื่อไม่มี item.image (ไม่เปิด tab ใหม่)
-    let resolvedImage = item.image || '';
-    if (!resolvedImage || resolvedImage.length < 50) {
-      try {
-        showToast('กำลังโหลดรูปภาพบิล...', 'info');
-        const resp = await fetch(`/api/line/inbox/image/${item.id}`);
-        const data = await resp.json();
-        if (data.success && data.image && data.image.length > 50) {
-          // Got base64 from LINE API — use directly in modal
-          resolvedImage = data.image;
-        } else if (data.driveWebViewLink) {
-          // Convert Drive view link to direct img URL (shows in <img> tag)
-          const match = (data.driveWebViewLink as string).match(/\/d\/([a-zA-Z0-9_-]+)/);
-          if (match) resolvedImage = `https://drive.google.com/uc?export=view&id=${match[1]}`;
-        }
-      } catch {
-        // silent fallback
-      }
-    }
-    // Last resort: convert item.driveWebViewLink to direct img URL
-    if ((!resolvedImage || resolvedImage.length < 10) && item.driveWebViewLink) {
-      const match = item.driveWebViewLink.match(/\/d\/([a-zA-Z0-9_-]+)/);
-      if (match) resolvedImage = `https://drive.google.com/uc?export=view&id=${match[1]}`;
-    }
+    const driveImageUrl = item.driveFileId
+      ? `/api/drive/image/${encodeURIComponent(item.driveFileId)}`
+      : item.driveWebViewLink
+        ? (() => {
+            const match = item.driveWebViewLink!.match(/\/d\/([a-zA-Z0-9_-]+)/);
+            return match ? `https://drive.google.com/uc?export=view&id=${match[1]}` : '';
+          })()
+        : '';
+    let resolvedImage = item.image && item.image.length > 50
+      ? item.image
+      : driveImageUrl;
+    const imageRequestId = item.id;
+    verifyImageRequestIdRef.current = imageRequestId;
 
     if (item.detectedDocType === 'purchase_order') {
       const draftPO = {
@@ -5464,13 +5456,43 @@ export default function App() {
       };
       setEditingPO(draftPO);
       setIsPOEditOpen(true);
-      return;
+    } else {
+      setVerifyOrderData({ ...dataWithLineMeta, image: resolvedImage || undefined });
+      setVerifyImage(resolvedImage || null);
+      setVerifyStoreSuggestion(item.storeSuggestion);
+      setIsVerifyOpen(true);
     }
 
-    setVerifyOrderData({ ...dataWithLineMeta, image: resolvedImage || undefined });
-    setVerifyImage(resolvedImage || null);
-    setVerifyStoreSuggestion(item.storeSuggestion);
-    setIsVerifyOpen(true);
+    // Loading the document photo is secondary; the corresponding check form is already open.
+    if (item.detectedDocType !== 'purchase_order' && (!item.image || item.image.length <= 50)) {
+      try {
+        const resp = await fetch(`/api/line/inbox/image/${encodeURIComponent(item.id)}`, {
+          signal: AbortSignal.timeout(15000)
+        });
+        const data = await resp.json();
+        if (data.success && data.image && data.image.length > 50) {
+          resolvedImage = data.image;
+        } else if (typeof data.driveWebViewLink === 'string') {
+          const match = data.driveWebViewLink.match(/\/d\/([a-zA-Z0-9_-]+)/);
+          if (match) resolvedImage = `https://drive.google.com/uc?export=view&id=${match[1]}`;
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name !== 'TimeoutError' && error.name !== 'AbortError') {
+          console.warn(`[LINE Inbox] Could not load image for ${item.id}:`, error);
+        }
+      }
+      if (
+        resolvedImage !== (item.image || driveImageUrl) &&
+        verifyImageRequestIdRef.current === imageRequestId
+      ) {
+        setVerifyImage(resolvedImage || null);
+      }
+    }
+  };
+
+  const handleCloseVerifyModal = () => {
+    verifyImageRequestIdRef.current = null;
+    setIsVerifyOpen(false);
   };
 
 
@@ -5909,7 +5931,7 @@ export default function App() {
         pos={pos}
         existingOrders={orders}
         lineInboxItems={lineInbox}
-        onClose={() => setIsVerifyOpen(false)}
+        onClose={handleCloseVerifyModal}
         onSaveOrder={handleSaveOrder}
         onCorrectAndPairOriginWeighbridge={handleCorrectAndPairOriginWeighbridge}
         onSwitchToPO={handleSwitchVerifyToPO}
