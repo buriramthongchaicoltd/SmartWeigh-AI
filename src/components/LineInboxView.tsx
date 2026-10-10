@@ -2097,8 +2097,8 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
           aria-modal="true"
           aria-labelledby="line-do-bundle-title"
         >
-          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+          <div className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
               <h3 id="line-do-bundle-title" className="flex items-center gap-2 text-sm font-bold text-slate-900">
                 <Link2 className="h-4 w-4 text-emerald-700" />
                 ตรวจ DO / จับคู่ตั๋วชั่ง (ถ้าเป็นเที่ยวเดียวกัน)
@@ -2113,7 +2113,7 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <div className="space-y-4 p-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
               <section className="rounded-xl border border-sky-200 bg-sky-50 p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 text-xs text-sky-950">
@@ -2138,57 +2138,62 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
               </div>
 
               {pendingOriginWeighbridgeItems.length > 0 ? (
-                <fieldset className="space-y-2">
+                <fieldset>
                   <legend className="mb-2 text-xs font-bold text-slate-800">
                     ตั๋วชั่งต้นทางที่ยังรอตรวจ ({pendingOriginWeighbridgeItems.length})
                   </legend>
-                  {pendingOriginWeighbridgeItems.map(ticket => {
-                    const gross = Number(ticket.extractedData.col13) || 0;
-                    const tare = Number(ticket.extractedData.col14) || 0;
-                    const net = Number(ticket.extractedData.col15) || Math.max(0, gross - tare);
-                    return (
-                      <div
-                        key={ticket.id}
-                        className={`flex items-start gap-3 rounded-xl border p-3 ${
-                          pairingDeliveryTicketId === ticket.id
-                            ? 'border-emerald-400 bg-emerald-50'
-                            : 'border-slate-200 bg-white'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="line-do-origin-ticket"
-                          value={ticket.id}
-                          checked={pairingDeliveryTicketId === ticket.id}
-                          onChange={() => {
-                            setPairingDeliveryTicketId(ticket.id);
-                          }}
-                          className="mt-1 h-4 w-4 accent-emerald-700"
-                          aria-label={`เลือกตั๋วชั่ง ${ticket.extractedData.col6 || 'ไม่ทราบเลขที่'}`}
-                        />
-                        <div className="min-w-0 flex-1 text-xs text-slate-800">
-                          <div className="font-bold">
-                            ตั๋วชั่ง {ticket.extractedData.col6 || '(ไม่ทราบเลขที่)'}
-                          </div>
-                          <div className="mt-1 text-slate-600">
-                            {ticket.extractedData.col8 || 'ไม่ทราบร้าน'} · {ticket.extractedData.col10 || 'ไม่ทราบทะเบียนรถ'} · สุทธิ {net.toLocaleString()} กก.
-                          </div>
-                          <div className="mt-1 text-[11px] text-slate-500">
-                            ผู้ส่ง {ticket.lineSenderName} · {new Date(ticket.receivedAt).toLocaleString('th-TH')}
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void handleOpenImagePreview(ticket)}
-                          className="inline-flex min-h-10 shrink-0 items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
-                          aria-label={`ดูภาพตั๋วชั่ง ${ticket.extractedData.col6 || ''}`}
+                  <div
+                    role="region"
+                    aria-label="รายการตั๋วชั่งต้นทางที่รอตรวจ"
+                    tabIndex={0}
+                    className="max-h-[min(38vh,22rem)] space-y-2 overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-slate-50 p-2 pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600"
+                  >
+                    {pendingOriginWeighbridgeItems.map(ticket => {
+                      const gross = Number(ticket.extractedData.col13) || 0;
+                      const tare = Number(ticket.extractedData.col14) || 0;
+                      const net = Number(ticket.extractedData.col15) || Math.max(0, gross - tare);
+                      return (
+                        <div
+                          key={ticket.id}
+                          className={`flex items-start gap-3 rounded-xl border p-3 ${
+                            pairingDeliveryTicketId === ticket.id
+                              ? 'border-emerald-400 bg-emerald-50'
+                              : 'border-slate-200 bg-white'
+                          }`}
                         >
-                          <Eye className="h-4 w-4" />
-                          ดูภาพ
-                        </button>
-                      </div>
-                    );
-                  })}
+                          <input
+                            type="radio"
+                            name="line-do-origin-ticket"
+                            value={ticket.id}
+                            checked={pairingDeliveryTicketId === ticket.id}
+                            onChange={() => setPairingDeliveryTicketId(ticket.id)}
+                            className="mt-1 h-4 w-4 accent-emerald-700"
+                            aria-label={`เลือกตั๋วชั่ง ${ticket.extractedData.col6 || 'ไม่ทราบเลขที่'}`}
+                          />
+                          <div className="min-w-0 flex-1 text-xs text-slate-800">
+                            <div className="font-bold">
+                              ตั๋วชั่ง {ticket.extractedData.col6 || '(ไม่ทราบเลขที่)'}
+                            </div>
+                            <div className="mt-1 text-slate-600">
+                              {ticket.extractedData.col8 || 'ไม่ทราบร้าน'} · {ticket.extractedData.col10 || 'ไม่ทราบทะเบียนรถ'} · สุทธิ {net.toLocaleString()} กก.
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-500">
+                              ผู้ส่ง {ticket.lineSenderName} · {new Date(ticket.receivedAt).toLocaleString('th-TH')}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void handleOpenImagePreview(ticket)}
+                            className="inline-flex min-h-10 shrink-0 items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                            aria-label={`ดูภาพตั๋วชั่ง ${ticket.extractedData.col6 || ''}`}
+                          >
+                            <Eye className="h-4 w-4" />
+                            ดูภาพ
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </fieldset>
               ) : (
                 <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-700">
@@ -2202,28 +2207,28 @@ export const LineInboxView: React.FC<LineInboxViewProps> = ({
                 </p>
               )}
 
-              <div className="flex justify-end gap-2 border-t border-slate-200 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setPairingDeliveryOrder(null)}
-                  disabled={isPairingDeliveryOrder}
-                  className="min-h-10 rounded-lg border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  ยกเลิก
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleConfirmDeliveryOrderBundle()}
-                  disabled={isPairingDeliveryOrder}
-                  className="min-h-10 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isPairingDeliveryOrder
-                    ? 'กำลังดำเนินการ...'
-                    : pairingDeliveryTicketId
-                      ? 'จับคู่และตรวจรับ DO'
-                      : 'ตรวจรับ DO แยก'}
-                </button>
-              </div>
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-slate-200 bg-white px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setPairingDeliveryOrder(null)}
+                disabled={isPairingDeliveryOrder}
+                className="min-h-10 rounded-lg border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmDeliveryOrderBundle()}
+                disabled={isPairingDeliveryOrder}
+                className="min-h-10 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isPairingDeliveryOrder
+                  ? 'กำลังดำเนินการ...'
+                  : pairingDeliveryTicketId
+                    ? 'จับคู่และตรวจรับ DO'
+                    : 'ตรวจรับ DO แยก'}
+              </button>
             </div>
           </div>
         </div>
