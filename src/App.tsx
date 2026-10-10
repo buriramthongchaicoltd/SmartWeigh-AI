@@ -584,7 +584,7 @@ export default function App() {
         const response = await fetch('/api/auth/me');
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const result = await response.json();
-        if (!result.authenticated && authenticatedUser) await handleLogout();
+        if (result.authenticated === false && authenticatedUser) await handleLogout();
         else authSessionWarningRef.current = false;
       } catch (error) {
         console.error('[Auth] Session check failed:', error);

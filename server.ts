@@ -342,6 +342,7 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
     return authenticated
       ? res.json({
         success: true,
+        authenticated: true,
         user: authenticated.session.user,
         mustChangePassword: authenticated.session.firstPasswordChangePending
       })
