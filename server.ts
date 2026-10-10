@@ -6507,15 +6507,43 @@ async function getOrCreateSubfolder(accessToken: string, parentFolderId: string,
 // GOOGLE DRIVE API ENDPOINTS
 // ----------------------------------------------------------------------------
 
+async function loadDriveImageFromGas(
+  driveCfg: ServerDriveConfig,
+  fileId: string
+): Promise<{ contentType: string; imageBytes: Buffer }> {
+  if (!driveCfg.gasWebAppUrl) {
+    throw new Error('ยังไม่ได้ตั้งค่า Google Apps Script Web App URL');
+  }
+  const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
+    action: 'get_image',
+    fileId,
+    rootFolderId: driveCfg.rootFolderId
+  }, AbortSignal.timeout(20000));
+  if (!result?.success || typeof result.base64Data !== 'string') {
+    throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
+  }
+  const contentType = String(result.mimeType || '');
+  if (!contentType.startsWith('image/')) {
+    throw new Error('ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ');
+  }
+  const imageBytes = Buffer.from(result.base64Data, 'base64');
+  if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
+    throw new Error(imageBytes.length ? 'รูปภาพมีขนาดใหญ่เกิน 15 MB' : 'ข้อมูลรูปภาพว่างเปล่า');
+  }
+  return { contentType, imageBytes };
+}
+
 app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
   const fileId = String(req.params.fileId || '');
   if (!/^[a-zA-Z0-9_-]{5,200}$/.test(fileId)) {
     return res.status(400).json({ success: false, error: 'รหัสไฟล์ Google Drive ไม่ถูกต้อง' });
   }
 
+  let driveCfgForFallback: ServerDriveConfig | undefined;
   try {
     await restoreConfigsFromSupabase();
     const driveCfg = getStoredDriveConfig();
+    driveCfgForFallback = driveCfg;
     if (!driveCfg.isEnabled) {
       return res.status(503).json({ success: false, error: 'Google Drive ถูกปิดใช้งาน' });
     }
@@ -6532,22 +6560,7 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
         return res.status(503).json({ success: false, error: 'ยังไม่ได้ตั้งค่า Google Apps Script Web App URL' });
       }
       try {
-        const result = await callGasDriveApi(driveCfg.gasWebAppUrl, {
-          action: 'get_image',
-          fileId,
-          rootFolderId: driveCfg.rootFolderId
-        }, AbortSignal.timeout(20000));
-        if (!result?.success || typeof result.base64Data !== 'string') {
-          throw new Error(result?.error || 'Google Apps Script ไม่สามารถอ่านภาพจาก Google Drive ได้');
-        }
-        const contentType = String(result.mimeType || '');
-        if (!contentType.startsWith('image/')) {
-          return res.status(415).json({ success: false, error: 'ไฟล์ที่อ้างอิงไม่ใช่รูปภาพ' });
-        }
-        const imageBytes = Buffer.from(result.base64Data, 'base64');
-        if (!imageBytes.length || imageBytes.length > 15 * 1024 * 1024) {
-          return res.status(imageBytes.length ? 413 : 422).json({ success: false, error: 'ขนาดหรือข้อมูลรูปภาพไม่ถูกต้อง' });
-        }
+        const { contentType, imageBytes } = await loadDriveImageFromGas(driveCfg, fileId);
         res.setHeader('Content-Type', contentType);
         res.setHeader('Cache-Control', 'private, max-age=300');
         return res.send(imageBytes);
@@ -6634,10 +6647,28 @@ app.get('/api/drive/image/:fileId', async (req: Request, res: Response) => {
     return res.send(imageBytes);
   } catch (error) {
     const originalMessage = error instanceof Error ? error.message : String(error);
-    const message = /ไม่รู้จัก action:\s*get_image/i.test(originalMessage)
+    let message = originalMessage;
+    if (driveCfgForFallback?.connectionMode !== 'gas' && driveCfgForFallback?.gasWebAppUrl) {
+      try {
+        const { contentType, imageBytes } = await loadDriveImageFromGas(driveCfgForFallback, fileId);
+        console.warn('[Drive Image] Drive API failed; GAS image fallback succeeded', {
+          fileId,
+          message: originalMessage
+        });
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'private, max-age=300');
+        return res.send(imageBytes);
+      } catch (fallbackError) {
+        const fallbackMessage = fallbackError instanceof Error
+          ? fallbackError.message
+          : String(fallbackError);
+        message = `${originalMessage}; Google Apps Script fallback failed: ${fallbackMessage}`;
+      }
+    }
+    message = /ไม่รู้จัก action:\s*get_image/i.test(message)
       ? 'Google Apps Script ที่ใช้งานยังไม่มี action อ่านภาพ กรุณาอัปเดต source และ deploy Web App เป็น version ใหม่'
-      : originalMessage;
-    console.error('[Drive Image] Failed to load image', { fileId, message: originalMessage });
+      : message;
+    console.error('[Drive Image] Failed to load image', { fileId, message });
     return res.status(502).json({ success: false, error: `โหลดภาพจาก Google Drive ไม่สำเร็จ: ${message}` });
   }
 });
